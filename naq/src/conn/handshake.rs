@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::Creds;
 use crate::server::Shared;
 
 /// A client's options. Before its `CONNECT` and for fields it leaves out,
@@ -48,11 +49,14 @@ struct Connect {
     headers: Option<bool>,
     protocol: Option<i32>,
     no_responders: Option<bool>,
+    user: Option<String>,
+    pass: Option<String>,
+    auth_token: Option<String>,
 }
 
 impl ClientOpts {
-    /// Applies the JSON of a `CONNECT`.
-    pub(super) fn apply(&mut self, json: &[u8]) -> Result<(), serde_json::Error> {
+    /// Applies the JSON of a `CONNECT`, and returns the credentials in it.
+    pub(super) fn apply(&mut self, json: &[u8]) -> Result<Creds, serde_json::Error> {
         let c: Connect = serde_json::from_slice(json)?;
         let keep = |new: Option<bool>, old| new.unwrap_or(old);
         *self = ClientOpts {
@@ -63,7 +67,11 @@ impl ClientOpts {
             protocol: c.protocol.unwrap_or(self.protocol),
             no_responders: keep(c.no_responders, self.no_responders),
         };
-        Ok(())
+        Ok(Creds {
+            user: c.user,
+            pass: c.pass,
+            token: c.auth_token,
+        })
     }
 }
 
@@ -80,15 +88,17 @@ struct Info<'a> {
     max_payload: usize,
     client_id: u64,
     client_ip: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    auth_required: bool,
     #[serde(rename = "connect_info", skip_serializing_if = "std::ops::Not::not")]
     bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_account: Option<&'a str>,
 }
 
-/// Appends the `INFO` for client `id` at `ip`. `bound` marks the one that
-/// follows the first `PONG`, which names the client's account.
-pub(super) fn info(shared: &Shared, id: u64, ip: &str, bound: bool, out: &mut Vec<u8>) {
+/// Appends the `INFO` for client `id` at `ip`. The one that follows the
+/// first `PONG` names the client's account, `bound`.
+pub(super) fn info(shared: &Shared, id: u64, ip: &str, bound: Option<&str>, out: &mut Vec<u8>) {
     let info = Info {
         server_id: &shared.server_id,
         server_name: &shared.opts.server_name,
@@ -101,8 +111,14 @@ pub(super) fn info(shared: &Shared, id: u64, ip: &str, bound: bool, out: &mut Ve
         max_payload: shared.opts.max_payload,
         client_id: id,
         client_ip: ip,
-        bound,
-        remote_account: bound.then_some("$G"),
+        // Before the CONNECT, a client need not authenticate if it may
+        // connect as the no_auth_user.
+        auth_required: shared
+            .auth
+            .as_ref()
+            .is_some_and(|a| bound.is_some() || !a.open()),
+        bound: bound.is_some(),
+        remote_account: bound,
     };
     // Cannot fail: no maps, no fallible serializers.
     let json = serde_json::to_vec(&info).unwrap_or_default();

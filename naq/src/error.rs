@@ -27,6 +27,9 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    /// Options that contradict themselves.
+    #[error("bad options: {0}")]
+    Options(String),
     /// A configuration does not parse, or holds what naq cannot use.
     #[error("{at}: {reason}")]
     Config {

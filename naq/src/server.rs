@@ -8,6 +8,7 @@ use std::time::Duration;
 use zzq_tokio::transport::{Listener, TransportOptions};
 use zzq_tokio::{Config, Context, Endpoint, LaneHandle};
 
+use crate::auth::{self, Auth};
 use crate::error::io;
 use crate::{Error, Options, conn, lane};
 
@@ -29,6 +30,10 @@ pub(crate) struct Shared {
     pub(crate) server_id: String,
     /// The way into each lane.
     pub(crate) lanes: Box<[lane::LaneTx]>,
+    /// Account names by id, `$G` first.
+    pub(crate) accounts: Box<[String]>,
+    /// What clients must authenticate with, if anything.
+    pub(crate) auth: Option<Auth>,
     next_client: AtomicU64,
 }
 
@@ -54,9 +59,13 @@ impl Server {
     ///
     /// # Errors
     ///
+    /// [`Error::Options`] if `opts` contradict themselves,
     /// [`Error::Lanes`] if the lane threads cannot start,
     /// [`Error::Listen`] if the client port cannot be bound.
     pub fn start(opts: &Options) -> Result<Server, Error> {
+        auth::validate(opts).map_err(Error::Options)?;
+        let accounts = auth::accounts(opts);
+        let auth = Auth::new(opts, &accounts);
         let ctx = Context::with_config(&Config {
             io_threads: lanes(opts.lanes),
             name: "naq".into(),
@@ -75,6 +84,8 @@ impl Server {
             addr,
             server_id: server_id(),
             lanes: txs.into_boxed_slice(),
+            accounts,
+            auth,
             next_client: AtomicU64::new(1),
         });
         let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();

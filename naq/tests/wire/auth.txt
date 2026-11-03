@@ -1,0 +1,56 @@
+# Users with passwords, plain and bcrypt.
+#! authorization {
+#!   users: [
+#!     {user: alice, password: secret}
+#!     {user: bob, password: $2a$04$1T4k/YIPXYwdgkVCV6pBSu0KIYKeTXfik2OX.4q41EVxAGuX2ra06}
+#!   ]
+#! }
+
+# INFO says authentication is required. No credentials: refused.
+a> CONNECT {"verbose":false}
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< -ERR 'Authorization Violation'
+a< (closed)
+
+# A wrong password, or a user that does not exist.
+b> CONNECT {"verbose":false,"user":"alice","pass":"nope"}
+b< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< -ERR 'Authorization Violation'
+b< (closed)
+c> CONNECT {"verbose":false,"user":"carl","pass":"secret"}
+c< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c< -ERR 'Authorization Violation'
+c< (closed)
+
+# The right passwords.
+d> CONNECT {"user":"alice","pass":"secret"}
+d> PING
+d< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d< +OK
+d< PONG
+e> CONNECT {"verbose":false,"user":"bob","pass":"passwordpw"}
+e> PING
+e< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+e< PONG
+f> CONNECT {"verbose":false,"user":"bob","pass":"passwordpx"}
+f< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+f< -ERR 'Authorization Violation'
+f< (closed)
+
+# Nothing before the CONNECT.
+g> PING
+g< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+g< -ERR 'Authorization Violation'
+g< (closed)
+h> SUB foo 1
+h< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+h< -ERR 'Authorization Violation'
+h< (closed)
+
+# Users share the global account.
+d> SUB foo 1
+d< +OK
+e> PUB foo 2
+e> hi
+d< MSG foo 1 2
+d< hi

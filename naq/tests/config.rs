@@ -121,3 +121,103 @@ fn errors_name_the_file() {
     assert!(std::error::Error::source(&e).is_some());
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+#[test]
+fn users_tokens_and_accounts_come_from_their_blocks() {
+    let o: Options = "authorization {\n  user: u\n  password: p\n  timeout: 0.5\n  users: [{user: v, pass: q}]\n}\n\
+                      accounts {\n  A { users: [{username: a, password: x}] }\n  B {}\n}\n\
+                      no_auth_user: a\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.accounts, ["A", "B"]);
+    assert_eq!(o.auth_timeout, Duration::from_millis(500));
+    assert_eq!(o.no_auth_user.as_deref(), Some("a"));
+    let users: Vec<_> = o
+        .users
+        .iter()
+        .map(|u| {
+            let naq::Login::Password { user, password } = &u.login else {
+                panic!("{u:?}")
+            };
+            (user.as_str(), password.as_str(), u.account.as_deref())
+        })
+        .collect();
+    assert_eq!(
+        users,
+        [("v", "q", None), ("u", "p", None), ("a", "x", Some("A"))]
+    );
+    let t: Options = "authorization { token: abc, timeout: \"3s\" }\naccounts [X, Y]\n"
+        .parse()
+        .unwrap();
+    assert_eq!(t.token.as_deref(), Some("abc"));
+    assert_eq!(t.auth_timeout, Duration::from_secs(3));
+    assert_eq!(t.accounts, ["X", "Y"]);
+}
+
+#[test]
+fn auth_that_contradicts_itself_is_an_error() {
+    for (text, reason) in [
+        (
+            "authorization { token: t, users: [{user: a}] }\n",
+            "a token cannot go with users",
+        ),
+        (
+            "no_auth_user: nobody\n",
+            "no_auth_user \"nobody\" is not a user",
+        ),
+        (
+            "authorization { users: [{user: a}, {user: a}] }\n",
+            "user \"a\" twice",
+        ),
+        (
+            "authorization { password: p }\n",
+            "authorization: password without user",
+        ),
+        (
+            "authorization { bogus: 1 }\n",
+            "authorization: bogus: not supported",
+        ),
+        (
+            "authorization { users: [{nkey: UABC}] }\n",
+            "users: nkey: not supported",
+        ),
+        (
+            "authorization { users: [{password: p}] }\n",
+            "users: a user needs a name",
+        ),
+        ("authorization { users: 1 }\n", "users: expected a list"),
+        ("authorization { users: [1] }\n", "users: expected a map"),
+        (
+            "authorization { timeout: true }\n",
+            "authorization: timeout: expected seconds or a duration",
+        ),
+        ("authorization: 1\n", "authorization: expected a map"),
+        (
+            "accounts { $G {} }\n",
+            "accounts: \"$G\" is a reserved account",
+        ),
+        ("accounts [A, A]\n", "accounts: \"A\" twice"),
+        (
+            "accounts { A { exports: [] } }\n",
+            "accounts: A: exports: not supported",
+        ),
+        ("accounts [1]\n", "accounts: expected names"),
+        ("accounts: 1\n", "accounts: expected a map or a list"),
+        ("accounts { A: 1 }\n", "accounts: expected a map"),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_server_refuses_options_that_contradict_themselves() {
+    let o = Options {
+        token: Some("t".into()),
+        no_auth_user: Some("x".into()),
+        ..Options::default()
+    };
+    assert!(matches!(naq::Server::start(&o), Err(Error::Options(_))));
+}

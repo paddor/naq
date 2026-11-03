@@ -1,0 +1,63 @@
+# Accounts keep their subjects apart.
+#! accounts {
+#!   A { users: [{user: a1, password: p}, {user: a2, password: p}] }
+#!   B { users: [{user: b1, password: p}] }
+#! }
+#! no_auth_user: a2
+
+a> CONNECT {"verbose":false,"user":"a1","pass":"p","protocol":1}
+a> SUB foo 1
+a> PING
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< PONG
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","connect_info":true,"headers":true,"max_payload":1048576,"proto":1,"remote_account":"A"}
+b> CONNECT {"verbose":false,"user":"b1","pass":"p","protocol":1}
+b> SUB foo 1
+b> PING
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< PONG
+b< INFO {"auth_required":true,"client_ip":"127.0.0.1","connect_info":true,"headers":true,"max_payload":1048576,"proto":1,"remote_account":"B"}
+c> CONNECT {"verbose":false,"user":"a2","pass":"p"}
+c> PUB foo 3
+c> one
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< MSG foo 1 3
+a< one
+b> PUB foo 3
+b> two
+b< MSG foo 1 3
+b< two
+
+# A client without credentials connects as no_auth_user, into its account.
+d> CONNECT {"verbose":false,"protocol":1}
+d> PING
+d> PUB foo 5
+d> three
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d< PONG
+d< INFO {"auth_required":true,"client_ip":"127.0.0.1","connect_info":true,"headers":true,"max_payload":1048576,"proto":1,"remote_account":"A"}
+a< MSG foo 1 5
+a< three
+
+# Wildcards and queues stay in their account too.
+a> SUB > q 2
+b> SUB > q 2
+b> PUB bar 4
+b> four
+b< MSG bar 2 4
+b< four
+
+# With a no_auth_user, a client may even leave out the CONNECT.
+e> SUB foo 1
+e> PING
+e< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+e< +OK
+e< PONG
+c> PUB foo 4
+c> five
+a< MSG foo 1 4
+a< five
+a< MSG foo 2 4
+a< five
+e< MSG foo 1 4
+e< five

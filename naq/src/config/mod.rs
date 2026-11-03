@@ -1,5 +1,6 @@
 //! `nats-server` configuration files, the part of them naq serves.
 
+mod auth;
 mod parse;
 
 use std::path::Path;
@@ -69,11 +70,15 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
         at: at(line, file),
         reason,
     })?;
+    crate::auth::validate(&opts).map_err(|reason| Error::Config {
+        at: file.map_or_else(|| "config".into(), |f| f.display().to_string()),
+        reason,
+    })?;
     Ok(opts)
 }
 
 /// A key's value could not be used: its line and why.
-type Bad = (u32, String);
+pub(super) type Bad = (u32, String);
 
 fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
     for (key, item) in map {
@@ -108,6 +113,11 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "ping_interval" => o.ping_interval = duration(item).map_err(|e| bad(&e))?,
             "ping_max" => o.max_pings_out = int(item).ok_or_else(|| bad("expected a count"))?,
             "write_deadline" => o.write_deadline = duration(item).map_err(|e| bad(&e))?,
+            "authorization" => auth::authorization(o, item)?,
+            "accounts" => auth::accounts(o, item)?,
+            "no_auth_user" => {
+                o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
+            }
             k if IGNORED.contains(&k) => {}
             _ => return Err(bad("not supported")),
         }
@@ -115,7 +125,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
     Ok(())
 }
 
-fn string(item: &Item) -> Option<String> {
+pub(super) fn string(item: &Item) -> Option<String> {
     match &item.value {
         Value::Str(s) => Some(s.clone()),
         _ => None,
@@ -153,7 +163,7 @@ fn listen(item: &Item) -> Option<(Option<String>, u16)> {
 }
 
 /// A duration as Go writes it (`2m`, `1.5s`, `1h30m`); a number is seconds.
-fn duration(item: &Item) -> Result<Duration, String> {
+pub(super) fn duration(item: &Item) -> Result<Duration, String> {
     match &item.value {
         Value::Int(n) => u64::try_from(*n)
             .map(Duration::from_secs)

@@ -539,3 +539,51 @@ fn a_subscriber_whose_writes_stall_past_the_deadline_is_closed() {
     assert!(rest.len() < 256 * (64 << 10), "{} bytes", rest.len());
     p.flush();
 }
+
+fn with_users(lanes: usize) -> Server {
+    server_with(Options {
+        lanes,
+        accounts: vec!["A".into(), "B".into()],
+        users: ["a1", "a2", "b1"]
+            .iter()
+            .map(|u| naq::User {
+                login: naq::Login::Password {
+                    user: (*u).into(),
+                    password: "p".into(),
+                },
+                account: Some(if u.starts_with('a') { "A" } else { "B" }.into()),
+            })
+            .collect(),
+        auth_timeout: Duration::from_millis(100),
+        ..Options::default()
+    })
+}
+
+#[test]
+fn a_client_that_does_not_authenticate_in_time_is_closed() {
+    let s = with_users(1);
+    let (mut c, info) = Client::raw(&s);
+    assert!(info.contains(r#""auth_required":true"#), "{info}");
+    assert_eq!(c.raw_line(), "-ERR 'Authentication Timeout'");
+    assert_eq!(c.rest(), "");
+}
+
+#[test]
+fn accounts_keep_their_subjects_apart_across_lanes() {
+    let s = with_users(3);
+    let login = |u: &str| format!(r#"{{"verbose":false,"user":"{u}","pass":"p"}}"#);
+    let mut a1 = Client::new(&s, &login("a1"));
+    let mut b1 = Client::new(&s, &login("b1"));
+    let mut a2 = Client::new(&s, &login("a2"));
+    for c in [&mut a1, &mut b1] {
+        c.send("SUB t 1\r\nSUB done 2\r\nPING\r\n");
+        c.expect("PONG");
+    }
+    a2.send("PUB t 1\r\na\r\nPUB done 0\r\n\r\n");
+    a2.flush();
+    assert_eq!(count_until_done(&mut a1), 1);
+    // b1 sees its own message first: nothing came over from account A.
+    b1.send("PUB t 1\r\nb\r\n");
+    b1.expect("MSG t 1 1");
+    b1.expect("b");
+}

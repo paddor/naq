@@ -40,6 +40,8 @@ pub(crate) struct Client {
     pub(crate) headers: Cell<bool>,
     /// Subscriptions by SID.
     pub(crate) subs: RefCell<FxHashMap<Box<[u8]>, Sub>>,
+    /// Its account's id.
+    pub(crate) account: Cell<u32>,
     closed: Cell<bool>,
     /// Wakes the writer.
     wake: Notify,
@@ -57,6 +59,7 @@ impl Client {
             dirty: Cell::new(false),
             headers: Cell::new(false),
             subs: RefCell::default(),
+            account: Cell::new(crate::auth::GLOBAL),
             closed: Cell::new(false),
             wake: Notify::new(),
             drained: Notify::new(),
@@ -77,11 +80,11 @@ impl Client {
         let Some(sub) = self.subs.borrow_mut().remove(sid) else {
             return;
         };
-        let queue = sub.queue.as_deref();
-        lane.index
+        let (queue, account) = (sub.queue.as_deref(), self.account.get());
+        lane.index(account)
             .borrow_mut()
             .remove(&sub.subject, queue, self.id, sid);
-        lane.announce(&sub.subject, queue, false);
+        lane.announce(account, &sub.subject, queue, false);
     }
 
     /// Closes the connection once the writer wrote what is queued.
@@ -128,6 +131,10 @@ enum Close {
     Refused(&'static str),
     /// It left too many `PING`s unanswered.
     Stale,
+    /// It did not authenticate.
+    Auth,
+    /// It did not authenticate in time.
+    AuthTimeout,
 }
 
 /// The reader's side of a connection.
@@ -151,6 +158,8 @@ struct Conn {
     ping: ping::Pinger,
     /// Sent messages, subscriptions or a `PING` in the current read.
     busy: bool,
+    /// Until it authenticates: when its time to runs out.
+    auth_by: Option<tokio::time::Instant>,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -200,13 +209,15 @@ where
         &lane.shared,
         client.id,
         &ip,
-        false,
+        None,
         &mut client.out.borrow_mut(),
     );
     let opts = &lane.shared.opts;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, opts.write_deadline));
     client.wake_writer();
-    let ping = ping::Pinger::new(tokio::time::Instant::now(), opts.ping_interval);
+    let now = tokio::time::Instant::now();
+    let ping = ping::Pinger::new(now, opts.ping_interval);
+    let auth_by = lane.shared.auth.as_ref().map(|a| now + a.timeout);
     let fwd = (0..lane.lanes()).map(|_| Out::default()).collect();
     let mut conn = Conn {
         lane,
@@ -219,6 +230,7 @@ where
         stage: Stage::Fresh,
         ping,
         busy: false,
+        auth_by,
     };
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
@@ -247,8 +259,10 @@ impl Conn {
         }
         self.stage = Stage::Ready;
         if self.opts.protocol >= 1 {
+            let shared = &self.lane.shared;
+            let account = &shared.accounts[self.client.account.get() as usize];
             let mut out = self.client.out.borrow_mut();
-            handshake::info(&self.lane.shared, self.client.id, &self.ip, true, &mut out);
+            handshake::info(shared, self.client.id, &self.ip, Some(account), &mut out);
         }
     }
 
@@ -286,6 +300,8 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::Parse(ParseError::ControlLine) => Some("maximum control line exceeded"),
         Close::Refused(text) => Some(text),
         Close::Stale => Some("Stale Connection"),
+        Close::Auth => Some("Authorization Violation"),
+        Close::AuthTimeout => Some("Authentication Timeout"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked

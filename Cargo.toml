@@ -42,6 +42,7 @@ bytes = { version = "1.12", default-features = false }
 memchr = { version = "2.7", default-features = false }
 rustc-hash = "2.1"
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
+bcrypt = { version = "0.17", default-features = false, features = ["std"] }
 tokio = { version = "1.53", default-features = false }
 zzq-tokio = { version = "=0.6.0", default-features = false }
 thiserror = { version = "2.0", default-features = false }

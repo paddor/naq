@@ -33,6 +33,44 @@ pub struct Options {
     /// Longest a write to a client may take; past it, the client is closed
     /// as a slow consumer (`write_deadline`).
     pub write_deadline: Duration,
+    /// Accounts besides the global one, `$G`, by name (`accounts`). Each has
+    /// subjects of its own.
+    pub accounts: Vec<String>,
+    /// Who may connect (`authorization`, the `users` of `accounts`). With no
+    /// users and no token, anyone may, into `$G`.
+    pub users: Vec<User>,
+    /// The token clients give instead of users (`authorization { token }`),
+    /// plain or a bcrypt hash.
+    pub token: Option<String>,
+    /// The user a client that gives no credentials connects as
+    /// (`no_auth_user`).
+    pub no_auth_user: Option<String>,
+    /// How long a client has to authenticate, from the moment it connects
+    /// (`authorization { timeout }`).
+    pub auth_timeout: Duration,
+}
+
+/// A user that may connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct User {
+    /// How it proves who it is.
+    pub login: Login,
+    /// The account it uses; `None` for `$G`.
+    pub account: Option<String>,
+}
+
+/// How a user proves who it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Login {
+    /// `user` and `pass` in its `CONNECT`. The password here is plain or a
+    /// bcrypt hash (`$2a$...`).
+    Password {
+        /// The user name.
+        user: String,
+        /// The password, or its hash.
+        password: String,
+    },
 }
 
 impl Default for Options {
@@ -48,6 +86,11 @@ impl Default for Options {
             ping_interval: Duration::from_secs(120),
             max_pings_out: 2,
             write_deadline: Duration::from_secs(10),
+            accounts: Vec::new(),
+            users: Vec::new(),
+            token: None,
+            no_auth_user: None,
+            auth_timeout: Duration::from_secs(2),
         }
     }
 }

@@ -53,6 +53,16 @@ Notable changes to naq. The format follows
   The binary takes `-c FILE`; its other flags override the file.
 - `naq`: `-ERR 'maximum control line exceeded'` in the case `nats-server`
   sends it.
+- `naq`: accounts and authentication. `Options::accounts` and the
+  `accounts` block add accounts beside `$G`, each with subjects of its
+  own on every lane. `Options::users` (`User`, `Login::Password`), the
+  `authorization` block (`user`, `password`, `users`, `token`,
+  `timeout`) and the `users` of accounts say who may connect; passwords
+  are plain or bcrypt hashes, compared off the lanes. `no_auth_user` lets
+  clients without credentials in as that user. Without valid credentials
+  a client gets `-ERR 'Authorization Violation'`; without a `CONNECT`
+  within the timeout, `-ERR 'Authentication Timeout'`. `INFO` has
+  `auth_required`, and the one after the first `PONG` the account's name.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

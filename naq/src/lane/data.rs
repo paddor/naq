@@ -76,6 +76,8 @@ impl Fwd {
 pub(crate) struct Batch {
     pub(crate) chunk: Bytes,
     pub(crate) out: Out,
+    /// The publisher's account.
+    pub(crate) account: u32,
 }
 
 /// The publishes of one read for one other lane.
@@ -149,7 +151,7 @@ impl Lane {
             headers: f.headers.get_some(&b.chunk),
             payload: f.payload.get(&b.chunk),
         };
-        let index = self.index.borrow();
+        let index = self.index(b.account).borrow();
         let Some(found) = index.matches(p.subject) else {
             return;
         };

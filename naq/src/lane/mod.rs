@@ -36,10 +36,11 @@ thread_local! {
 /// Changes for a lane from the others.
 #[derive(Debug)]
 pub(crate) enum Control {
-    /// Lane `lane` gained or lost a subscription to `subject`, in
-    /// `queue` if given.
+    /// Lane `lane` gained or lost a subscription to `subject` of
+    /// `account`, in `queue` if given.
     Interest {
         lane: usize,
+        account: u32,
         subject: Box<[u8]>,
         queue: Option<Box<[u8]>>,
         add: bool,
@@ -85,8 +86,8 @@ type Spent = (Rc<Client>, Box<[u8]>);
 pub(crate) struct Lane {
     pub(crate) id: usize,
     pub(crate) shared: Arc<Shared>,
-    /// Interest of every client of the server.
-    pub(crate) index: RefCell<Index>,
+    /// Interest of every client of the server, by account.
+    indexes: Box<[RefCell<Index>]>,
     /// Clients with output their writers have not been woken for.
     dirty: RefCell<Vec<Rc<Client>>>,
     /// Subscriptions that got their maximum of messages, by client and SID.
@@ -96,6 +97,12 @@ pub(crate) struct Lane {
 }
 
 impl Lane {
+    /// The interest in `account`, an id of the server's.
+    #[inline]
+    pub(crate) fn index(&self, account: u32) -> &RefCell<Index> {
+        &self.indexes[account as usize]
+    }
+
     /// Number of lanes of the server.
     pub(crate) fn lanes(&self) -> usize {
         self.shared.lanes.len()
@@ -125,12 +132,13 @@ impl Lane {
     }
 
     /// Tells every other lane that this one gained or lost a subscription
-    /// to `subject`, in `queue` if given.
-    pub(crate) fn announce(&self, subject: &[u8], queue: Option<&[u8]>, add: bool) {
+    /// to `subject` of `account`, in `queue` if given.
+    pub(crate) fn announce(&self, account: u32, subject: &[u8], queue: Option<&[u8]>, add: bool) {
         for (i, tx) in self.shared.lanes.iter().enumerate() {
             if i != self.id {
                 tx.control.push(Control::Interest {
                     lane: self.id,
+                    account,
                     subject: subject.into(),
                     queue: queue.map(Into::into),
                     add,
@@ -164,11 +172,12 @@ impl Lane {
         match c {
             Control::Interest {
                 lane,
+                account,
                 subject,
                 queue,
                 add,
             } => {
-                self.index
+                self.index(account)
                     .borrow_mut()
                     .remote(&subject, queue.as_deref(), lane, add);
             }
@@ -185,8 +194,10 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
     let key = (shared.id, id);
     let lane = Rc::new(Lane {
         id,
+        indexes: (0..shared.accounts.len())
+            .map(|_| RefCell::default())
+            .collect(),
         shared,
-        index: RefCell::default(),
         dirty: RefCell::default(),
         spent: RefCell::default(),
         rng: Cell::new(seed()),

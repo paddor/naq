@@ -11,6 +11,7 @@ use tokio::time::Instant;
 
 use super::ping::Tick;
 use super::{Client, Close, Conn, Stage};
+use crate::auth::{Check, Creds, Pending};
 use crate::index::{Entry, Few, Found, Index, Interest};
 use crate::lane::{Batch, Lane, Out, Queued};
 
@@ -31,12 +32,15 @@ enum Stop {
     /// At a `PING` that must wait until every lane has this client's
     /// subscriptions.
     Fence,
+    /// After a `CONNECT` whose password must be compared off the lane.
+    Verify(Box<Pending>),
 }
 
 /// What to do after an operation.
 enum Step {
     Next,
     Fence,
+    Verify(Box<Pending>),
 }
 
 impl Conn {
@@ -58,15 +62,9 @@ impl Conn {
             self.lane.flush();
             self.lane.expire();
             self.ship(&mut buf, at).await;
-            let need = match stop {
-                Ok(Stop::More(need)) => need,
-                Ok(Stop::Fence) => {
-                    self.lane.fence().await;
-                    self.unfenced = false;
-                    self.pong();
-                    self.lane.flush();
-                    continue;
-                }
+            let need = match self.on_stop(stop).await {
+                Ok(Some(need)) => need,
+                Ok(None) => continue,
                 Err(close) => return close,
             };
             if let Some(sub) = self.stalled.take() {
@@ -79,8 +77,11 @@ impl Conn {
                 return Close::Kicked;
             }
             make_room(&mut buf, need);
-            if timer.deadline() != self.ping.next {
-                timer.as_mut().reset(self.ping.next);
+            let due = self
+                .auth_by
+                .map_or(self.ping.next, |t| t.min(self.ping.next));
+            if timer.deadline() != due {
+                timer.as_mut().reset(due);
             }
             // Cancel-safe: a dropped read took no bytes, a dropped `notified`
             // passes its wake on, and the timer keeps its deadline.
@@ -88,7 +89,7 @@ impl Conn {
                 biased;
                 () = self.client.stop.notified() => return Close::Kicked,
                 () = &mut timer => {
-                    if let Some(close) = self.ping_tick() {
+                    if let Some(close) = self.timer_fired() {
                         return close;
                     }
                 }
@@ -98,6 +99,30 @@ impl Conn {
                 },
             }
         }
+    }
+
+    /// Acts on why parsing stopped: `Some` is reading on, for an operation of
+    /// that many bytes if known; `None` is parsing again first.
+    async fn on_stop(&mut self, stop: Result<Stop, Close>) -> Result<Option<Option<usize>>, Close> {
+        match stop? {
+            Stop::More(need) => return Ok(Some(need)),
+            Stop::Fence => {
+                self.lane.fence().await;
+                self.unfenced = false;
+                self.pong();
+            }
+            Stop::Verify(p) => self.verify(*p).await?,
+        }
+        self.lane.flush();
+        Ok(None)
+    }
+
+    /// The timer fired: the end of the time to authenticate, or a `PING`.
+    fn timer_fired(&mut self) -> Option<Close> {
+        if self.auth_by.is_some_and(|t| t <= Instant::now()) {
+            return Some(Close::AuthTimeout);
+        }
+        self.ping_tick()
     }
 
     /// Acts on the operations at the start of `buf`. Returns the bytes they
@@ -112,6 +137,7 @@ impl Conn {
                     match step {
                         Ok(Step::Next) => {}
                         Ok(Step::Fence) => return (at, Ok(Stop::Fence)),
+                        Ok(Step::Verify(p)) => return (at, Ok(Stop::Verify(p))),
                         Err(close) => return (at, Err(close)),
                     }
                 }
@@ -137,6 +163,7 @@ impl Conn {
             let batch = Batch {
                 chunk: chunk.clone(),
                 out,
+                account: self.client.account.get(),
             };
             self.lane.ship(to, batch).await;
         }
@@ -146,6 +173,9 @@ impl Conn {
     // remains small enough.
     #[inline]
     fn handle(&mut self, op: ClientOp<'_>, buf: &[u8]) -> Result<Step, Close> {
+        if self.auth_by.is_some() && !matches!(op, ClientOp::Connect(_)) {
+            self.without_connect()?;
+        }
         match op {
             ClientOp::Pub(p) => {
                 if p.headers.is_some() && !self.opts.headers {
@@ -176,7 +206,7 @@ impl Conn {
                 self.pong();
             }
             ClientOp::Pong => self.ping.pong(),
-            ClientOp::Connect(json) => self.connect(json)?,
+            ClientOp::Connect(json) => return self.connect(json),
             _ => return Err(Close::Parse(ParseError::UnknownOp)),
         }
         Ok(Step::Next)
@@ -187,7 +217,7 @@ impl Conn {
     /// other lane with interest. `p` lies in `buf`.
     #[inline]
     fn publish(&mut self, p: &Pub<'_>, buf: &[u8]) {
-        let index = self.lane.index.borrow();
+        let index = self.lane.index(self.client.account.get()).borrow();
         let Some(found) = index.matches(p.subject) else {
             self.nobody_got(&index, p);
             return;
@@ -238,9 +268,63 @@ impl Conn {
 
     /// Applies a `CONNECT`.
     #[inline(never)]
-    fn connect(&mut self, json: &[u8]) -> Result<(), Close> {
-        self.opts.apply(json).map_err(|_| Close::Connect)?;
+    fn connect(&mut self, json: &[u8]) -> Result<Step, Close> {
+        let creds = self.opts.apply(json).map_err(|_| Close::Connect)?;
         self.client.headers.set(self.opts.headers);
+        if let Some(auth) = &self.lane.shared.auth {
+            match auth.check(&creds) {
+                Check::Pass(account) => self.bind(account),
+                Check::Fail => return Err(Close::Auth),
+                Check::Bcrypt(p) => return Ok(Step::Verify(Box::new(p))),
+            }
+        }
+        self.connected()?;
+        Ok(Step::Next)
+    }
+
+    /// An operation before any `CONNECT`: the client is the `no_auth_user`,
+    /// if there is one; else it is refused.
+    #[cold]
+    #[inline(never)]
+    fn without_connect(&mut self) -> Result<(), Close> {
+        let auth = self.lane.shared.auth.as_ref();
+        match auth.map(|a| a.check(&Creds::default())) {
+            Some(Check::Pass(account)) => {
+                self.bind(account);
+                Ok(())
+            }
+            _ => Err(Close::Auth),
+        }
+    }
+
+    /// Compares a password with its bcrypt hash off the lane, then finishes
+    /// the `CONNECT`.
+    async fn verify(&mut self, p: Pending) -> Result<(), Close> {
+        let account = p.account;
+        let holds = tokio::task::spawn_blocking(move || p.holds()).await;
+        if !matches!(holds, Ok(true)) {
+            return Err(Close::Auth);
+        }
+        self.bind(account);
+        self.connected()
+    }
+
+    /// Puts the client into `account`. Subscriptions in another it had are
+    /// dropped, as a new `CONNECT` drops them in `nats-server`.
+    fn bind(&mut self, account: u32) {
+        self.auth_by = None;
+        if self.client.account.get() == account {
+            return;
+        }
+        let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
+        for sid in sids {
+            self.client.unsubscribe(&self.lane, &sid);
+        }
+        self.client.account.set(account);
+    }
+
+    /// The rest of a `CONNECT`, from a client that is who it says.
+    fn connected(&mut self) -> Result<(), Close> {
         if self.stage == Stage::Fresh {
             self.stage = Stage::Connected;
         }
@@ -284,11 +368,12 @@ impl Conn {
         };
         self.client.subs.borrow_mut().insert(s.sid.into(), sub);
         let entry = Entry::new(self.client.clone(), s.sid);
+        let account = self.client.account.get();
         self.lane
-            .index
+            .index(account)
             .borrow_mut()
             .insert(s.subject, s.queue, entry);
-        self.lane.announce(s.subject, s.queue, true);
+        self.lane.announce(account, s.subject, s.queue, true);
         self.unfenced = self.lane.lanes() > 1;
         self.ok();
     }
@@ -302,7 +387,7 @@ impl Conn {
             let Some(sub) = subs.get(u.sid) else {
                 return;
             };
-            let index = self.lane.index.borrow();
+            let index = self.lane.index(self.client.account.get()).borrow();
             let queue = sub.queue.as_deref();
             if let Some(e) = index.find(&sub.subject, queue, self.client.id, u.sid)
                 && max > e.delivered.get()

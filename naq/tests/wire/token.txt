@@ -1,0 +1,20 @@
+# A token instead of users.
+#! authorization { token: s3cr3t }
+
+a> CONNECT {"verbose":false,"auth_token":"s3cr3t","protocol":1}
+a> PING
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< PONG
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","connect_info":true,"headers":true,"max_payload":1048576,"proto":1,"remote_account":"$G"}
+b> CONNECT {"verbose":false,"auth_token":"s3cr3"}
+b< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< -ERR 'Authorization Violation'
+b< (closed)
+c> CONNECT {"verbose":false}
+c< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c< -ERR 'Authorization Violation'
+c< (closed)
+d> CONNECT {"verbose":false,"user":"x","pass":"s3cr3t"}
+d< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d< -ERR 'Authorization Violation'
+d< (closed)

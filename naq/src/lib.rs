@@ -4,9 +4,8 @@
 //! and a full copy of the server's interest, so a message is routed without
 //! locks. New connections go to the lanes in turn.
 //!
-//! Subjects with wildcards, queue groups and `UNSUB` maximums work as in
-//! `nats-server`. So far there is one account, plain TCP and no
-//! authentication.
+//! Subjects with wildcards, queue groups, `UNSUB` maximums, accounts and
+//! users work as in `nats-server`. So far over plain TCP.
 //!
 //! # Examples
 //!
@@ -31,6 +30,7 @@
 
 #![forbid(unsafe_code)]
 
+mod auth;
 mod config;
 mod conn;
 mod error;
@@ -41,5 +41,5 @@ mod options;
 mod server;
 
 pub use error::Error;
-pub use options::Options;
+pub use options::{Login, Options, User};
 pub use server::Server;
