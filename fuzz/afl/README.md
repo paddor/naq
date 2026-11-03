@@ -5,7 +5,7 @@ the workspace, so AFL's instrumentation stays out of normal builds.
 
 | Target | Input | Checks |
 | --- | --- | --- |
-| `client_wire` | What a client sends | no panic, operations take what they say, a publish encodes as a message of the length given |
+| `client_wire` | What a client sends | no panic, operations take what they say, a publish encodes as a message of the length given, a tab after the verb parses as a space |
 | `config` | A configuration file, without includes | no panic |
 | `subjects` | A subject and filters, one per line | the index and matching by hand agree |
 | `websocket` | A WebSocket upgrade request, then frames | no panic, the reader keeps no more than it read, compression round trips |

@@ -274,3 +274,84 @@ fn errors_name_what_went_wrong() {
         assert_ne!(e.to_string(), "");
     }
 }
+
+/// Parses `buf` and the same with a tab after its verb, which the parser
+/// reads the general way, where a space may take a faster one.
+fn agrees(buf: &[u8], limits: &Limits) {
+    let mut tabbed = buf.to_vec();
+    tabbed[3] = b'\t';
+    assert_eq!(
+        parse(buf, limits),
+        parse(&tabbed, limits),
+        "for {:?}",
+        String::from_utf8_lossy(buf)
+    );
+}
+
+/// Every concatenation of one item of each set, in order.
+fn product(sets: &[&[&[u8]]]) -> Vec<Vec<u8>> {
+    sets.iter().fold(vec![Vec::new()], |all, set| {
+        all.iter()
+            .flat_map(|a| set.iter().map(move |s| [a.as_slice(), s].concat()))
+            .collect()
+    })
+}
+
+#[test]
+fn publishes_parse_alike_after_a_space_or_a_tab() {
+    let verbs: [&[u8]; 2] = [b"PUB ", b"pUb "];
+    let tokens: [&[u8]; 7] = [
+        b"",
+        b"a",
+        b"abcdefghi",
+        b"1",
+        b"12",
+        b"1234567890",
+        b"x\x01",
+    ];
+    let seps: [&[u8]; 7] = [b"", b" ", b"  ", b"\t", b"\r", b"\n", b"\x01"];
+    let ends: [&[u8]; 8] = [
+        b"", b"\r\n", b"\n", b"\r", b" \r\n", b"\x01\n", b"\n\n", b"\r\r\n",
+    ];
+    let tails: [&[u8]; 4] = [b"", b"hi\r\n", b"X\r\n", b"\nX\r\n"];
+    let tight = Limits {
+        max_control_line: 6,
+        max_payload: 1,
+    };
+    let two = product(&[&verbs, &tokens, &seps, &tokens, &ends, &tails]);
+    for buf in &two {
+        agrees(buf, &Limits::default());
+        agrees(buf, &tight);
+    }
+    let three = product(&[
+        &verbs[..1],
+        &tokens,
+        &seps,
+        &tokens,
+        &seps,
+        &tokens,
+        &ends,
+        &tails,
+    ]);
+    for buf in &three {
+        agrees(buf, &Limits::default());
+    }
+}
+
+#[test]
+fn long_publish_lines_parse_alike_at_every_limit() {
+    for len in 1..=80 {
+        let subject = vec![b's'; len];
+        for reply in [&b""[..], b" r"] {
+            let buf = [b"PUB ", &subject[..], reply, b" 2\r\nhi\r\n"].concat();
+            for max_control_line in [0, 1, 7, 8, 9, 15, 16, 17, 20, 30] {
+                let limits = Limits {
+                    max_control_line,
+                    max_payload: 2,
+                };
+                agrees(&buf, &limits);
+            }
+            agrees(&buf, &Limits::default());
+        }
+    }
+}

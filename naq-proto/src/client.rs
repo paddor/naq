@@ -207,7 +207,17 @@ pub enum ParseError {
 /// assert_eq!(client::parse(&buf[used..], &limits)?, Parsed::Partial(None));
 /// # Ok::<(), client::ParseError>(())
 /// ```
+#[inline]
 pub fn parse<'a>(buf: &'a [u8], limits: &Limits) -> Result<Parsed<'a>, ParseError> {
+    match plain_pub(buf, limits) {
+        Some((p, used)) => Ok(Parsed::Op(ClientOp::Pub(p), used)),
+        None => parse_any(buf, limits),
+    }
+}
+
+/// [`parse`] for any input.
+#[inline(never)]
+fn parse_any<'a>(buf: &'a [u8], limits: &Limits) -> Result<Parsed<'a>, ParseError> {
     let Some(verb) = verb(buf)? else {
         return Ok(Parsed::Partial(None));
     };
@@ -231,6 +241,79 @@ pub fn parse<'a>(buf: &'a [u8], limits: &Limits) -> Result<Parsed<'a>, ParseErro
         Verb::Pong => ClientOp::Pong,
     };
     Ok(Parsed::Op(op, next))
+}
+
+/// The usual publish, `PUB subject [reply] size\r\n` with one space before
+/// each argument, and its whole message, read in one pass. `None` for any
+/// other input, which [`parse_any`] reads; for this input it gives the
+/// same result.
+#[inline]
+fn plain_pub<'a>(buf: &'a [u8], limits: &Limits) -> Option<(Pub<'a>, usize)> {
+    let verb = u32::from_le_bytes(buf.get(..4)?.try_into().ok()?);
+    // Lower case for the letters; the space must be one already.
+    if verb | 0x0020_2020 != u32::from_le_bytes(*b"pub ") {
+        return None;
+    }
+    let cap = buf
+        .len()
+        .min(limits.max_control_line.saturating_add(LINE_SLACK));
+    let line = &buf[..cap];
+    let a = word(line, 4)?;
+    if line[a] != b' ' {
+        return None;
+    }
+    let b = word(line, a + 1)?;
+    let (reply, size, cr) = match line[b] {
+        b'\r' => (None, &line[a + 1..b], b),
+        b' ' => {
+            let c = word(line, b + 1)?;
+            if line[c] != b'\r' {
+                return None;
+            }
+            (Some(&line[a + 1..b]), &line[b + 1..c], c)
+        }
+        _ => return None,
+    };
+    if line.get(cr + 1) != Some(&b'\n') || cr - 4 > limits.max_control_line {
+        return None;
+    }
+    let size = parse_size(size).filter(|&s| s <= limits.max_payload)?;
+    let body = cr + 2;
+    // No overflow: `size` has at most 9 digits, `body` is a short line.
+    let end = body + size + 2;
+    let frame = buf.get(..end)?;
+    if !frame.ends_with(b"\r\n") {
+        return None;
+    }
+    let p = Pub {
+        subject: &line[4..a],
+        reply,
+        headers: None,
+        payload: &frame[body..end - 2],
+    };
+    Some((p, end))
+}
+
+/// Where the part of `line` that starts at `from` ends: at its first byte
+/// up to a space, blanks and line ends among them. `None` if the part is
+/// empty or `line` ends first.
+#[inline]
+fn word(line: &[u8], from: usize) -> Option<usize> {
+    const ONES: u64 = u64::from_le_bytes([1; 8]);
+    let mut at = from;
+    while let Some(w) = line.get(at..at + 8) {
+        let w = u64::from_le_bytes(w.try_into().ok()?);
+        // The high bit of bytes below 0x21. A borrow can mark bytes above
+        // the first such byte, never below it.
+        let low = w.wrapping_sub(ONES * 0x21) & !w & (ONES << 7);
+        if low != 0 {
+            at += low.trailing_zeros() as usize / 8;
+            return (at > from).then_some(at);
+        }
+        at += 8;
+    }
+    let end = at + line.get(at..)?.iter().position(|&b| b <= b' ')?;
+    (end > from).then_some(end)
 }
 
 /// The verb `buf` starts with. `None` while the bytes so far could still

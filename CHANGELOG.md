@@ -132,6 +132,12 @@ Notable changes to naq. The format follows
   naq's rate over `nats-server`'s on one publisher to one subscriber falls
   below a floor, or when the runs spread too wide to tell.
 
+### Changed
+
+- `naq-proto`: `client::parse` reads the usual `PUB`, one space before
+  each argument, in one pass, at half the cost; anything else goes the
+  general way, with the same result.
+
 ### Fixed
 
 - `naq`: the writer flushes after each write, so output a TLS stream

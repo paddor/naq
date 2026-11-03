@@ -19,7 +19,9 @@ pub const TARGETS: [(&str, Target); 4] = [
 
 /// Parses client operations until the input ends or breaks. An operation
 /// takes at least one byte and no more than there are; a publish encodes
-/// as a message of the length `encoded_len` gives.
+/// as a message of the length `encoded_len` gives. Each parses as it does
+/// with a tab after its verb, which the parser reads the general way where
+/// a space may take a faster one.
 ///
 /// # Panics
 ///
@@ -31,7 +33,18 @@ pub fn client_wire(data: &[u8]) {
     };
     let mut at = 0;
     while at < data.len() {
-        match client::parse(&data[at..], &limits) {
+        let rest = &data[at..];
+        let parsed = client::parse(rest, &limits);
+        if rest.get(3) == Some(&b' ') {
+            let mut tabbed = rest.to_vec();
+            tabbed[3] = b'\t';
+            assert_eq!(
+                parsed,
+                client::parse(&tabbed, &limits),
+                "a tab parses otherwise"
+            );
+        }
+        match parsed {
             Ok(Parsed::Op(op, used)) => {
                 assert!(used > 0 && used <= data.len() - at, "took {used}");
                 if let ClientOp::Pub(p) = op {
