@@ -83,18 +83,22 @@ impl Lane {
         if c.is_closed() || c.id == skip || e.is_spent() || (c.guarded.get() && !c.accepts(m)) {
             return false;
         }
+        let headers = m.headers.filter(|_| c.headers.get());
         let len = {
             let mut out = c.out.borrow_mut();
             Msg {
                 subject: m.subject,
                 sid: &e.sid,
                 reply: m.reply,
-                headers: m.headers.filter(|_| c.headers.get()),
+                headers,
                 payload: m.payload,
             }
             .encode(&mut *out);
             out.len()
         };
+        let size = m.payload.len() + headers.map_or(0, <[u8]>::len);
+        self.tally.gave(size);
+        c.tally.gave(size);
         self.mark(c);
         e.delivered.set(e.delivered.get() + 1);
         if e.is_spent() {
@@ -103,6 +107,7 @@ impl Lane {
         let opts = &self.shared.opts;
         if len > opts.max_pending {
             // A slow consumer.
+            crate::stats::Events::note(&self.shared.events.slow_consumers);
             c.close();
         } else if len > opts.max_pending / 4 * 3 {
             *stalled = Some(c.clone());

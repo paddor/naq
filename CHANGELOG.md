@@ -73,6 +73,12 @@ Notable changes to naq. The format follows
   Violations get `-ERR 'Permissions Violation for ...'` as `nats-server`
   words them; the connection stays. A wildcard subscription does not get
   messages on subjects its client may not subscribe to.
+- `naq`: monitoring over HTTP: `/healthz`, `/varz` and `/connz` in the
+  JSON of `nats-server`, with message and byte counts, connections, slow
+  consumers and stale connections. `Options::http_port` and `http_host`,
+  the `http_port`, `monitor_port` and `http` keys, and `-m PORT`;
+  `Server::monitor_addr` tells where. Lanes count without atomics and
+  publish their counts once per batch.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

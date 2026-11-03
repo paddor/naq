@@ -8,6 +8,7 @@ usage: naq [options]
                        below override it
   -a, --addr HOST      host to listen on (0.0.0.0)
   -p, --port PORT      client port (4222)
+  -m, --http_port PORT monitoring port for /healthz, /varz, /connz
   --lanes N            IO lanes, one thread each (one per core)
   --name NAME          server name (naq)";
 
@@ -56,6 +57,7 @@ fn options(args: &[String]) -> Result<naq::Options, String> {
             "-a" | "--addr" => o.host.clone_from(val),
             "-p" | "--port" => o.port = val.parse().map_err(|_| bad())?,
             "--lanes" => o.lanes = val.parse().map_err(|_| bad())?,
+            "-m" | "--http_port" => o.http_port = Some(val.parse().map_err(|_| bad())?),
             "--name" => o.server_name.clone_from(val),
             _ => return Err(format!("unknown argument {flag:?}")),
         }

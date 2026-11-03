@@ -1,21 +1,24 @@
 //! The writer: hands a client's queued output to the socket.
 
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::Client;
+use crate::server::Shared;
+use crate::stats::Events;
 
 /// Writes `client`'s output until the connection closes. It takes all that
 /// is queued at once and writes it in one go, so the output of a batch of
-/// messages costs one write. A write that takes longer than `deadline`
-/// closes the client as a slow consumer.
+/// messages costs one write. A write that takes longer than the server's
+/// `write_deadline` closes the client as a slow consumer.
 pub(super) async fn writer<W: AsyncWrite + Unpin>(
     client: Rc<Client>,
     mut w: W,
-    deadline: Duration,
+    shared: Arc<Shared>,
 ) {
+    let deadline = shared.opts.write_deadline;
     // The buffer the next swap hands to the client, keeping its capacity.
     let mut spare = Vec::new();
     loop {
@@ -33,12 +36,17 @@ pub(super) async fn writer<W: AsyncWrite + Unpin>(
         client.drained.notify_waiters();
         // Cancel-safe enough: on a timeout the client closes, and what was
         // left unwritten no longer matters.
-        if !matches!(
-            tokio::time::timeout(deadline, w.write_all(&buf)).await,
-            Ok(Ok(()))
-        ) {
-            client.close();
-            return;
+        match tokio::time::timeout(deadline, w.write_all(&buf)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                client.close();
+                return;
+            }
+            Err(_) => {
+                Events::note(&shared.events.slow_consumers);
+                client.close();
+                return;
+            }
         }
         spare = buf;
         spare.clear();

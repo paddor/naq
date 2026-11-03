@@ -186,6 +186,9 @@ impl Conn {
                     // Delivered all the same, as by `nats-server`.
                     self.error("Invalid Publish Subject");
                 }
+                let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
+                self.lane.tally.took(size);
+                self.client.tally.took(size);
                 if self.client.guarded.get() && !self.may_publish(p.subject) {
                     return Ok(Step::Next);
                 }
@@ -266,14 +269,21 @@ impl Conn {
                 self.lane.flush();
                 None
             }
-            Tick::Stale => Some(Close::Stale),
+            Tick::Stale => {
+                crate::stats::Events::note(&self.lane.shared.events.stale);
+                Some(Close::Stale)
+            }
         }
     }
 
     /// Applies a `CONNECT`.
     #[inline(never)]
     fn connect(&mut self, json: &[u8]) -> Result<Step, Close> {
-        let creds = self.opts.apply(json).map_err(|_| Close::Connect)?;
+        let (creds, names) = self.opts.apply(json).map_err(|_| Close::Connect)?;
+        {
+            let mut meta = self.client.meta.borrow_mut();
+            (meta.name, meta.lang, meta.version) = names;
+        }
         self.client.headers.set(self.opts.headers);
         if let Some(auth) = &self.lane.shared.auth {
             let nonce = self.nonce.as_deref().unwrap_or_default();

@@ -307,3 +307,18 @@ fn permissions_naq_cannot_use_are_an_error() {
         }
     }
 }
+
+#[test]
+fn monitoring_takes_a_port_or_a_host_and_port() {
+    let o: Options = "http_port: 8222\n".parse().unwrap();
+    assert_eq!((o.http_port, o.http_host), (Some(8222), None));
+    let o: Options = "monitor_port: 8333\n".parse().unwrap();
+    assert_eq!(o.http_port, Some(8333));
+    let o: Options = "http: 127.0.0.1:8444\n".parse().unwrap();
+    assert_eq!(
+        (o.http_port, o.http_host.as_deref()),
+        (Some(8444), Some("127.0.0.1"))
+    );
+    assert!("http: nope\n".parse::<Options>().is_err());
+    assert!("http_port: -1\n".parse::<Options>().is_err());
+}

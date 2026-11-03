@@ -54,11 +54,18 @@ struct Connect {
     auth_token: Option<String>,
     nkey: Option<String>,
     sig: Option<String>,
+    name: Option<String>,
+    lang: Option<String>,
+    version: Option<String>,
 }
 
+/// A client's name, language and library version, as its `CONNECT` gave.
+pub(super) type Names = (Option<String>, Option<String>, Option<String>);
+
 impl ClientOpts {
-    /// Applies the JSON of a `CONNECT`, and returns the credentials in it.
-    pub(super) fn apply(&mut self, json: &[u8]) -> Result<Creds, serde_json::Error> {
+    /// Applies the JSON of a `CONNECT`, and returns the credentials and
+    /// names in it.
+    pub(super) fn apply(&mut self, json: &[u8]) -> Result<(Creds, Names), serde_json::Error> {
         let c: Connect = serde_json::from_slice(json)?;
         let keep = |new: Option<bool>, old| new.unwrap_or(old);
         *self = ClientOpts {
@@ -69,13 +76,14 @@ impl ClientOpts {
             protocol: c.protocol.unwrap_or(self.protocol),
             no_responders: keep(c.no_responders, self.no_responders),
         };
-        Ok(Creds {
+        let creds = Creds {
             user: c.user,
             pass: c.pass,
             token: c.auth_token,
             nkey: c.nkey,
             sig: c.sig,
-        })
+        };
+        Ok((creds, (c.name, c.lang, c.version)))
     }
 }
 

@@ -114,6 +114,14 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "ping_max" => o.max_pings_out = int(item).ok_or_else(|| bad("expected a count"))?,
             "write_deadline" => o.write_deadline = duration(item).map_err(|e| bad(&e))?,
             "authorization" => auth::authorization(o, item)?,
+            "http" => {
+                let (host, port) = listen(item).ok_or_else(|| bad("expected host:port"))?;
+                o.http_host = host;
+                o.http_port = Some(port);
+            }
+            "http_port" | "monitor_port" => {
+                o.http_port = Some(int(item).ok_or_else(|| bad("expected a port"))?);
+            }
             "accounts" => auth::accounts(o, item)?,
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);

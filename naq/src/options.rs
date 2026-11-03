@@ -48,6 +48,11 @@ pub struct Options {
     /// How long a client has to authenticate, from the moment it connects
     /// (`authorization { timeout }`).
     pub auth_timeout: Duration,
+    /// Port for monitoring over HTTP (`http_port`): `/healthz`, `/varz`,
+    /// `/connz`. `None` serves none; 0 picks a free port.
+    pub http_port: Option<u16>,
+    /// Host for monitoring; `None` for [`Options::host`] (`http`).
+    pub http_host: Option<String>,
     /// Permissions of users that have none of their own
     /// (`authorization { default_permissions }`).
     pub default_permissions: Option<Permissions>,
@@ -143,6 +148,8 @@ impl Default for Options {
             no_auth_user: None,
             auth_timeout: Duration::from_secs(2),
             default_permissions: None,
+            http_port: None,
+            http_host: None,
         }
     }
 }

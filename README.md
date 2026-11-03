@@ -7,7 +7,8 @@ wakes and writes.
 The server runs core publish and subscribe: wildcards, queue groups,
 `UNSUB` maximums, accounts, users with passwords or a token. Plain TCP
 so far. It reads `nats-server` configuration files (`naq -c FILE`), the
-keys it serves so far.
+keys it serves so far, and serves `/healthz`, `/varz` and `/connz`
+(`naq -m PORT`).
 
 | Crate | Role |
 | --- | --- |

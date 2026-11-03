@@ -37,9 +37,11 @@ mod error;
 mod index;
 mod lane;
 mod mailbox;
+mod monitor;
 mod options;
 mod perms;
 mod server;
+mod stats;
 
 pub use error::Error;
 pub use options::{Login, Options, Permissions, Responses, Rules, User};

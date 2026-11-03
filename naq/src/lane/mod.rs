@@ -23,6 +23,8 @@ use crate::conn::Client;
 use crate::index::Index;
 use crate::mailbox::{self, Mailbox, Receiver};
 use crate::server::Shared;
+use crate::stats::Tally;
+use rustc_hash::FxHashMap;
 
 /// Batches a lane may have queued for another before the sender waits.
 const DATA_BATCHES: usize = 8;
@@ -47,6 +49,8 @@ pub(crate) enum Control {
     },
     /// Answered once the controls before it are applied.
     Fence(oneshot::Sender<()>),
+    /// Answered with the lane's clients, for monitoring.
+    Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
 }
 
 /// The ways into a lane, for every lane.
@@ -54,6 +58,13 @@ pub(crate) enum Control {
 pub(crate) struct LaneTx {
     control: Mailbox<Control>,
     data: Mailbox<Batch>,
+}
+
+impl LaneTx {
+    /// Hands the lane a control.
+    pub(crate) fn control(&self, c: Control) {
+        self.control.push(c);
+    }
 }
 
 /// The lane's ends of its mailboxes.
@@ -94,6 +105,10 @@ pub(crate) struct Lane {
     spent: RefCell<Vec<Spent>>,
     /// State of the random numbers for queue picks.
     rng: Cell<u64>,
+    /// Messages in and out on this lane.
+    pub(crate) tally: Tally,
+    /// Clients on this lane, by ID.
+    pub(crate) clients: RefCell<FxHashMap<u64, Rc<Client>>>,
 }
 
 impl Lane {
@@ -117,8 +132,10 @@ impl Lane {
         }
     }
 
-    /// Wakes the writers of every client marked since the last flush.
+    /// Wakes the writers of every client marked since the last flush, and
+    /// publishes the lane's counts.
     pub(crate) fn flush(&self) {
+        self.tally.publish(&self.shared.counts[self.id]);
         let mut dirty = self.dirty.take();
         for c in dirty.drain(..) {
             c.dirty.set(false);
@@ -184,6 +201,9 @@ impl Lane {
             Control::Fence(done) => {
                 let _ = done.send(());
             }
+            Control::Clients(answer) => {
+                let _ = answer.send(crate::monitor::conns(self));
+            }
         }
     }
 }
@@ -201,6 +221,8 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         dirty: RefCell::default(),
         spent: RefCell::default(),
         rng: Cell::new(seed()),
+        tally: Tally::default(),
+        clients: RefCell::default(),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;

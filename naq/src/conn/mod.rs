@@ -23,6 +23,7 @@ use zzq_tokio::transport::{Driver, Stream};
 use crate::lane::{self, Lane, Out};
 use crate::perms::Held;
 use crate::server::Shared;
+use crate::stats::Tally;
 
 /// How long a closed connection's writer may take to write what is left,
 /// such as to a client that stopped reading.
@@ -47,6 +48,10 @@ pub(crate) struct Client {
     pub(crate) held: RefCell<Option<Rc<Held>>>,
     /// Whether `held` is set: deliveries check it.
     pub(crate) guarded: Cell<bool>,
+    /// Messages it sent and got.
+    pub(crate) tally: Tally,
+    /// Who it is, for monitoring.
+    pub(crate) meta: RefCell<Meta>,
     closed: Cell<bool>,
     /// Wakes the writer.
     wake: Notify,
@@ -67,6 +72,15 @@ impl Client {
             account: Cell::new(crate::auth::GLOBAL),
             held: RefCell::default(),
             guarded: Cell::new(false),
+            tally: Tally::default(),
+            meta: RefCell::new(Meta {
+                ip: String::new(),
+                port: 0,
+                start: std::time::SystemTime::now(),
+                name: None,
+                lang: None,
+                version: None,
+            }),
             closed: Cell::new(false),
             wake: Notify::new(),
             drained: Notify::new(),
@@ -119,6 +133,18 @@ impl Client {
             self.wake.notify_one();
         }
     }
+}
+
+/// What monitoring shows of a client.
+#[derive(Debug)]
+pub(crate) struct Meta {
+    pub(crate) ip: String,
+    pub(crate) port: u16,
+    pub(crate) start: std::time::SystemTime,
+    /// From its `CONNECT`.
+    pub(crate) name: Option<String>,
+    pub(crate) lang: Option<String>,
+    pub(crate) version: Option<String>,
 }
 
 /// A subscription of a client.
@@ -194,24 +220,25 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
     let Some(lane) = lane::get(shared.id, index) else {
         return;
     };
-    let ip = peer_ip(&stream);
-    let _ = stream.drive(ConnDriver { lane, ip }).await;
+    let (ip, port) = peer(&stream);
+    let _ = stream.drive(ConnDriver { lane, ip, port }).await;
 }
 
 /// The client's IP address, as text.
-fn peer_ip(stream: &Stream) -> String {
+fn peer(stream: &Stream) -> (String, u16) {
     match stream {
         Stream::Tcp(s) => s
             .peer_addr()
-            .map(|a| a.ip().to_string())
+            .map(|a| (a.ip().to_string(), a.port()))
             .unwrap_or_default(),
-        _ => String::new(),
+        _ => (String::new(), 0),
     }
 }
 
 struct ConnDriver {
     lane: Rc<Lane>,
     ip: String,
+    port: u16,
 }
 
 impl Driver for ConnDriver {
@@ -222,16 +249,22 @@ impl Driver for ConnDriver {
         R: AsyncRead + Unpin + 'static,
         W: AsyncWrite + Unpin + 'static,
     {
-        serve(self.lane, self.ip, reader, writer)
+        serve(self.lane, (self.ip, self.port), reader, writer)
     }
 }
 
-async fn serve<R, W>(lane: Rc<Lane>, ip: String, mut r: R, w: W)
+async fn serve<R, W>(lane: Rc<Lane>, (ip, port): (String, u16), mut r: R, w: W)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
     let client = Rc::new(Client::new(lane.shared.next_client()));
+    {
+        let mut meta = client.meta.borrow_mut();
+        meta.ip.clone_from(&ip);
+        meta.port = port;
+    }
+    lane.clients.borrow_mut().insert(client.id, client.clone());
     let nonce = lane
         .shared
         .auth
@@ -245,7 +278,7 @@ where
     };
     handshake::info(&lane.shared, &to, None, &mut client.out.borrow_mut());
     let opts = &lane.shared.opts;
-    let writer = tokio::task::spawn_local(write::writer(client.clone(), w, opts.write_deadline));
+    let writer = tokio::task::spawn_local(write::writer(client.clone(), w, lane.shared.clone()));
     client.wake_writer();
     let now = tokio::time::Instant::now();
     let ping = ping::Pinger::new(now, opts.ping_interval);
@@ -323,6 +356,12 @@ impl Conn {
         for sid in sids {
             self.client.unsubscribe(&self.lane, &sid);
         }
+        self.lane.clients.borrow_mut().remove(&self.client.id);
+        // Relaxed: a counter, read now and then.
+        self.lane
+            .shared
+            .gone
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.lane.flush();
         self.client.close();
         if tokio::time::timeout(CLOSE_LINGER, &mut writer)
