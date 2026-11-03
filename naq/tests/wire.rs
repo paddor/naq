@@ -11,12 +11,16 @@
 //!   that do not change between runs. `(closed)` is the server closing.
 //! - `#` comments and blank lines, kept as they are.
 //!
-//! Replies are collected when the script moves from one client to another
-//! and at its end: the client that sent last, then every other client in
-//! order, each with a `PING` the transcript leaves out.
+//! A client's lines go out in one write when the script moves to another
+//! client, and at its end, so the server reads them together whatever the
+//! timing. Replies are collected then too: the client that sent last, then
+//! every other client in order, each with a `PING` the transcript leaves out. NATS orders the
+//! messages of each subscription, not those of different ones: in each
+//! client's replies, messages are sorted by SID, each SID's kept in order.
 //!
 //! `NAQ_GO=<path to nats-server>` also replays every script against Go.
-//! With `NAQ_BLESS=1`, Go's replies are written into the scripts.
+//! With `NAQ_BLESS=1`, Go's replies are written into the scripts. A
+//! transcript that differs is written to `CARGO_TARGET_TMPDIR/wire/`.
 
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
@@ -93,15 +97,20 @@ fn scripts() -> Vec<PathBuf> {
     paths
 }
 
-/// Where `got` first differs from `want`.
+/// Where `got` first differs from `want`; writes all of `got` out.
 fn mismatch(path: &Path, who: &str, want: &str, got: &str) -> String {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("wire");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join(format!("{}.{who}", path.file_name().unwrap().display()));
+    std::fs::write(&out, got).unwrap();
     let (w, g): (Vec<_>, Vec<_>) = (want.lines().collect(), got.lines().collect());
     let at = w.iter().zip(&g).take_while(|(a, b)| a == b).count();
     let window = |l: &[&str]| l[at.saturating_sub(3)..(at + 4).min(l.len())].join("\n");
     format!(
-        "\n{} line {}: {who} differs\n--- want\n{}\n--- got\n{}\n",
+        "\n{} line {}: {who} differs, all in {}\n--- want\n{}\n--- got\n{}\n",
         path.display(),
         at + 1,
+        out.display(),
         window(&w),
         window(&g),
     )
@@ -180,11 +189,25 @@ impl Run {
         let order = std::iter::once(first).chain((0..self.clients.len()).filter(|&i| i != first));
         for i in order.collect::<Vec<_>>() {
             let c = &mut self.clients[i];
-            for line in c.sync() {
+            for line in by_sid(c.sync()).iter().flatten() {
                 let _ = writeln!(self.out, "{}< {line}", c.name);
             }
         }
     }
+}
+
+/// `replies` with the messages among them sorted by SID, stably. A message
+/// is its control line and its payload.
+fn by_sid(replies: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    let is_msg = |r: &Vec<String>| r.len() == 2;
+    let sid = |r: &Vec<String>| r[0].split(' ').nth(2).unwrap_or_default().to_owned();
+    let mut msgs: Vec<_> = replies.iter().filter(|r| is_msg(r)).cloned().collect();
+    msgs.sort_by_key(sid);
+    let mut msgs = msgs.into_iter();
+    replies
+        .into_iter()
+        .map(|r| if is_msg(&r) { msgs.next().unwrap() } else { r })
+        .collect()
 }
 
 /// One client connection of a script.
@@ -193,6 +216,8 @@ struct Client {
     stream: TcpStream,
     /// Everything sent, to count the `PING`s in it.
     sent: Vec<u8>,
+    /// Not written yet.
+    pending: Vec<u8>,
     /// How far `sent` has been parsed; `None` after a parse error.
     parsed: Option<usize>,
     /// For each `PING` not answered yet: whether the script sent it.
@@ -210,6 +235,7 @@ impl Client {
             name: name.into(),
             stream,
             sent: Vec::new(),
+            pending: Vec::new(),
             parsed: Some(0),
             pings: std::collections::VecDeque::new(),
             buf: Vec::new(),
@@ -218,11 +244,7 @@ impl Client {
     }
 
     fn send(&mut self, bytes: &[u8]) {
-        if self.closed {
-            return;
-        }
-        // A server that closed may reset the connection: the replies show it.
-        let _ = self.stream.write_all(bytes);
+        self.pending.extend_from_slice(bytes);
         self.sent.extend_from_slice(bytes);
         self.count_pings();
     }
@@ -247,18 +269,20 @@ impl Client {
         }
     }
 
-    /// Reads replies until the server answered every `PING` or closed. Sends
-    /// a `PING` of its own first, unless what was sent cannot parse: then
-    /// the server closes.
-    fn sync(&mut self) -> Vec<String> {
+    /// Writes what is pending and reads replies until the server answered
+    /// every `PING` or closed. Adds a `PING` of its own, unless what was
+    /// sent cannot parse: then the server closes.
+    fn sync(&mut self) -> Vec<Vec<String>> {
         let mut lines = Vec::new();
         if self.closed {
             return lines;
         }
         if self.parsed.is_some() {
-            let _ = self.stream.write_all(b"PING\r\n");
+            self.pending.extend_from_slice(b"PING\r\n");
             self.pings.push_back(false);
         }
+        // A server that closed may reset the connection: the replies show it.
+        let _ = self.stream.write_all(&std::mem::take(&mut self.pending));
         let deadline = Instant::now() + WAIT;
         loop {
             self.take_lines(&mut lines);
@@ -266,7 +290,7 @@ impl Client {
                 return lines;
             }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                lines.push("(timeout)".into());
+                lines.push(vec!["(timeout)".into()]);
                 return lines;
             };
             self.stream.set_read_timeout(Some(left)).unwrap();
@@ -283,28 +307,26 @@ impl Client {
                 Err(_) => {}
             }
             self.take_lines(&mut lines);
-            lines.push("(closed)".into());
+            lines.push(vec!["(closed)".into()]);
             self.closed = true;
             return lines;
         }
     }
 
-    /// Turns the complete server operations received into lines, leaving
-    /// out the `PONG`s to the client's own `PING`s.
-    fn take_lines(&mut self, lines: &mut Vec<String>) {
+    /// Turns the complete server operations received into lines, one or
+    /// two per operation, leaving out the `PONG`s to the client's own
+    /// `PING`s.
+    fn take_lines(&mut self, lines: &mut Vec<Vec<String>>) {
         while let Some((op, used)) = server_op(&self.buf) {
             match op {
                 Op::Pong => {
                     if self.pings.pop_front() != Some(false) {
-                        lines.push("PONG".into());
+                        lines.push(vec!["PONG".into()]);
                     }
                 }
-                Op::Info(json) => lines.push(info(&json)),
-                Op::Line(l) => lines.push(l),
-                Op::Msg(l, payload) => {
-                    lines.push(l);
-                    lines.push(payload);
-                }
+                Op::Info(json) => lines.push(vec![info(&json)]),
+                Op::Line(l) => lines.push(vec![l]),
+                Op::Msg(l, payload) => lines.push(vec![l, payload]),
             }
             self.buf.drain(..used);
         }

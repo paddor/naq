@@ -1,0 +1,388 @@
+//! Interest index of a lane: which subscriptions and which other lanes a
+//! subject reaches. Every lane holds the interest of the whole server.
+//!
+//! Literal filters sit in a hash map, filters with wildcards in a token
+//! trie. A subject matches the literal filter it names and every wildcard
+//! filter that fits it.
+
+mod trie;
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use naq_proto::subject;
+use rustc_hash::FxHashMap;
+
+use crate::conn::Client;
+
+/// One subscription on this lane.
+#[derive(Debug)]
+pub(crate) struct Entry {
+    pub(crate) client: Rc<Client>,
+    /// Subscription ID the client chose.
+    pub(crate) sid: Box<[u8]>,
+    /// Messages delivered so far.
+    pub(crate) delivered: Cell<u64>,
+    /// Messages it may get in total; 0 for no limit.
+    pub(crate) max: Cell<u64>,
+}
+
+impl Entry {
+    pub(crate) fn new(client: Rc<Client>, sid: &[u8]) -> Entry {
+        Entry {
+            client,
+            sid: sid.into(),
+            delivered: Cell::new(0),
+            max: Cell::new(0),
+        }
+    }
+
+    /// Reached its maximum: it takes nothing more.
+    #[inline]
+    pub(crate) const fn is_spent(&self) -> bool {
+        let max = self.max.get();
+        max != 0 && self.delivered.get() >= max
+    }
+}
+
+/// Subscribers of one filter, or of one queue group on it.
+#[derive(Debug, Default)]
+pub(crate) struct Group {
+    /// Subscriptions on this lane.
+    pub(crate) local: Vec<Entry>,
+    /// Other lanes with subscriptions, and how many each has.
+    pub(crate) lanes: Vec<(usize, u32)>,
+}
+
+impl Group {
+    const fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.lanes.is_empty()
+    }
+
+    /// Members across all lanes.
+    pub(crate) fn weight(&self) -> u64 {
+        self.local.len() as u64 + self.lanes.iter().map(|&(_, n)| u64::from(n)).sum::<u64>()
+    }
+
+    fn count(&mut self, lane: usize, add: bool) {
+        let at = self.lanes.iter().position(|&(l, _)| l == lane);
+        match (at, add) {
+            (Some(at), true) => self.lanes[at].1 += 1,
+            (None, true) => self.lanes.push((lane, 1)),
+            (Some(at), false) => {
+                self.lanes[at].1 -= 1;
+                if self.lanes[at].1 == 0 {
+                    self.lanes.swap_remove(at);
+                }
+            }
+            (None, false) => {}
+        }
+    }
+}
+
+/// Interest in one filter.
+#[derive(Debug, Default)]
+pub(crate) struct Interest {
+    /// Plain subscriptions: each gets every message.
+    pub(crate) plain: Group,
+    /// Queue groups by name: each gets every message once.
+    pub(crate) queues: Vec<(Box<[u8]>, Group)>,
+}
+
+impl Interest {
+    const fn is_empty(&self) -> bool {
+        self.plain.is_empty() && self.queues.is_empty()
+    }
+
+    /// The group for `queue`, or the plain one.
+    fn group(&mut self, queue: Option<&[u8]>) -> &mut Group {
+        let Some(name) = queue else {
+            return &mut self.plain;
+        };
+        let at = self
+            .queues
+            .iter()
+            .position(|(n, _)| **n == *name)
+            .unwrap_or_else(|| {
+                self.queues.push((name.into(), Group::default()));
+                self.queues.len() - 1
+            });
+        &mut self.queues[at].1
+    }
+
+    /// Applies `f` to the group for `queue`, if there is one, and forgets
+    /// the group once it is empty.
+    fn change<T>(&mut self, queue: Option<&[u8]>, f: impl FnOnce(&mut Group) -> T) -> Option<T> {
+        let Some(name) = queue else {
+            return Some(f(&mut self.plain));
+        };
+        let at = self.queues.iter().position(|(n, _)| **n == *name)?;
+        let out = f(&mut self.queues[at].1);
+        if self.queues[at].1.is_empty() {
+            self.queues.swap_remove(at);
+        }
+        Some(out)
+    }
+}
+
+/// A few items, kept inline up to four.
+#[derive(Debug)]
+pub(crate) struct Few<'a, T> {
+    first: [Option<&'a T>; 4],
+    more: Vec<&'a T>,
+}
+
+impl<'a, T> Few<'a, T> {
+    pub(crate) const fn new() -> Self {
+        Few {
+            first: [None; 4],
+            more: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn push(&mut self, item: &'a T) {
+        match self.first.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => *slot = Some(item),
+            None => self.more.push(item),
+        }
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.first[0].is_none()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'a T> + '_ {
+        self.first
+            .iter()
+            .map_while(|s| *s)
+            .chain(self.more.iter().copied())
+    }
+}
+
+/// The members of queue group `name` in `found`, from its `from`th match
+/// on: across filters, one group.
+pub(crate) fn queue_groups<'a>(
+    found: &Few<'a, Interest>,
+    from: usize,
+    name: &[u8],
+) -> Few<'a, Group> {
+    let mut groups = Few::new();
+    for (n, g) in found.iter().skip(from).flat_map(|i| &i.queues) {
+        if **n == *name {
+            groups.push(g);
+        }
+    }
+    groups
+}
+
+/// Interest by filter.
+#[derive(Debug, Default)]
+pub(crate) struct Index {
+    literal: FxHashMap<Box<[u8]>, Interest>,
+    wild: trie::Node,
+}
+
+impl Index {
+    /// Adds subscription `entry` to `filter`, in `queue` if given.
+    pub(crate) fn insert(&mut self, filter: &[u8], queue: Option<&[u8]>, entry: Entry) {
+        self.interest(filter).group(queue).local.push(entry);
+    }
+
+    /// Removes subscription `sid` of client `id`.
+    pub(crate) fn remove(&mut self, filter: &[u8], queue: Option<&[u8]>, id: u64, sid: &[u8]) {
+        self.change(filter, queue, |g| {
+            g.local.retain(|e| e.client.id != id || *e.sid != *sid);
+        });
+    }
+
+    /// Counts a subscription that lane `lane` gained, or lost.
+    pub(crate) fn remote(&mut self, filter: &[u8], queue: Option<&[u8]>, lane: usize, add: bool) {
+        if add {
+            self.interest(filter).group(queue).count(lane, true);
+        } else {
+            self.change(filter, queue, |g| g.count(lane, false));
+        }
+    }
+
+    /// Subscription `sid` of client `id`.
+    pub(crate) fn find(
+        &self,
+        filter: &[u8],
+        queue: Option<&[u8]>,
+        id: u64,
+        sid: &[u8],
+    ) -> Option<&Entry> {
+        let interest = if subject::is_literal(filter) {
+            self.literal.get(filter)
+        } else {
+            self.wild.get(filter)
+        }?;
+        let group = match queue {
+            None => &interest.plain,
+            Some(q) => &interest.queues.iter().find(|(n, _)| **n == *q)?.1,
+        };
+        group
+            .local
+            .iter()
+            .find(|e| e.client.id == id && *e.sid == *sid)
+    }
+
+    /// The interest of every filter that matches `subject`.
+    #[inline]
+    pub(crate) fn matches(&self, subject: &[u8]) -> Few<'_, Interest> {
+        let mut found = Few::new();
+        if let Some(i) = self.literal.get(subject) {
+            found.push(i);
+        }
+        if !self.wild.is_empty() && subject::has_all_tokens(subject) {
+            self.wild.matches(subject, &mut found);
+        }
+        found
+    }
+
+    fn interest(&mut self, filter: &[u8]) -> &mut Interest {
+        if subject::is_literal(filter) {
+            self.literal.entry(filter.into()).or_default()
+        } else {
+            self.wild.interest(filter)
+        }
+    }
+
+    /// Applies `f` to the group for `queue` in `filter`, and forgets what
+    /// is left empty.
+    fn change(&mut self, filter: &[u8], queue: Option<&[u8]>, f: impl FnOnce(&mut Group)) {
+        if !subject::is_literal(filter) {
+            self.wild.change(filter, |i| {
+                i.change(queue, f);
+            });
+            return;
+        }
+        if let Some(i) = self.literal.get_mut(filter) {
+            i.change(queue, f);
+            if i.is_empty() {
+                self.literal.remove(filter);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lanes(idx: &Index, subject: &[u8]) -> Vec<Vec<(usize, u32)>> {
+        idx.matches(subject)
+            .iter()
+            .map(|i| i.plain.lanes.clone())
+            .collect()
+    }
+
+    #[test]
+    fn other_lanes_are_counted_until_their_last_subscription_goes() {
+        let mut idx = Index::default();
+        idx.remote(b"a", None, 1, true);
+        idx.remote(b"a", None, 1, true);
+        idx.remote(b"a", None, 2, true);
+        assert_eq!(lanes(&idx, b"a"), [vec![(1, 2), (2, 1)]]);
+        idx.remote(b"a", None, 1, false);
+        idx.remote(b"a", None, 2, false);
+        assert_eq!(lanes(&idx, b"a"), [vec![(1, 1)]]);
+        idx.remote(b"a", None, 3, false);
+        idx.remote(b"b", None, 1, false);
+        idx.remote(b"a", None, 1, false);
+        assert!(idx.matches(b"a").is_empty(), "forgotten");
+        assert!(idx.literal.is_empty());
+    }
+
+    #[test]
+    fn a_subject_matches_its_literal_and_wildcard_filters() {
+        let mut idx = Index::default();
+        for (i, f) in ["a.b", "a.*", "a.>", "*.b", ">", "a.b.c", "a.*.c", "b.*"]
+            .iter()
+            .enumerate()
+        {
+            idx.remote(f.as_bytes(), None, i, true);
+        }
+        let hit = |s: &[u8]| {
+            let mut got: Vec<_> = lanes(&idx, s).into_iter().map(|l| l[0].0).collect();
+            got.sort_unstable();
+            got
+        };
+        assert_eq!(hit(b"a.b"), [0, 1, 2, 3, 4]);
+        assert_eq!(hit(b"a.b.c"), [2, 4, 5, 6]);
+        assert_eq!(hit(b"a"), [4]);
+        assert_eq!(hit(b"a..b"), Vec::<usize>::new());
+        assert_eq!(hit(b"a.b."), Vec::<usize>::new());
+        assert_eq!(hit(b"a.*"), [1, 2, 4], "a wildcard published is a token");
+    }
+
+    #[test]
+    fn wildcard_filters_are_forgotten_once_empty() {
+        let mut idx = Index::default();
+        idx.remote(b"a.*.c", None, 1, true);
+        idx.remote(b"a.>", Some(b"q"), 1, true);
+        idx.remote(b"a.*.c", None, 1, false);
+        assert!(!idx.wild.is_empty());
+        idx.remote(b"a.>", Some(b"q"), 1, false);
+        assert!(idx.wild.is_empty());
+    }
+
+    #[test]
+    fn queue_groups_are_apart_from_plain_interest() {
+        let mut idx = Index::default();
+        idx.remote(b"a", Some(b"q"), 1, true);
+        idx.remote(b"a", Some(b"q"), 2, true);
+        idx.remote(b"a", Some(b"r"), 1, true);
+        let m = idx.matches(b"a");
+        let i = m.iter().next().unwrap();
+        assert!(i.plain.is_empty());
+        let w: Vec<_> = i.queues.iter().map(|(n, g)| (&**n, g.weight())).collect();
+        assert_eq!(w, [(&b"q"[..], 2), (&b"r"[..], 1)]);
+    }
+
+    #[test]
+    fn wildcard_subscriptions_are_found_and_removed() {
+        let c = Rc::new(Client::new(7));
+        let mut idx = Index::default();
+        let subs: [(&[u8], Option<&[u8]>); 4] = [
+            (b"a.*.c", None),
+            (b"a.>", Some(b"q")),
+            (b"*.b", None),
+            (b">", None),
+        ];
+        for (i, (f, q)) in subs.iter().enumerate() {
+            idx.insert(f, *q, Entry::new(c.clone(), i.to_string().as_bytes()));
+        }
+        for (i, (f, q)) in subs.iter().enumerate() {
+            let sid = i.to_string();
+            assert!(idx.find(f, *q, 7, sid.as_bytes()).is_some(), "{i}");
+            assert!(idx.find(f, *q, 8, sid.as_bytes()).is_none());
+        }
+        for (f, q) in [
+            (&b"a.*.d"[..], None),
+            (b"b.>", None),
+            (b"x.*", None),
+            (b"a.>", None),
+        ] {
+            assert!(idx.find(f, q, 7, b"0").is_none());
+            idx.remove(f, q, 7, b"0");
+        }
+        assert!(idx.find(b"a.>", Some(b"r"), 7, b"1").is_none());
+        for (i, (f, q)) in subs.iter().enumerate() {
+            idx.remove(f, *q, 7, i.to_string().as_bytes());
+        }
+        assert!(idx.wild.is_empty());
+    }
+
+    #[test]
+    fn few_keeps_order_past_its_inline_room() {
+        let items: Vec<u32> = (0..7).collect();
+        let mut few = Few::new();
+        assert!(few.is_empty());
+        for i in &items {
+            few.push(i);
+        }
+        assert_eq!(few.iter().copied().collect::<Vec<_>>(), items);
+    }
+}

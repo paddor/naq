@@ -22,6 +22,15 @@ Notable changes to naq. The format follows
   that did not ask for headers closes it. `INFO` carries `client_ip`, and
   a client of protocol 1 gets a second `INFO` naming its account after its
   first `PONG`.
+- `naq`: wildcard subscriptions (`*`, `>`), queue groups and `UNSUB`
+  maximums. Literal filters are looked up in a hash map, wildcard ones in
+  a token trie. A queue group gets one pick per message on the
+  publisher's lane, across the members on every lane; a member on another
+  lane gets the message as a targeted forward. `pedantic` (on by default,
+  as in `nats-server`) answers publishes to wildcard or broken subjects
+  with `-ERR 'Invalid Publish Subject'`; `SUB` to a broken filter gets
+  `-ERR 'Invalid Subject'`.
+- `naq-proto`: `subject`, the rules of subjects and filters.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

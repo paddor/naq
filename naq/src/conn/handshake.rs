@@ -7,9 +7,15 @@ use crate::server::Shared;
 /// A client's options. Before its `CONNECT` and for fields it leaves out,
 /// they are the defaults of `nats-server`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags of CONNECT, as sent"
+)]
 pub(super) struct ClientOpts {
     /// `+OK` after every operation but `PING` and `PONG`.
     pub(super) verbose: bool,
+    /// Publish subjects are checked.
+    pub(super) pedantic: bool,
     /// Messages it publishes reach its own subscriptions.
     pub(super) echo: bool,
     /// Takes `HPUB` and `HMSG`.
@@ -22,6 +28,7 @@ impl Default for ClientOpts {
     fn default() -> Self {
         ClientOpts {
             verbose: true,
+            pedantic: true,
             echo: true,
             headers: false,
             protocol: 0,
@@ -33,6 +40,7 @@ impl Default for ClientOpts {
 #[derive(Debug, Deserialize)]
 struct Connect {
     verbose: Option<bool>,
+    pedantic: Option<bool>,
     echo: Option<bool>,
     headers: Option<bool>,
     protocol: Option<i32>,
@@ -45,6 +53,7 @@ impl ClientOpts {
         let keep = |new: Option<bool>, old| new.unwrap_or(old);
         *self = ClientOpts {
             verbose: keep(c.verbose, self.verbose),
+            pedantic: keep(c.pedantic, self.pedantic),
             echo: keep(c.echo, self.echo),
             headers: keep(c.headers, self.headers),
             protocol: c.protocol.unwrap_or(self.protocol),
@@ -108,6 +117,7 @@ mod tests {
             o,
             ClientOpts {
                 verbose: false,
+                pedantic: true,
                 echo: true,
                 headers: true,
                 protocol: 0,

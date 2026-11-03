@@ -4,8 +4,8 @@ A Core NATS server in Rust, on the [zzq](https://github.com/paddor/zzq)
 engine: shared-nothing IO lanes, no locks on the message path, batched
 wakes and writes.
 
-The server is a skeleton: literal subjects, plain TCP, no
-authentication.
+The server runs core publish and subscribe: wildcards, queue groups,
+`UNSUB` maximums. One account so far, plain TCP, no authentication.
 
 | Crate | Role |
 | --- | --- |

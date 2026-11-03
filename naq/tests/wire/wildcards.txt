@@ -1,0 +1,127 @@
+# One-token and tail wildcards.
+a> CONNECT {"verbose":false}
+a> SUB foo.* 1
+a> SUB foo.> 2
+a> SUB *.bar 3
+a> SUB > 4
+a> SUB foo.bar 5
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> CONNECT {"verbose":false}
+b> PUB foo.bar 1
+b> 1
+b> PUB foo.bar.baz 1
+b> 2
+b> PUB foo 1
+b> 3
+b> PUB baz.bar 1
+b> 4
+
+# A wildcard published is a token like any other.
+b> PUB foo.* 1
+b> 5
+b> PUB foo.> 1
+b> 6
+
+# Subjects with an empty token match nothing.
+b> PUB foo..bar 1
+b> 7
+b> PUB foo. 1
+b> 8
+b> PUB .foo 1
+b> 9
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< -ERR 'Invalid Publish Subject'
+b< -ERR 'Invalid Publish Subject'
+b< -ERR 'Invalid Publish Subject'
+b< -ERR 'Invalid Publish Subject'
+b< -ERR 'Invalid Publish Subject'
+a< MSG foo.bar 1 1
+a< 1
+a< MSG foo.* 1 1
+a< 5
+a< MSG foo.> 1 1
+a< 6
+a< MSG foo.bar 2 1
+a< 1
+a< MSG foo.bar.baz 2 1
+a< 2
+a< MSG foo.* 2 1
+a< 5
+a< MSG foo.> 2 1
+a< 6
+a< MSG foo.bar 3 1
+a< 1
+a< MSG baz.bar 3 1
+a< 4
+a< MSG foo.bar 4 1
+a< 1
+a< MSG foo.bar.baz 4 1
+a< 2
+a< MSG foo 4 1
+a< 3
+a< MSG baz.bar 4 1
+a< 4
+a< MSG foo.* 4 1
+a< 5
+a< MSG foo.> 4 1
+a< 6
+a< MSG foo.bar 5 1
+a< 1
+
+# Wildcards are whole tokens.
+c> CONNECT {"verbose":false}
+c> SUB x* 1
+c> SUB x.>y 2
+c> PUB x* 1
+c> a
+c> PUB xy 1
+c> b
+c> PUB x.>y 1
+c> c
+c> PUB x.z 1
+c> d
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c< MSG x* 1 1
+c< a
+c< MSG x.>y 2 1
+c< c
+a< MSG x* 4 1
+a< a
+a< MSG xy 4 1
+a< b
+a< MSG x.>y 4 1
+a< c
+a< MSG x.z 4 1
+a< d
+
+# Filters that cannot match anything are refused; the SID stays free.
+d> CONNECT {}
+d> SUB foo..bar 1
+d> SUB foo.>.bar 1
+d> SUB .foo 1
+d> SUB foo. 1
+d> SUB foo.bar 1
+d> SUB foo.baz 1
+d> PUB foo.bar 1
+d> x
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d< +OK
+d< -ERR 'Invalid Subject'
+d< -ERR 'Invalid Subject'
+d< -ERR 'Invalid Subject'
+d< -ERR 'Invalid Subject'
+d< +OK
+d< +OK
+d< +OK
+d< MSG foo.bar 1 1
+d< x
+a< MSG foo.bar 1 1
+a< x
+a< MSG foo.bar 2 1
+a< x
+a< MSG foo.bar 3 1
+a< x
+a< MSG foo.bar 4 1
+a< x
+a< MSG foo.bar 5 1
+a< x

@@ -4,9 +4,9 @@
 //! and a full copy of the server's interest, so a message is routed without
 //! locks. New connections go to the lanes in turn.
 //!
-//! The server is a skeleton: one account, literal subjects, plain TCP, no
-//! authentication. `SUB` with a wildcard or a queue group and `UNSUB` with
-//! a maximum are refused with `-ERR`.
+//! Subjects with wildcards, queue groups and `UNSUB` maximums work as in
+//! `nats-server`. So far there is one account, plain TCP and no
+//! authentication.
 //!
 //! # Examples
 //!

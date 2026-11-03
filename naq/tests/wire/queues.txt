@@ -1,0 +1,55 @@
+# A queue group gets each message once; plain subscriptions get it too.
+a> CONNECT {"verbose":false}
+a> SUB foo q 1
+a> SUB foo 2
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> CONNECT {"verbose":false}
+b> PUB foo 1
+b> 1
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< MSG foo 1 1
+a< 1
+a< MSG foo 2 1
+a< 1
+
+# A group's members on different filters are one group: here the one on
+# foo.* is the only one to match.
+a> SUB foo.* q 3
+b> PUB foo.bar 1
+b> 2
+a< MSG foo.bar 3 1
+a< 2
+
+# Groups of different names each get a pick.
+a> SUB foo.bar r 4
+b> PUB foo.bar 1
+b> 3
+a< MSG foo.bar 3 1
+a< 3
+a< MSG foo.bar 4 1
+a< 3
+
+# Without echo, the publisher's own member is passed over.
+c> CONNECT {"verbose":false,"echo":false}
+c> SUB bar q 1
+c> PUB bar 1
+c> 4
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d> CONNECT {"verbose":false}
+d> SUB bar q 1
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c> PUB bar 1
+c> 5
+d< MSG bar 1 1
+d< 5
+
+# Once the members go, so does the group.
+a> UNSUB 1
+a> UNSUB 3
+a> UNSUB 4
+b> PUB foo.bar 1
+b> 6
+b> PUB foo 1
+b> 7
+a< MSG foo 2 1
+a< 7

@@ -7,20 +7,19 @@
 //! each other lane with interest.
 
 mod data;
+mod route;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use naq_proto::client::Pub;
-use naq_proto::encode::Msg;
 use tokio::sync::oneshot;
 
-pub(crate) use data::{Batch, Fwd};
+pub(crate) use data::{Batch, Out};
 
 use crate::conn::Client;
-use crate::index::{Entry, Index};
+use crate::index::Index;
 use crate::mailbox::{self, Mailbox, Receiver};
 use crate::server::Shared;
 
@@ -36,10 +35,12 @@ thread_local! {
 /// Changes for a lane from the others.
 #[derive(Debug)]
 pub(crate) enum Control {
-    /// Lane `lane` gained or lost a subscription to `subject`.
+    /// Lane `lane` gained or lost a subscription to `subject`, in
+    /// `queue` if given.
     Interest {
         lane: usize,
         subject: Box<[u8]>,
+        queue: Option<Box<[u8]>>,
         add: bool,
     },
     /// Answered once the controls before it are applied.
@@ -75,6 +76,9 @@ pub(crate) fn mailboxes() -> (LaneTx, LaneRx) {
     )
 }
 
+/// A subscription that got its maximum of messages: client and SID.
+type Spent = (Rc<Client>, Box<[u8]>);
+
 /// State of one lane. Only its own thread touches it.
 #[derive(Debug)]
 pub(crate) struct Lane {
@@ -84,6 +88,10 @@ pub(crate) struct Lane {
     pub(crate) index: RefCell<Index>,
     /// Clients with output their writers have not been woken for.
     dirty: RefCell<Vec<Rc<Client>>>,
+    /// Subscriptions that got their maximum of messages, by client and SID.
+    spent: RefCell<Vec<Spent>>,
+    /// State of the random numbers for queue picks.
+    rng: Cell<u64>,
 }
 
 impl Lane {
@@ -115,49 +123,15 @@ impl Lane {
         }
     }
 
-    /// Encodes `m` for the subscriptions `local` on this lane, skipping
-    /// those of client `skip` (0 skips none: IDs start at 1). Returns a
-    /// subscriber now past the stall mark.
-    #[inline]
-    pub(crate) fn deliver(&self, local: &[Entry], m: &Pub<'_>, skip: u64) -> Option<Rc<Client>> {
-        let opts = &self.shared.opts;
-        let mut stalled = None;
-        for e in local {
-            let c = &e.client;
-            if c.is_closed() || c.id == skip {
-                continue;
-            }
-            let len = {
-                let mut out = c.out.borrow_mut();
-                Msg {
-                    subject: m.subject,
-                    sid: &e.sid,
-                    reply: m.reply,
-                    headers: m.headers.filter(|_| c.headers.get()),
-                    payload: m.payload,
-                }
-                .encode(&mut *out);
-                out.len()
-            };
-            self.mark(c);
-            if len > opts.max_pending {
-                // A slow consumer.
-                c.close();
-            } else if len > opts.max_pending / 4 * 3 {
-                stalled = Some(c.clone());
-            }
-        }
-        stalled
-    }
-
     /// Tells every other lane that this one gained or lost a subscription
-    /// to `subject`.
-    pub(crate) fn announce(&self, subject: &[u8], add: bool) {
+    /// to `subject`, in `queue` if given.
+    pub(crate) fn announce(&self, subject: &[u8], queue: Option<&[u8]>, add: bool) {
         for (i, tx) in self.shared.lanes.iter().enumerate() {
             if i != self.id {
                 tx.control.push(Control::Interest {
                     lane: self.id,
                     subject: subject.into(),
+                    queue: queue.map(Into::into),
                     add,
                 });
             }
@@ -187,8 +161,15 @@ impl Lane {
 
     fn control(&self, c: Control) {
         match c {
-            Control::Interest { lane, subject, add } => {
-                self.index.borrow_mut().remote(&subject, lane, add);
+            Control::Interest {
+                lane,
+                subject,
+                queue,
+                add,
+            } => {
+                self.index
+                    .borrow_mut()
+                    .remote(&subject, queue.as_deref(), lane, add);
             }
             Control::Fence(done) => {
                 let _ = done.send(());
@@ -206,6 +187,8 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         shared,
         index: RefCell::default(),
         dirty: RefCell::default(),
+        spent: RefCell::default(),
+        rng: Cell::new(seed()),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;
@@ -224,4 +207,12 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
 /// The state of lane `index` of server `id`, on that lane's thread.
 pub(crate) fn get(id: u64, index: usize) -> Option<Rc<Lane>> {
     LANES.with(|l| l.borrow().get(&(id, index)).cloned())
+}
+
+/// A different seed for every lane.
+fn seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u8(0);
+    h.finish()
 }

@@ -7,19 +7,19 @@ mod write;
 pub(crate) use read::stall;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use naq_proto::client::ParseError;
 use naq_proto::encode;
+use rustc_hash::FxHashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use zzq_tokio::transport::{Driver, Stream};
 
-use crate::lane::{self, Fwd, Lane};
+use crate::lane::{self, Lane, Out};
 use crate::server::Shared;
 
 /// How long a closed connection's writer may take to write what is left,
@@ -37,6 +37,8 @@ pub(crate) struct Client {
     pub(crate) dirty: Cell<bool>,
     /// Takes headers (`HMSG`), as its `CONNECT` said.
     pub(crate) headers: Cell<bool>,
+    /// Subscriptions by SID.
+    pub(crate) subs: RefCell<FxHashMap<Box<[u8]>, Sub>>,
     closed: Cell<bool>,
     /// Wakes the writer.
     wake: Notify,
@@ -47,12 +49,13 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    fn new(id: u64) -> Client {
+    pub(crate) fn new(id: u64) -> Client {
         Client {
             id,
             out: RefCell::default(),
             dirty: Cell::new(false),
             headers: Cell::new(false),
+            subs: RefCell::default(),
             closed: Cell::new(false),
             wake: Notify::new(),
             drained: Notify::new(),
@@ -68,6 +71,18 @@ impl Client {
         self.closed.get()
     }
 
+    /// Ends subscription `sid`, on this lane and then on the others.
+    pub(crate) fn unsubscribe(&self, lane: &Lane, sid: &[u8]) {
+        let Some(sub) = self.subs.borrow_mut().remove(sid) else {
+            return;
+        };
+        let queue = sub.queue.as_deref();
+        lane.index
+            .borrow_mut()
+            .remove(&sub.subject, queue, self.id, sid);
+        lane.announce(&sub.subject, queue, false);
+    }
+
     /// Closes the connection once the writer wrote what is queued.
     pub(crate) fn close(&self) {
         if !self.closed.replace(true) {
@@ -75,6 +90,13 @@ impl Client {
             self.wake.notify_one();
         }
     }
+}
+
+/// A subscription of a client.
+#[derive(Debug)]
+pub(crate) struct Sub {
+    pub(crate) subject: Box<[u8]>,
+    pub(crate) queue: Option<Box<[u8]>>,
 }
 
 /// Why a connection ended.
@@ -97,13 +119,11 @@ enum Close {
 struct Conn {
     lane: Rc<Lane>,
     client: Rc<Client>,
-    /// Subscriptions by SID, with their subject.
-    subs: HashMap<Box<[u8]>, Box<[u8]>>,
     opts: handshake::ClientOpts,
     /// A subscriber this connection fed is past the stall mark.
     stalled: Option<Rc<Client>>,
     /// Publishes for other lanes from the current read, by lane.
-    fwd: Vec<Vec<Fwd>>,
+    fwd: Vec<Out>,
     /// Subscriptions changed since the last `PING`: the next waits until
     /// every lane applied them.
     unfenced: bool,
@@ -167,11 +187,10 @@ where
     );
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w));
     client.wake_writer();
-    let fwd = (0..lane.lanes()).map(|_| Vec::new()).collect();
+    let fwd = (0..lane.lanes()).map(|_| Out::default()).collect();
     let mut conn = Conn {
         lane,
         client,
-        subs: HashMap::new(),
         opts: handshake::ClientOpts::default(),
         stalled: None,
         fwd,
@@ -222,12 +241,9 @@ impl Conn {
         if let Some(text) = farewell(close) {
             self.error(text);
         }
-        {
-            let mut index = self.lane.index.borrow_mut();
-            for (sid, subject) in self.subs.drain() {
-                index.remove(&subject, self.client.id, &sid);
-                self.lane.announce(&subject, false);
-            }
+        let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
+        for sid in sids {
+            self.client.unsubscribe(&self.lane, &sid);
         }
         self.lane.flush();
         self.client.close();

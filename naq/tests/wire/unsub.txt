@@ -1,0 +1,76 @@
+# UNSUB with a maximum ends the subscription after that many messages.
+a> CONNECT {"verbose":false}
+a> SUB foo 1
+a> UNSUB 1 2
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> CONNECT {"verbose":false}
+b> PUB foo 1
+b> 1
+b> PUB foo 1
+b> 2
+b> PUB foo 1
+b> 3
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< MSG foo 1 1
+a< 1
+a< MSG foo 1 1
+a< 2
+
+# The maximum counts what was delivered before; at or under it, it ends now.
+a> SUB bar 2
+b> PUB bar 1
+b> 4
+b> PUB bar 1
+b> 5
+a< MSG bar 2 1
+a< 4
+a< MSG bar 2 1
+a< 5
+a> UNSUB 2 2
+b> PUB bar 1
+b> 6
+
+# A larger maximum is kept.
+a> SUB baz 3
+b> PUB baz 1
+b> 7
+a< MSG baz 3 1
+a< 7
+a> UNSUB 3 3
+b> PUB baz 1
+b> 8
+b> PUB baz 1
+b> 9
+b> PUB baz 1
+b> 0
+a< MSG baz 3 1
+a< 8
+a< MSG baz 3 1
+a< 9
+
+# The SID of an ended subscription can be used again.
+a> SUB foo 1
+b> PUB foo 2
+b> 11
+a< MSG foo 1 2
+a< 11
+
+# A maximum of 0, or one that is not a number, ends it now.
+a> SUB q1 4
+a> UNSUB 4 0
+a> SUB q2 5
+a> UNSUB 5 x
+b> PUB q1 1
+b> a
+b> PUB q2 1
+b> b
+
+# A queue member with a maximum.
+a> SUB qq g 6
+a> UNSUB 6 1
+b> PUB qq 1
+b> c
+b> PUB qq 1
+b> d
+a< MSG qq 6 1
+a< c

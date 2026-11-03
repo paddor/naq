@@ -1,8 +1,9 @@
 //! Sans-I/O codec for the NATS client protocol.
 //!
 //! [`client::parse`] reads what a client sends, as slices of the input.
-//! [`encode`] writes what a server sends. No I/O and no allocation: the
-//! caller owns every buffer.
+//! [`encode`] writes what a server sends. [`subject`] has the rules of
+//! subjects and wildcards. No I/O and no allocation: the caller owns every
+//! buffer.
 //!
 //! # Examples
 //!
@@ -35,3 +36,4 @@
 pub mod client;
 pub mod encode;
 mod num;
+pub mod subject;

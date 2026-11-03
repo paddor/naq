@@ -5,11 +5,12 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use naq_proto::client::{self, ClientOp, Limits, ParseError, Parsed, Pub, Sub, Unsub};
+use naq_proto::subject;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Client, Close, Conn};
-use crate::index::Entry;
-use crate::lane::{Batch, Fwd};
+use crate::index::{Entry, Few, Interest, queue_groups};
+use crate::lane::{Batch, Out};
 
 /// Bytes a read may fill at least. With less room, the buffer grows by
 /// [`READ_CHUNK`] or takes back what was parsed already.
@@ -48,6 +49,7 @@ impl Conn {
         loop {
             let (at, stop) = self.parse(&buf, &limits);
             self.lane.flush();
+            self.lane.expire();
             self.ship(&mut buf, at).await;
             let need = match stop {
                 Ok(Stop::More(need)) => need,
@@ -107,7 +109,7 @@ impl Conn {
     /// Drops the `at` bytes parsed from `buf`, handing those that publishes
     /// for other lanes refer to over to those lanes.
     async fn ship(&mut self, buf: &mut BytesMut, at: usize) {
-        if self.fwd.iter().all(Vec::is_empty) {
+        if self.fwd.iter().all(Out::is_empty) {
             buf.advance(at);
             return;
         }
@@ -116,10 +118,10 @@ impl Conn {
             if self.fwd[to].is_empty() {
                 continue;
             }
-            let msgs = std::mem::take(&mut self.fwd[to]);
+            let out = std::mem::take(&mut self.fwd[to]);
             let batch = Batch {
                 chunk: chunk.clone(),
-                msgs,
+                out,
             };
             self.lane.ship(to, batch).await;
         }
@@ -130,6 +132,10 @@ impl Conn {
             ClientOp::Pub(p) => {
                 if p.headers.is_some() && !self.opts.headers {
                     return Err(Close::NoHeaders);
+                }
+                if self.opts.pedantic && !subject::is_valid_literal(p.subject) {
+                    // Delivered all the same, as by `nats-server`.
+                    self.error("Invalid Publish Subject");
                 }
                 self.ok();
                 self.publish(&p, buf);
@@ -153,58 +159,92 @@ impl Conn {
         Ok(Step::Next)
     }
 
-    /// Encodes the message for every subscription on this lane, and queues
-    /// it once for each other lane with interest. `p` lies in `buf`.
+    /// Encodes the message for every plain subscription on this lane and
+    /// one member of each queue group here, and queues it once for each
+    /// other lane with interest. `p` lies in `buf`.
     #[inline]
     fn publish(&mut self, p: &Pub<'_>, buf: &[u8]) {
-        let lane = &*self.lane;
+        // A handle of its own: the index borrow must not hold `self`.
+        let lane = Rc::clone(&self.lane);
         let index = lane.index.borrow();
-        let Some(interest) = index.matches(p.subject) else {
+        let found = index.matches(p.subject);
+        if found.is_empty() {
             return;
-        };
-        let skip = if self.opts.echo { 0 } else { self.client.id };
-        if let Some(c) = lane.deliver(&interest.local, p, skip) {
-            self.stalled = Some(c);
         }
-        for &(to, _) in &interest.lanes {
-            self.fwd[to].push(Fwd::of(buf, p));
+        let skip = if self.opts.echo { 0 } else { self.client.id };
+        let mut stalled = None;
+        for i in found.iter() {
+            lane.deliver(&i.plain.local, p, skip, &mut stalled);
+            for &(to, _) in &i.plain.lanes {
+                self.fwd[to].plain(buf, p);
+            }
+        }
+        for (k, i) in found.iter().enumerate() {
+            for (name, _) in &i.queues {
+                if merged_before(&found, k, name) {
+                    continue;
+                }
+                let groups = queue_groups(&found, k, name);
+                if let Some(to) = lane.deliver_queue(&groups, p, skip, &mut stalled) {
+                    self.fwd[to].queue(buf, p, name);
+                }
+            }
+        }
+        if stalled.is_some() {
+            self.stalled = stalled;
         }
     }
 
     fn subscribe(&mut self, s: &Sub<'_>) {
-        if s.queue.is_some() {
-            return self.error("Queue Groups Not Supported");
-        }
-        if s.subject
-            .split(|&b| b == b'.')
-            .any(|t| t == b"*" || t == b">")
-        {
-            return self.error("Wildcards Not Supported");
-        }
-        if self.subs.contains_key(s.sid) {
+        if self.client.subs.borrow().contains_key(s.sid) {
             return self.ok();
         }
-        self.subs.insert(s.sid.into(), s.subject.into());
-        let entry = Entry {
-            client: self.client.clone(),
-            sid: s.sid.into(),
+        if !subject::is_valid_filter(s.subject) {
+            return self.error("Invalid Subject");
+        }
+        let sub = super::Sub {
+            subject: s.subject.into(),
+            queue: s.queue.map(Into::into),
         };
-        self.lane.index.borrow_mut().insert(s.subject, entry);
-        self.lane.announce(s.subject, true);
+        self.client.subs.borrow_mut().insert(s.sid.into(), sub);
+        let entry = Entry::new(self.client.clone(), s.sid);
+        self.lane
+            .index
+            .borrow_mut()
+            .insert(s.subject, s.queue, entry);
+        self.lane.announce(s.subject, s.queue, true);
         self.unfenced = self.lane.lanes() > 1;
         self.ok();
     }
 
+    /// Ends a subscription, now or after its maximum of messages.
     fn unsubscribe(&mut self, u: &Unsub<'_>) {
-        if u.max.is_some_and(|m| m > 0) {
-            return self.error("UNSUB Maximum Not Supported");
+        let max = u.max.unwrap_or(0) as u64;
+        if max > 0 {
+            let subs = self.client.subs.borrow();
+            let Some(sub) = subs.get(u.sid) else {
+                return;
+            };
+            let index = self.lane.index.borrow();
+            let queue = sub.queue.as_deref();
+            if let Some(e) = index.find(&sub.subject, queue, self.client.id, u.sid)
+                && max > e.delivered.get()
+            {
+                e.max.set(max);
+                return;
+            }
         }
-        if let Some(subject) = self.subs.remove(u.sid) {
-            let id = self.client.id;
-            self.lane.index.borrow_mut().remove(&subject, id, u.sid);
-            self.lane.announce(&subject, false);
-        }
+        self.client.unsubscribe(&self.lane, u.sid);
     }
+}
+
+/// Whether queue group `name` of `found[k]` was in an earlier match, and
+/// so got its pick already.
+fn merged_before(found: &Few<'_, Interest>, k: usize, name: &[u8]) -> bool {
+    found
+        .iter()
+        .take(k)
+        .any(|i| i.queues.iter().any(|(n, _)| **n == *name))
 }
 
 /// Gives `buf`, which holds at most the start of one operation, room for

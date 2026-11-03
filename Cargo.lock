@@ -311,6 +311,7 @@ name = "naq"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "memchr",
  "naq-proto",
  "rustc-hash",
  "serde",

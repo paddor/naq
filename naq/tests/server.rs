@@ -196,18 +196,6 @@ fn unsubscribing_and_disconnecting_end_interest() {
 }
 
 #[test]
-fn what_the_skeleton_cannot_do_is_refused() {
-    let s = server();
-    let mut c = Client::quiet(&s);
-    c.send("SUB a.* 1\r\nSUB a.> 2\r\nSUB q g 3\r\nSUB m 4\r\nUNSUB 4 5\r\nPING\r\n");
-    c.expect("-ERR 'Wildcards Not Supported'");
-    c.expect("-ERR 'Wildcards Not Supported'");
-    c.expect("-ERR 'Queue Groups Not Supported'");
-    c.expect("-ERR 'UNSUB Maximum Not Supported'");
-    c.expect("PONG");
-}
-
-#[test]
 fn protocol_errors_close_the_connection() {
     let s = server_with(Options {
         max_payload: 8,
@@ -363,4 +351,98 @@ fn replies_and_headers_cross_lanes() {
     sub.expect("NATS/1.0");
     sub.expect("");
     sub.expect("x");
+}
+
+/// Reads `c`'s messages until the one on subject `done`, and counts those
+/// on other subjects.
+fn count_until_done(c: &mut Client) -> usize {
+    let mut n = 0;
+    loop {
+        let line = c.line();
+        c.line();
+        if line.starts_with("MSG done ") {
+            return n;
+        }
+        n += 1;
+    }
+}
+
+#[test]
+fn wildcard_and_queue_interest_crosses_lanes() {
+    let s = lanes(3);
+    let mut p = Client::quiet(&s);
+    let mut sub = Client::quiet(&s);
+    sub.send("SUB w.* 1\r\nSUB w.> q 2\r\nSUB > 3\r\nPING\r\n");
+    sub.expect("PONG");
+    p.send("PUB w.a 1\r\nx\r\nPUB w.a.b 1\r\ny\r\nPUB v 1\r\nz\r\n");
+    p.flush();
+    let lines: Vec<String> = (0..12).map(|_| sub.line()).collect();
+    let mut msgs: Vec<_> = lines.chunks(2).map(|m| m.join(" ")).collect();
+    // Order holds per subscription only.
+    msgs.sort();
+    assert_eq!(
+        msgs,
+        [
+            "MSG v 3 1 z",
+            "MSG w.a 1 1 x",
+            "MSG w.a 2 1 x",
+            "MSG w.a 3 1 x",
+            "MSG w.a.b 2 1 y",
+            "MSG w.a.b 3 1 y",
+        ],
+    );
+}
+
+#[test]
+fn a_queue_group_spreads_over_its_members_on_every_lane() {
+    let s = lanes(3);
+    let mut members: Vec<Client> = (0..3).map(|_| Client::quiet(&s)).collect();
+    for m in &mut members {
+        m.send("SUB work q 1\r\nSUB done 2\r\nPING\r\n");
+        m.expect("PONG");
+    }
+    let mut p = Client::quiet(&s);
+    let n = 3000;
+    for _ in 0..n {
+        p.send("PUB work 1\r\nx\r\n");
+    }
+    p.send("PUB done 0\r\n\r\n");
+    p.flush();
+    let counts: Vec<usize> = members.iter_mut().map(count_until_done).collect();
+    assert_eq!(counts.iter().sum::<usize>(), n, "each message once");
+    for c in &counts {
+        assert!((800..1200).contains(c), "{counts:?}");
+    }
+}
+
+#[test]
+fn a_queue_group_passes_over_the_publisher_on_its_lane_without_echo() {
+    let s = lanes(2);
+    let mut p = Client::new(&s, r#"{"verbose":false,"echo":false}"#);
+    let mut other = Client::quiet(&s);
+    p.send("SUB work q 1\r\nPING\r\n");
+    p.expect("PONG");
+    other.send("SUB work q 1\r\nSUB done 2\r\nPING\r\n");
+    other.expect("PONG");
+    for _ in 0..200 {
+        p.send("PUB work 1\r\nx\r\n");
+    }
+    p.send("PUB done 0\r\n\r\n");
+    p.flush();
+    assert_eq!(count_until_done(&mut other), 200);
+}
+
+#[test]
+fn a_maximum_ends_a_subscription_on_another_lane() {
+    let s = lanes(2);
+    let mut p = Client::quiet(&s);
+    let mut sub = Client::quiet(&s);
+    sub.send("SUB m 1\r\nUNSUB 1 3\r\nSUB done 2\r\nPING\r\n");
+    sub.expect("PONG");
+    for _ in 0..5 {
+        p.send("PUB m 1\r\nx\r\n");
+    }
+    p.send("PUB done 0\r\n\r\n");
+    p.flush();
+    assert_eq!(count_until_done(&mut sub), 3);
 }
