@@ -40,6 +40,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bytes = { version = "1.12", default-features = false }
 memchr = { version = "2.7", default-features = false }
+rustc-hash = "2.1"
+tokio = { version = "1.53", default-features = false }
+zzq-tokio = { version = "=0.6.0", default-features = false }
 thiserror = { version = "2.0", default-features = false }
 
 [profile.release]
@@ -49,3 +52,7 @@ codegen-units = 1
 
 [profile.bench]
 debug = "line-tables-only"
+
+[patch.crates-io]
+zzq-tokio = { path = "../zzq.rs/zzq-tokio" }
+zzq-proto = { path = "../zzq.rs/zzq-proto" }

@@ -12,7 +12,17 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+bytes = { workspace = true, features = ["std"] }
 naq-proto.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+zzq-tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

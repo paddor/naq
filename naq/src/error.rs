@@ -1,0 +1,48 @@
+//! Server errors.
+
+use std::io;
+
+/// Why a server did not start.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// The client port could not be bound.
+    #[error("cannot listen on {addr}")]
+    Listen {
+        /// Host and port as configured.
+        addr: String,
+        /// The socket error.
+        #[source]
+        source: io::Error,
+    },
+    /// The IO lanes could not start.
+    #[error("cannot start the IO lanes")]
+    Lanes(#[source] io::Error),
+    /// The options ask for something this server cannot do yet.
+    #[error("not supported: {0}")]
+    Unsupported(&'static str),
+}
+
+/// An engine error as an I/O error, so engine types stay private.
+pub(crate) fn io(e: zzq_tokio::Error) -> io::Error {
+    match e {
+        zzq_tokio::Error::Io(e) | zzq_tokio::Error::AddressInUse { source: e, .. } => e,
+        e => io::Error::other(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_errors_become_io_errors_with_their_kind() {
+        let e = io(zzq_tokio::Error::Io(io::Error::from(
+            io::ErrorKind::AddrInUse,
+        )));
+        assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
+        let e = io(zzq_tokio::Error::Closed);
+        assert_eq!(e.kind(), io::ErrorKind::Other);
+        assert_eq!(e.to_string(), "context is shut down");
+    }
+}
