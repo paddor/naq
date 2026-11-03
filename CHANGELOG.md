@@ -125,6 +125,12 @@ Notable changes to naq. The format follows
   load generator CPU.
 - `naq-bench`: `naq_sink`, a fake server that measures the load generator
   alone: a sink for publishers, or a `MSG` source for subscribers.
+- `naq-bench`: `naq_suite`, the benchmark suite. `naq_load` runs the same
+  workloads against `nats-server` and naq, a fresh pinned server per run,
+  the order alternating between repetitions, after an idle check. A table
+  of medians and ratios follows. The perf gate (`--gate`) fails when
+  naq's rate over `nats-server`'s on one publisher to one subscriber falls
+  below a floor, or when the runs spread too wide to tell.
 
 ### Fixed
 

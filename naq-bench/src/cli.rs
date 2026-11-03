@@ -2,13 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
 use crate::load::{Config, Report};
 use crate::sink::Mode;
+use crate::suite::{self, Host, Output, Plan, Server, Timing};
 use crate::{codec, hop, index};
 
 /// Usage of `naq_load`.
@@ -271,6 +272,103 @@ pub fn load_args(args: &[String]) -> Result<LoadArgs, String> {
     Ok(a)
 }
 
+/// Usage of `naq_suite`.
+pub const SUITE_USAGE: &str = "\
+usage: naq_suite [options]
+  The same load against nats-server and naq, a fresh server per run. The
+  gate fails when naq's rate over nats-server's falls below a floor.
+  --gate               only the gated cells
+  --workload NAME      only this workload, repeatable: one-to-one,
+                       fan-out-4, queue-4, pub-only (all)
+  --nats-server PATH   the rival ($NAQ_GO, else nats-server on PATH)
+  --naq PATH           naq (next to naq_suite)
+  --load PATH          naq_load (next to naq_suite)
+  --lanes N            naq lanes (naq's default: one per core)
+  --reps N             runs per server and cell (3)
+  --warmup SECS        before measuring (2)
+  --duration SECS      measured (10)
+  --port PORT          client port of the servers (4222)
+  --server-cpus LIST   taskset CPUs for the servers (0-3); empty: unpinned
+  --load-cpus LIST     taskset CPUs for naq_load (4-5); empty: unpinned
+  --busy-ok            skip the idle check, for smoke runs
+  --logs DIR           server logs (naq-suite in the temp dir)
+  --record FILE        append each run's JSON line
+  --tag KEY=VALUE      extra label, repeatable";
+
+/// The suite's defaults: binaries in `bins`, the rival at `go` or on the
+/// `PATH`.
+fn suite_plan(bins: &Path, go: Option<PathBuf>) -> Plan {
+    let server = |name: &str, program: PathBuf| Server {
+        name: name.into(),
+        program,
+        args: Vec::new(),
+    };
+    Plan {
+        rival: server("nats-server", go.unwrap_or_else(|| "nats-server".into())),
+        naq: server("naq", bins.join("naq")),
+        load: bins.join("naq_load"),
+        cells: Vec::new(),
+        timing: Timing {
+            reps: 3,
+            warmup: Duration::from_secs(2),
+            duration: Duration::from_secs(10),
+        },
+        host: Host {
+            port: 4222,
+            server_cpus: "0-3".into(),
+            load_cpus: "4-5".into(),
+            idle_check: true,
+        },
+        out: Output {
+            logs: std::env::temp_dir().join("naq-suite"),
+            record: None,
+            tags: BTreeMap::new(),
+        },
+    }
+}
+
+/// Parses `naq_suite` arguments. Binaries default to `bins`, the rival to
+/// `go`.
+///
+/// # Errors
+///
+/// A message naming the bad argument.
+pub fn suite_args(args: &[String], bins: &Path, go: Option<PathBuf>) -> Result<Plan, String> {
+    let mut p = suite_plan(bins, go);
+    let (mut names, mut gated) = (Vec::new(), false);
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let mut val = || it.next().ok_or_else(|| format!("{flag} needs a value"));
+        match flag.as_str() {
+            "--gate" => gated = true,
+            "--busy-ok" => p.host.idle_check = false,
+            "--workload" => names.push(val()?.clone()),
+            "--nats-server" => p.rival.program = val()?.into(),
+            "--naq" => p.naq.program = val()?.into(),
+            "--load" => p.load = val()?.into(),
+            "--lanes" => {
+                let n: usize = parse(flag, val()?)?;
+                p.naq.args = vec!["--lanes".into(), n.to_string()];
+            }
+            "--reps" => p.timing.reps = parse(flag, val()?)?,
+            "--warmup" => p.timing.warmup = secs(flag, val()?)?,
+            "--duration" => p.timing.duration = secs(flag, val()?)?,
+            "--port" => p.host.port = parse(flag, val()?)?,
+            "--server-cpus" => p.host.server_cpus.clone_from(val()?),
+            "--load-cpus" => p.host.load_cpus.clone_from(val()?),
+            "--logs" => p.out.logs = val()?.into(),
+            "--record" => p.out.record = Some(val()?.into()),
+            "--tag" => tag(&mut p.out.tags, val()?)?,
+            _ => return Err(format!("unknown argument {flag:?}")),
+        }
+    }
+    if p.timing.reps == 0 || p.host.port == 0 {
+        return Err("--reps and --port must not be 0".into());
+    }
+    p.cells = suite::cells(&names, gated)?;
+    Ok(p)
+}
+
 /// Parses `naq_sink` arguments.
 ///
 /// # Errors
@@ -507,6 +605,66 @@ mod tests {
             (v["bench"].as_str(), v["kind"].as_str()),
             (Some("index"), Some("hash"))
         );
+    }
+
+    #[test]
+    fn parses_suite_args() {
+        let bins = Path::new("/b");
+        let p = suite_args(&[], bins, None).unwrap();
+        assert_eq!(p.rival.program, Path::new("nats-server"));
+        assert_eq!(
+            (p.naq.program.as_path(), p.load.as_path()),
+            (Path::new("/b/naq"), Path::new("/b/naq_load"))
+        );
+        assert_eq!((p.cells.len(), p.timing.reps, p.host.port), (9, 3, 4222));
+        assert!(p.host.idle_check && p.naq.args.is_empty());
+        let p = suite_args(
+            &strings(
+                "--gate --busy-ok --workload one-to-one --nats-server /g --naq /n --load /l \
+                 --lanes 2 --reps 5 --warmup 0.5 --duration 3 --port 5000 --server-cpus 0-1 \
+                 --load-cpus 2 --logs /logs --record /r.jsonl --tag k=v",
+            ),
+            bins,
+            Some("/go".into()),
+        )
+        .unwrap();
+        assert_eq!(p.rival.program, Path::new("/g"));
+        assert_eq!(
+            (p.naq.program.as_path(), p.load.as_path()),
+            (Path::new("/n"), Path::new("/l"))
+        );
+        assert_eq!(p.naq.args, ["--lanes", "2"]);
+        assert_eq!((p.cells.len(), p.timing.reps), (3, 5));
+        assert_eq!(
+            (p.timing.warmup, p.timing.duration),
+            (Duration::from_millis(500), Duration::from_secs(3))
+        );
+        assert_eq!(
+            (
+                p.host.port,
+                p.host.server_cpus.as_str(),
+                p.host.load_cpus.as_str()
+            ),
+            (5000, "0-1", "2")
+        );
+        assert!(!p.host.idle_check);
+        assert_eq!(p.out.logs, Path::new("/logs"));
+        assert_eq!(p.out.record, Some("/r.jsonl".into()));
+        assert_eq!(p.out.tags["k"], "v");
+        let go = suite_args(&[], bins, Some("/go".into())).unwrap();
+        assert_eq!(go.rival.program, Path::new("/go"));
+        for bad in [
+            "--reps 0",
+            "--port 0",
+            "--port 70000",
+            "--lanes x",
+            "--workload nope",
+            "--gate --workload pub-only",
+            "--record",
+            "--nope",
+        ] {
+            assert!(suite_args(&strings(bad), bins, None).is_err(), "{bad}");
+        }
     }
 
     #[test]

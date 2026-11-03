@@ -11,6 +11,7 @@ const SINK: &str = env!("CARGO_BIN_EXE_naq_sink");
 const CODEC: &str = env!("CARGO_BIN_EXE_naq_codec");
 const HOP: &str = env!("CARGO_BIN_EXE_naq_hop");
 const INDEX: &str = env!("CARGO_BIN_EXE_naq_index");
+const SUITE: &str = env!("CARGO_BIN_EXE_naq_suite");
 
 /// A sink process, killed on drop.
 struct SinkProc(Child, String);
@@ -105,7 +106,7 @@ fn source_feeds_a_subscribe_only_load() {
 
 #[test]
 fn bins_print_usage_and_reject_bad_arguments() {
-    for bin in [LOAD, SINK, CODEC, HOP, INDEX] {
+    for bin in [LOAD, SINK, CODEC, HOP, INDEX, SUITE] {
         let help = Command::new(bin).arg("--help").output().unwrap();
         assert!(help.status.success());
         assert!(String::from_utf8_lossy(&help.stdout).starts_with("usage:"));
@@ -251,4 +252,116 @@ fn hop_and_index_record_their_runs() {
         assert_eq!(out.status.code(), Some(1), "{out:?}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fake server for the suite: `naq_sink` on the address the suite
+/// passes as `-a HOST -p PORT`.
+fn sink_server(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\nexec {SINK} --addr \"$2:$4\"\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn suite(dir: &std::path::Path, extra: &[&str]) -> (std::process::Output, Vec<serde_json::Value>) {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let record = dir.join(format!("runs-{port}.jsonl"));
+    let out = Command::new(SUITE)
+        .arg("--nats-server")
+        .arg(sink_server(dir, "rival.sh"))
+        .arg("--naq")
+        .arg(sink_server(dir, "naq.sh"))
+        .args([
+            "--lanes",
+            "2",
+            "--warmup",
+            "0.05",
+            "--duration",
+            "0.2",
+            "--port",
+            &port,
+        ])
+        .args([
+            "--server-cpus",
+            "",
+            "--load-cpus",
+            "",
+            "--busy-ok",
+            "--logs",
+        ])
+        .arg(dir.join("logs"))
+        .arg("--record")
+        .arg(&record)
+        .args(extra)
+        .output()
+        .unwrap();
+    let runs = std::fs::read_to_string(&record)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    (out, runs)
+}
+
+#[test]
+fn suite_runs_both_servers_in_turn_and_tables_the_cells() {
+    let dir = std::env::temp_dir().join(format!("naq-suite-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, runs) = suite(
+        &dir,
+        &["--workload", "pub-only", "--reps", "2", "--tag", "k=v"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    let order: Vec<&str> = runs.iter().map(|r| r["server"].as_str().unwrap()).collect();
+    assert_eq!(
+        order,
+        ["nats-server", "naq", "naq", "nats-server"].repeat(2)
+    );
+    let r = &runs[1]["tags"];
+    assert_eq!((r["k"].as_str(), r["rep"].as_str()), (Some("v"), Some("0")));
+    assert_eq!(r["server_args"].as_str(), Some("--lanes 2"));
+    assert!(r["session"].as_str().is_some());
+    assert_eq!(runs[0]["tags"]["server_args"].as_str(), Some(""));
+    assert!(stdout.contains("\npub-only       16 B"), "{stdout}");
+    assert!(
+        stdout.ends_with("gate: no gated cell measured\n"),
+        "{stdout}"
+    );
+    assert!(dir.join("logs/naq-pub-only-1024-1.log").exists());
+
+    // Two sinks are alike, so naq falls below every floor.
+    let (out, runs) = suite(&dir, &["--gate", "--reps", "1"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(runs.len(), 6);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\ngate: FAIL, one-to-one 16 B "),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn suite_stops_when_a_server_does_not_start() {
+    let dir = std::env::temp_dir().join(format!("naq-suite-bad-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, runs) = suite(
+        &dir,
+        &["--gate", "--nats-server", "/nonexistent/nats-server"],
+    );
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(runs.len(), 0);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("naq_suite: nats-server: cannot start"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }
