@@ -14,6 +14,8 @@ pub(super) struct ClientOpts {
     pub(super) echo: bool,
     /// Takes `HPUB` and `HMSG`.
     pub(super) headers: bool,
+    /// Protocol version; 1 and up take `INFO` at any time.
+    pub(super) protocol: i32,
 }
 
 impl Default for ClientOpts {
@@ -22,6 +24,7 @@ impl Default for ClientOpts {
             verbose: true,
             echo: true,
             headers: false,
+            protocol: 0,
         }
     }
 }
@@ -32,6 +35,7 @@ struct Connect {
     verbose: Option<bool>,
     echo: Option<bool>,
     headers: Option<bool>,
+    protocol: Option<i32>,
 }
 
 impl ClientOpts {
@@ -43,6 +47,7 @@ impl ClientOpts {
             verbose: keep(c.verbose, self.verbose),
             echo: keep(c.echo, self.echo),
             headers: keep(c.headers, self.headers),
+            protocol: c.protocol.unwrap_or(self.protocol),
         };
         Ok(())
     }
@@ -60,10 +65,16 @@ struct Info<'a> {
     headers: bool,
     max_payload: usize,
     client_id: u64,
+    client_ip: &'a str,
+    #[serde(rename = "connect_info", skip_serializing_if = "std::ops::Not::not")]
+    bound: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_account: Option<&'a str>,
 }
 
-/// Appends the `INFO` for client `id`.
-pub(super) fn info(shared: &Shared, id: u64, out: &mut Vec<u8>) {
+/// Appends the `INFO` for client `id` at `ip`. `bound` marks the one that
+/// follows the first `PONG`, which names the client's account.
+pub(super) fn info(shared: &Shared, id: u64, ip: &str, bound: bool, out: &mut Vec<u8>) {
     let info = Info {
         server_id: &shared.server_id,
         server_name: &shared.opts.server_name,
@@ -75,6 +86,9 @@ pub(super) fn info(shared: &Shared, id: u64, out: &mut Vec<u8>) {
         headers: true,
         max_payload: shared.opts.max_payload,
         client_id: id,
+        client_ip: ip,
+        bound,
+        remote_account: bound.then_some("$G"),
     };
     // Cannot fail: no maps, no fallible serializers.
     let json = serde_json::to_vec(&info).unwrap_or_default();
@@ -96,10 +110,13 @@ mod tests {
                 verbose: false,
                 echo: true,
                 headers: true,
+                protocol: 0,
             }
         );
         o.apply(br#"{"echo":false}"#).unwrap();
         assert!(!o.echo && !o.verbose && o.headers);
+        o.apply(br#"{"protocol":1}"#).unwrap();
+        assert_eq!(o.protocol, 1);
         assert!(o.apply(b"{").is_err());
         assert!(o.apply(br#"{"echo":1}"#).is_err());
     }

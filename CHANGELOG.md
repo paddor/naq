@@ -17,6 +17,11 @@ Notable changes to naq. The format follows
 - `naq`: several lanes. Every lane holds the server's interest; a
   publish is forwarded once per lane with interest, in batches that slice
   the read buffer. The `PONG` after a `SUB` waits until every lane has it.
+- `naq`: replies as `nats-server` orders and shapes them: `+OK` before a
+  message's deliveries, none after a refused `SUB`; an `HPUB` from a client
+  that did not ask for headers closes it. `INFO` carries `client_ip`, and
+  a client of protocol 1 gets a second `INFO` naming its account after its
+  first `PONG`.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

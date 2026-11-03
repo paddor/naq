@@ -1,0 +1,26 @@
+# HPUB to clients with and without headers.
+a> CONNECT {"verbose":false,"headers":true}
+a> SUB h 1
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> CONNECT {"verbose":false,"headers":true}
+b> HPUB h 12 17
+b> NATS/1.0\r\n\r\nhello
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< HMSG h 1 12 17
+a< NATS/1.0\r\n\r\nhello
+c> CONNECT {"verbose":false}
+c> SUB h 1
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> HPUB h r 18 20
+b> NATS/1.0\r\nA: B\r\n\r\nhi
+a< HMSG h 1 r 18 20
+a< NATS/1.0\r\nA: B\r\n\r\nhi
+c< MSG h 1 r 2
+c< hi
+
+# HPUB from a client that did not ask for headers.
+d> CONNECT {"verbose":false}
+d> HPUB h 12 12
+d> NATS/1.0\r\n\r\n
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d< (closed)

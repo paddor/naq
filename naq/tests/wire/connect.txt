@@ -1,0 +1,50 @@
+# CONNECT, verbose mode, PING and PONG.
+a> CONNECT {}
+a> PING
+a> SUB foo 1
+a> PUB foo 2
+a> hi
+a> UNSUB 1
+a> PONG
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< +OK
+a< PONG
+a< +OK
+a< +OK
+a< MSG foo 1 2
+a< hi
+a< +OK
+
+# Fields a CONNECT leaves out keep their value.
+b> CONNECT {"verbose":false}
+b> CONNECT {"echo":true}
+b> SUB foo 1
+b> PUB foo 0
+b>
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< MSG foo 1 0
+b< 
+
+# Verbs in any case, runs of blanks between arguments.
+c> connect {"verbose":false}
+c> sub foo 1
+c> pub   foo  2
+c> hi
+c> PiNg
+c> ping extra args are ignored
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c< MSG foo 1 2
+c< hi
+c< PONG
+c< PONG
+b< MSG foo 1 2
+b< hi
+
+# A client of protocol 1 gets a second INFO after its first PONG.
+d> CONNECT {"verbose":false,"protocol":1}
+d> PING
+d> PING
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d< PONG
+d< INFO {"client_ip":"127.0.0.1","connect_info":true,"headers":true,"max_payload":1048576,"proto":1,"remote_account":"$G"}
+d< PONG

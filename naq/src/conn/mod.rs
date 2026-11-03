@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use naq_proto::client::ParseError;
+use naq_proto::encode;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -87,6 +88,8 @@ enum Close {
     Parse(ParseError),
     /// The `CONNECT` was not valid.
     Connect,
+    /// An `HPUB` from a client that did not ask for headers.
+    NoHeaders,
 }
 
 /// The reader's side of a connection.
@@ -104,6 +107,12 @@ struct Conn {
     /// Subscriptions changed since the last `PING`: the next waits until
     /// every lane applied them.
     unfenced: bool,
+    /// Its address, for `INFO`.
+    ip: String,
+    /// Sent its `CONNECT`.
+    connected: bool,
+    /// Got its first `PONG` after the `CONNECT`.
+    ponged: bool,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -111,11 +120,24 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
     let Some(lane) = lane::get(shared.id, index) else {
         return;
     };
-    let _ = stream.drive(ConnDriver { lane }).await;
+    let ip = peer_ip(&stream);
+    let _ = stream.drive(ConnDriver { lane, ip }).await;
+}
+
+/// The client's IP address, as text.
+fn peer_ip(stream: &Stream) -> String {
+    match stream {
+        Stream::Tcp(s) => s
+            .peer_addr()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 struct ConnDriver {
     lane: Rc<Lane>,
+    ip: String,
 }
 
 impl Driver for ConnDriver {
@@ -126,17 +148,23 @@ impl Driver for ConnDriver {
         R: AsyncRead + Unpin + 'static,
         W: AsyncWrite + Unpin + 'static,
     {
-        serve(self.lane, reader, writer)
+        serve(self.lane, self.ip, reader, writer)
     }
 }
 
-async fn serve<R, W>(lane: Rc<Lane>, mut r: R, w: W)
+async fn serve<R, W>(lane: Rc<Lane>, ip: String, mut r: R, w: W)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
     let client = Rc::new(Client::new(lane.shared.next_client()));
-    handshake::info(&lane.shared, client.id, &mut client.out.borrow_mut());
+    handshake::info(
+        &lane.shared,
+        client.id,
+        &ip,
+        false,
+        &mut client.out.borrow_mut(),
+    );
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w));
     client.wake_writer();
     let fwd = (0..lane.lanes()).map(|_| Vec::new()).collect();
@@ -148,6 +176,9 @@ where
         stalled: None,
         fwd,
         unfenced: false,
+        ip,
+        connected: false,
+        ponged: false,
     };
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
@@ -158,6 +189,26 @@ impl Conn {
     fn reply(&self, bytes: &[u8]) {
         self.client.out.borrow_mut().extend_from_slice(bytes);
         self.lane.mark(&self.client);
+    }
+
+    /// Queues `+OK` in verbose mode.
+    fn ok(&self) {
+        if self.opts.verbose {
+            self.reply(encode::OK);
+        }
+    }
+
+    /// Queues `PONG`, and after the first since the `CONNECT`, an `INFO` for
+    /// clients that take one at any time.
+    fn pong(&mut self) {
+        self.reply(encode::PONG);
+        if !self.connected || std::mem::replace(&mut self.ponged, true) {
+            return;
+        }
+        if self.opts.protocol >= 1 {
+            let mut out = self.client.out.borrow_mut();
+            handshake::info(&self.lane.shared, self.client.id, &self.ip, true, &mut out);
+        }
     }
 
     /// Queues `-ERR 'text'` for this client.
@@ -198,7 +249,8 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked
-        | Close::Connect => None,
+        | Close::Connect
+        | Close::NoHeaders => None,
         Close::Parse(_) => Some("Unknown Protocol Operation"),
     }
 }

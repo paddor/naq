@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use naq_proto::client::{self, ClientOp, Limits, ParseError, Parsed, Pub, Sub, Unsub};
-use naq_proto::encode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Client, Close, Conn};
@@ -55,7 +54,7 @@ impl Conn {
                 Ok(Stop::Fence) => {
                     self.lane.fence().await;
                     self.unfenced = false;
-                    self.reply(encode::PONG);
+                    self.pong();
                     self.lane.flush();
                     continue;
                 }
@@ -128,23 +127,28 @@ impl Conn {
 
     fn handle(&mut self, op: ClientOp<'_>, buf: &[u8]) -> Result<Step, Close> {
         match op {
-            ClientOp::Pub(p) => self.publish(&p, buf),
-            ClientOp::Sub(s) => self.subscribe(&s),
-            ClientOp::Unsub(u) => self.unsubscribe(&u),
-            ClientOp::Ping if self.unfenced => return Ok(Step::Fence),
-            ClientOp::Ping => {
-                self.reply(encode::PONG);
-                return Ok(Step::Next);
+            ClientOp::Pub(p) => {
+                if p.headers.is_some() && !self.opts.headers {
+                    return Err(Close::NoHeaders);
+                }
+                self.ok();
+                self.publish(&p, buf);
             }
-            ClientOp::Pong => return Ok(Step::Next),
+            ClientOp::Sub(s) => self.subscribe(&s),
+            ClientOp::Unsub(u) => {
+                self.unsubscribe(&u);
+                self.ok();
+            }
+            ClientOp::Ping if self.unfenced => return Ok(Step::Fence),
+            ClientOp::Ping => self.pong(),
+            ClientOp::Pong => {}
             ClientOp::Connect(json) => {
                 self.opts.apply(json).map_err(|_| Close::Connect)?;
                 self.client.headers.set(self.opts.headers);
+                self.connected = true;
+                self.ok();
             }
             _ => return Err(Close::Parse(ParseError::UnknownOp)),
-        }
-        if self.opts.verbose {
-            self.reply(encode::OK);
         }
         Ok(Step::Next)
     }
@@ -178,7 +182,7 @@ impl Conn {
             return self.error("Wildcards Not Supported");
         }
         if self.subs.contains_key(s.sid) {
-            return;
+            return self.ok();
         }
         self.subs.insert(s.sid.into(), s.subject.into());
         let entry = Entry {
@@ -188,6 +192,7 @@ impl Conn {
         self.lane.index.borrow_mut().insert(s.subject, entry);
         self.lane.announce(s.subject, true);
         self.unfenced = self.lane.lanes() > 1;
+        self.ok();
     }
 
     fn unsubscribe(&mut self, u: &Unsub<'_>) {

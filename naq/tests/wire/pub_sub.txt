@@ -1,0 +1,48 @@
+# Two clients, a reply subject, UNSUB.
+a> CONNECT {"verbose":false}
+a> SUB foo 1
+a> SUB foo 2
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> CONNECT {"verbose":false}
+b> PUB foo bar.reply 5
+b> hello
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< MSG foo 1 bar.reply 5
+a< hello
+a< MSG foo 2 bar.reply 5
+a< hello
+a> UNSUB 1
+b> PUB foo 3
+b> two
+a< MSG foo 2 3
+a< two
+a> UNSUB 2
+b> PUB foo 5
+b> gone!
+
+# Echo off: nothing for the publisher's own subscriptions.
+c> CONNECT {"verbose":false,"echo":false}
+c> SUB e 1
+c> PUB e 2
+c> hi
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d> CONNECT {"verbose":false}
+d> SUB e 1
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c> PUB e 2
+c> ho
+d< MSG e 1 2
+d< ho
+
+# A second SUB with a SID in use is ignored; UNSUB of an unknown SID too.
+e> CONNECT {"verbose":false}
+e> SUB x 1
+e> SUB y 1
+e> UNSUB 9
+e> PUB x 1
+e> 1
+e> PUB y 1
+e> 2
+e< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+e< MSG x 1 1
+e< 1

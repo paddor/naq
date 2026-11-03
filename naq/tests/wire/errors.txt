@@ -1,0 +1,40 @@
+# Not an operation.
+a> CONNECT {"verbose":false}
+a> FOO
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< -ERR 'Unknown Protocol Operation'
+a< (closed)
+
+# A message not followed by CRLF.
+b> CONNECT {"verbose":false}
+b> PUB foo 2
+b> hix
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< -ERR 'Unknown Protocol Operation'
+b< (closed)
+
+# A message over max_payload.
+c> CONNECT {"verbose":false}
+c> PUB foo 2000000
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c< -ERR 'Maximum Payload Violation'
+c< (closed)
+
+# Wrong arguments.
+d> CONNECT {"verbose":false}
+d> PUB foo
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+d< (closed)
+e> CONNECT {"verbose":false}
+e> SUB foo
+e< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+e< (closed)
+f> CONNECT {"verbose":false}
+f> PUB foo bar baz 1
+f< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+f< (closed)
+
+# A CONNECT that is not JSON.
+g> CONNECT {
+g< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+g< (closed)
