@@ -1,5 +1,7 @@
 //! The read loop: parses what a client sends and acts on it.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -16,10 +18,13 @@ use crate::index::{Entry, Few, Found, Index, Interest};
 use crate::lane::{Batch, Lane, Out, Queued};
 use crate::perms::{Held, quoted};
 
-/// Bytes a read may fill at least. With less room, the buffer grows by
-/// [`READ_CHUNK`] or takes back what was parsed already.
+/// Bytes a read may fill at least. With less room, the buffer takes back
+/// what was parsed already, or the read goes on in a buffer of
+/// [`READ_CHUNK`].
 const READ_ROOM: usize = 16 << 10;
 const READ_CHUNK: usize = 256 << 10;
+/// Spent read buffers a lane keeps; beyond these, the oldest is let go.
+const SPENT_MAX: usize = 8;
 
 /// Longest a publisher waits at a time for a subscriber past the stall
 /// mark, as in `nats-server`.
@@ -52,7 +57,7 @@ impl Conn {
             max_payload: opts.max_payload,
         };
         let stall_mark = opts.max_pending / 4 * 3;
-        let mut buf = BytesMut::with_capacity(READ_CHUNK);
+        let mut buf = self.lane.reads.take(READ_CHUNK);
         let timer = tokio::time::sleep_until(self.ping.next);
         tokio::pin!(timer);
         loop {
@@ -77,7 +82,7 @@ impl Conn {
             if self.client.is_closed() {
                 return Close::Kicked;
             }
-            make_room(&mut buf, need);
+            make_room(&mut buf, need, &self.lane.reads);
             let due = self
                 .auth_by
                 .map_or(self.ping.next, |t| t.min(self.ping.next));
@@ -160,7 +165,7 @@ impl Conn {
             if self.fwd[to].is_empty() {
                 continue;
             }
-            let out = std::mem::take(&mut self.fwd[to]);
+            let out = self.fwd[to].take();
             let batch = Batch {
                 chunk: chunk.clone(),
                 out,
@@ -567,14 +572,49 @@ fn merged_before(found: &Few<'_, Interest>, k: usize, name: &[u8]) -> bool {
 
 /// Gives `buf`, which holds at most the start of one operation, room for
 /// the next read: [`READ_ROOM`] at least, the rest of an operation of
-/// `need` bytes. Takes back the space parsed already where it can, so a
-/// busy connection reuses one buffer.
-fn make_room(buf: &mut BytesMut, need: Option<usize>) {
+/// `need` bytes. Takes back the space parsed already where nothing else
+/// refers to it, so a busy connection reuses one buffer. Where batches on
+/// other lanes still do, the read goes on in a buffer from `spent`.
+fn make_room(buf: &mut BytesMut, need: Option<usize>, spent: &SpentReads) {
     let room = need.map_or(READ_ROOM, |n| n.saturating_sub(buf.len()).max(READ_ROOM));
-    if buf.capacity() - buf.len() < room {
-        // Asks for no more than a buffer of READ_CHUNK holds besides what is
-        // left, so a buffer of that size takes its parsed space back.
-        buf.reserve(room.max(READ_CHUNK - buf.len().min(READ_CHUNK)));
+    if buf.capacity() - buf.len() >= room {
+        return;
+    }
+    // No more than a buffer of READ_CHUNK holds besides what is left, so a
+    // buffer of that size takes its parsed space back.
+    let want = room.max(READ_CHUNK - buf.len().min(READ_CHUNK));
+    if buf.try_reclaim(want) {
+        return;
+    }
+    let mut next = spent.take(buf.len() + want);
+    next.extend_from_slice(buf);
+    spent.retire(std::mem::replace(buf, next));
+}
+
+/// Read buffers a lane fills again once no batch refers to them, oldest
+/// first. The lane does not allocate per buffer, and a buffer is not freed
+/// by the lane that drops its last batch.
+#[derive(Debug, Default)]
+pub(crate) struct SpentReads(RefCell<VecDeque<BytesMut>>);
+
+impl SpentReads {
+    /// A buffer with room for `len` bytes: a spent one nothing refers to
+    /// any more, else a new one.
+    fn take(&self, len: usize) -> BytesMut {
+        let mut spent = self.0.borrow_mut();
+        let free = spent.iter_mut().position(|b| b.try_reclaim(len));
+        free.and_then(|i| spent.remove(i))
+            .unwrap_or_else(|| BytesMut::with_capacity(len))
+    }
+
+    /// Keeps `buf`, which batches on other lanes may still refer to.
+    fn retire(&self, mut buf: BytesMut) {
+        buf.clear();
+        let mut spent = self.0.borrow_mut();
+        if spent.len() == SPENT_MAX {
+            spent.pop_front();
+        }
+        spent.push_back(buf);
     }
 }
 
@@ -597,12 +637,15 @@ mod tests {
 
     #[test]
     fn a_busy_connection_reuses_its_read_buffer() {
+        let spent = SpentReads::default();
         let mut buf = BytesMut::with_capacity(READ_CHUNK);
+        let start = buf.as_ptr();
         for partial in [0, 5, 1000] {
             buf.resize(READ_CHUNK, b'x');
             buf.advance(READ_CHUNK - partial);
-            make_room(&mut buf, None);
+            make_room(&mut buf, None, &spent);
             assert_eq!(buf.len(), partial);
+            assert_eq!(buf.as_ptr(), start);
             assert!(buf.capacity() >= READ_ROOM);
             assert!(buf.capacity() <= READ_CHUNK, "grew: {}", buf.capacity());
         }
@@ -612,7 +655,49 @@ mod tests {
     fn a_large_operation_gets_room_for_all_of_it() {
         let mut buf = BytesMut::with_capacity(READ_CHUNK);
         buf.extend_from_slice(b"PUB a 1000000");
-        make_room(&mut buf, Some(1_000_020));
+        make_room(&mut buf, Some(1_000_020), &SpentReads::default());
         assert!(buf.capacity() >= 1_000_020);
+    }
+
+    #[test]
+    fn a_read_buffer_is_filled_again_once_no_batch_refers_to_it() {
+        let spent = SpentReads::default();
+        let mut buf = spent.take(READ_CHUNK);
+        let first = buf.as_ptr();
+        buf.resize(READ_CHUNK, b'x');
+        // A batch for another lane holds what was parsed; a partial
+        // operation of 7 bytes is left.
+        let batch = buf.split_to(READ_CHUNK - 7).freeze();
+        make_room(&mut buf, None, &spent);
+        assert_eq!(&buf[..], b"xxxxxxx");
+        assert!(buf.capacity() >= READ_CHUNK - 7);
+        drop(batch);
+        buf.resize(READ_CHUNK, b'y');
+        let held = buf.split_to(READ_CHUNK - 3).freeze();
+        make_room(&mut buf, None, &spent);
+        assert_eq!((&buf[..], buf.as_ptr()), (&b"yyy"[..], first));
+        assert!(buf.capacity() >= READ_CHUNK - 3);
+        drop(held);
+    }
+
+    #[test]
+    fn a_lane_keeps_few_spent_read_buffers() {
+        let spent = SpentReads::default();
+        let held: Vec<_> = (0..SPENT_MAX + 3)
+            .map(|_| {
+                let mut b = BytesMut::with_capacity(64);
+                b.resize(64, 0);
+                let h = b.split_to(60).freeze();
+                spent.retire(b);
+                h
+            })
+            .collect();
+        assert_eq!(spent.0.borrow().len(), SPENT_MAX);
+        // All still referred to: a new buffer.
+        assert!(spent.take(64).capacity() >= 64);
+        assert_eq!(spent.0.borrow().len(), SPENT_MAX);
+        drop(held);
+        assert!(spent.take(64).capacity() >= 64);
+        assert_eq!(spent.0.borrow().len(), SPENT_MAX - 1);
     }
 }

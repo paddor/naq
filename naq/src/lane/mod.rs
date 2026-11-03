@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 pub(crate) use data::{Batch, Out};
 pub(crate) use route::Queued;
 
-use crate::conn::Client;
+use crate::conn::{Client, SpentReads};
 use crate::index::Index;
 use crate::mailbox::{self, Mailbox, Receiver};
 use crate::server::Shared;
@@ -109,6 +109,8 @@ pub(crate) struct Lane {
     pub(crate) tally: Tally,
     /// Clients on this lane, by ID.
     pub(crate) clients: RefCell<FxHashMap<u64, Rc<Client>>>,
+    /// Read buffers of its clients that batches may still refer to.
+    pub(crate) reads: SpentReads,
 }
 
 impl Lane {
@@ -223,6 +225,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         rng: Cell::new(seed()),
         tally: Tally::default(),
         clients: RefCell::default(),
+        reads: SpentReads::default(),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;

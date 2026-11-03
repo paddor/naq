@@ -137,6 +137,9 @@ Notable changes to naq. The format follows
 - `naq-proto`: `client::parse` reads the usual `PUB`, one space before
   each argument, in one pass, at half the cost; anything else goes the
   general way, with the same result.
+- `naq`: a lane fills its clients' read buffers again once no batch for
+  another lane refers to them, instead of allocating new ones; a batch
+  for another lane starts at the size of the last.
 
 ### Fixed
 

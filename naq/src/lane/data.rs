@@ -93,6 +93,17 @@ impl Out {
         self.msgs.is_empty()
     }
 
+    /// The publishes so far. Their place gets vectors of the same size, so
+    /// the next batch does not grow from empty.
+    pub(crate) fn take(&mut self) -> Out {
+        let msgs = Vec::with_capacity(self.msgs.len());
+        let names = Vec::with_capacity(self.names.len());
+        Out {
+            msgs: std::mem::replace(&mut self.msgs, msgs),
+            names: std::mem::replace(&mut self.names, names),
+        }
+    }
+
     /// Forwards `p`, which lies in `base`, for the lane's plain
     /// subscriptions. With `once`, not if the last forward was that already.
     #[inline]
@@ -170,5 +181,30 @@ impl Lane {
                 self.deliver_any(&groups, &p, stalled);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_taken_batch_leaves_room_for_as_many() {
+        let base = b"PUB a 1\r\nx\r\n";
+        let p = Pub {
+            subject: &base[4..5],
+            reply: None,
+            headers: None,
+            payload: &base[9..10],
+        };
+        let mut out = Out::default();
+        for _ in 0..5 {
+            out.plain(base, &p, false);
+        }
+        out.queue(base, &p, b"q");
+        let taken = out.take();
+        assert_eq!((taken.msgs.len(), &taken.names[..]), (6, &b"q"[..]));
+        assert!(out.is_empty() && out.names.is_empty());
+        assert!(out.msgs.capacity() >= 6 && out.names.capacity() >= 1);
     }
 }

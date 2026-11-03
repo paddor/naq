@@ -5,7 +5,7 @@ mod ping;
 mod read;
 mod write;
 
-pub(crate) use read::stall;
+pub(crate) use read::{SpentReads, stall};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
