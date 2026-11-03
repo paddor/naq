@@ -63,6 +63,9 @@ Notable changes to naq. The format follows
   a client gets `-ERR 'Authorization Violation'`; without a `CONNECT`
   within the timeout, `-ERR 'Authentication Timeout'`. `INFO` has
   `auth_required`, and the one after the first `PONG` the account's name.
+- `naq`: NKey users (`Login::Nkey`, `{nkey: U...}` in a `users` list).
+  With any, `INFO` carries a fresh nonce; the client signs it with the
+  key's seed and sends `nkey` and `sig` in its `CONNECT`.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

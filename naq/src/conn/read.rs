@@ -272,7 +272,8 @@ impl Conn {
         let creds = self.opts.apply(json).map_err(|_| Close::Connect)?;
         self.client.headers.set(self.opts.headers);
         if let Some(auth) = &self.lane.shared.auth {
-            match auth.check(&creds) {
+            let nonce = self.nonce.as_deref().unwrap_or_default();
+            match auth.check(&creds, nonce.as_bytes()) {
                 Check::Pass(account) => self.bind(account),
                 Check::Fail => return Err(Close::Auth),
                 Check::Bcrypt(p) => return Ok(Step::Verify(Box::new(p))),
@@ -288,7 +289,7 @@ impl Conn {
     #[inline(never)]
     fn without_connect(&mut self) -> Result<(), Close> {
         let auth = self.lane.shared.auth.as_ref();
-        match auth.map(|a| a.check(&Creds::default())) {
+        match auth.map(|a| a.check(&Creds::default(), b"")) {
             Some(Check::Pass(account)) => {
                 self.bind(account);
                 Ok(())

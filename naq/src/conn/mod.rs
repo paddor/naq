@@ -160,6 +160,8 @@ struct Conn {
     busy: bool,
     /// Until it authenticates: when its time to runs out.
     auth_by: Option<tokio::time::Instant>,
+    /// What it may sign to log in with an NKey.
+    nonce: Option<Box<str>>,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -205,13 +207,18 @@ where
     W: AsyncWrite + Unpin + 'static,
 {
     let client = Rc::new(Client::new(lane.shared.next_client()));
-    handshake::info(
-        &lane.shared,
-        client.id,
-        &ip,
-        None,
-        &mut client.out.borrow_mut(),
-    );
+    let nonce = lane
+        .shared
+        .auth
+        .as_ref()
+        .filter(|a| a.wants_nonce())
+        .map(|_| crate::auth::nonce().into_boxed_str());
+    let to = handshake::To {
+        id: client.id,
+        ip: &ip,
+        nonce: nonce.as_deref(),
+    };
+    handshake::info(&lane.shared, &to, None, &mut client.out.borrow_mut());
     let opts = &lane.shared.opts;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, opts.write_deadline));
     client.wake_writer();
@@ -231,6 +238,7 @@ where
         ping,
         busy: false,
         auth_by,
+        nonce,
     };
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
@@ -261,8 +269,17 @@ impl Conn {
         if self.opts.protocol >= 1 {
             let shared = &self.lane.shared;
             let account = &shared.accounts[self.client.account.get() as usize];
-            let mut out = self.client.out.borrow_mut();
-            handshake::info(shared, self.client.id, &self.ip, Some(account), &mut out);
+            let to = handshake::To {
+                id: self.client.id,
+                ip: &self.ip,
+                nonce: self.nonce.as_deref(),
+            };
+            handshake::info(
+                shared,
+                &to,
+                Some(account),
+                &mut self.client.out.borrow_mut(),
+            );
         }
     }
 

@@ -587,3 +587,27 @@ fn accounts_keep_their_subjects_apart_across_lanes() {
     b1.expect("MSG t 1 1");
     b1.expect("b");
 }
+
+#[test]
+fn an_nkey_user_logs_in_by_signing_the_nonce() {
+    let key = nkeys::KeyPair::new_user();
+    let s = server_with(Options {
+        lanes: 1,
+        users: vec![naq::User {
+            login: naq::Login::Nkey(key.public_key()),
+            account: None,
+        }],
+        ..Options::default()
+    });
+    let (mut c, info) = Client::raw(&s);
+    let json: serde_json::Value =
+        serde_json::from_str(info.strip_prefix("INFO ").unwrap()).unwrap();
+    let nonce = json["nonce"].as_str().unwrap();
+    let sig = data_encoding::BASE64URL_NOPAD.encode(&key.sign(nonce.as_bytes()).unwrap());
+    let connect = format!(
+        r#"{{"verbose":false,"nkey":"{}","sig":"{sig}"}}"#,
+        key.public_key()
+    );
+    c.send(&format!("CONNECT {connect}\r\nPING\r\n"));
+    c.expect("PONG");
+}

@@ -179,11 +179,15 @@ fn auth_that_contradicts_itself_is_an_error() {
         ),
         (
             "authorization { users: [{nkey: UABC}] }\n",
-            "users: nkey: not supported",
+            "users: nkey: not a public user NKey",
         ),
         (
             "authorization { users: [{password: p}] }\n",
             "users: a user needs a name",
+        ),
+        (
+            "authorization { users: [{nkey: UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ, user: x}] }\n",
+            "users: an NKey user has no name or password",
         ),
         ("authorization { users: 1 }\n", "users: expected a list"),
         ("authorization { users: [1] }\n", "users: expected a map"),
@@ -220,4 +224,13 @@ fn a_server_refuses_options_that_contradict_themselves() {
         ..Options::default()
     };
     assert!(matches!(naq::Server::start(&o), Err(Error::Options(_))));
+}
+
+#[test]
+fn nkey_users_come_from_the_users_list() {
+    let key = "UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ";
+    let o: Options = format!("authorization {{ users: [{{nkey: {key}}}] }}\nno_auth_user: {key}\n")
+        .parse()
+        .unwrap();
+    assert_eq!(o.users[0].login, naq::Login::Nkey(key.into()));
 }

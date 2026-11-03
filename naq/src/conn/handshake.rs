@@ -52,6 +52,8 @@ struct Connect {
     user: Option<String>,
     pass: Option<String>,
     auth_token: Option<String>,
+    nkey: Option<String>,
+    sig: Option<String>,
 }
 
 impl ClientOpts {
@@ -71,6 +73,8 @@ impl ClientOpts {
             user: c.user,
             pass: c.pass,
             token: c.auth_token,
+            nkey: c.nkey,
+            sig: c.sig,
         })
     }
 }
@@ -90,15 +94,25 @@ struct Info<'a> {
     client_ip: &'a str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     auth_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<&'a str>,
     #[serde(rename = "connect_info", skip_serializing_if = "std::ops::Not::not")]
     bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_account: Option<&'a str>,
 }
 
-/// Appends the `INFO` for client `id` at `ip`. The one that follows the
-/// first `PONG` names the client's account, `bound`.
-pub(super) fn info(shared: &Shared, id: u64, ip: &str, bound: Option<&str>, out: &mut Vec<u8>) {
+/// The client an `INFO` is for.
+pub(super) struct To<'a> {
+    pub(super) id: u64,
+    pub(super) ip: &'a str,
+    /// For it to sign, if it may log in with an NKey.
+    pub(super) nonce: Option<&'a str>,
+}
+
+/// Appends the `INFO` for client `to`. The one that follows the first
+/// `PONG` names the client's account, `bound`.
+pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut Vec<u8>) {
     let info = Info {
         server_id: &shared.server_id,
         server_name: &shared.opts.server_name,
@@ -109,8 +123,9 @@ pub(super) fn info(shared: &Shared, id: u64, ip: &str, bound: Option<&str>, out:
         port: shared.addr.port(),
         headers: true,
         max_payload: shared.opts.max_payload,
-        client_id: id,
-        client_ip: ip,
+        client_id: to.id,
+        client_ip: to.ip,
+        nonce: to.nonce,
         // Before the CONNECT, a client need not authenticate if it may
         // connect as the no_auth_user.
         auth_required: shared

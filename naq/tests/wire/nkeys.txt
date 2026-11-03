@@ -1,0 +1,18 @@
+# A user NKey: INFO carries a nonce to sign.
+#! authorization {
+#!   users: [{nkey: UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ}]
+#! }
+
+# Without a signature, or with one that does not hold: refused.
+a> CONNECT {"verbose":false,"nkey":"UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ"}
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"nonce":"*","proto":1}
+a< -ERR 'Authorization Violation'
+a< (closed)
+b> CONNECT {"verbose":false,"nkey":"UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ","sig":"AAAA"}
+b< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"nonce":"*","proto":1}
+b< -ERR 'Authorization Violation'
+b< (closed)
+c> CONNECT {"verbose":false,"nkey":"UNOTAKEY","sig":"AAAA"}
+c< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"nonce":"*","proto":1}
+c< -ERR 'Authorization Violation'
+c< (closed)

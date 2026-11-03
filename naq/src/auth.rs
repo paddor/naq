@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use data_encoding::{BASE64, BASE64URL_NOPAD};
 use rustc_hash::FxHashMap;
 
 use crate::{Login, Options};
@@ -14,6 +15,8 @@ pub(crate) const GLOBAL: u32 = 0;
 pub(crate) struct Auth {
     /// By user name: the password or its hash, and the account id.
     users: FxHashMap<String, (String, u32)>,
+    /// By public NKey: the account id.
+    nkeys: FxHashMap<String, u32>,
     token: Option<String>,
     no_auth_user: Option<String>,
     /// How long a client has to authenticate.
@@ -26,6 +29,15 @@ pub(crate) struct Creds {
     pub(crate) user: Option<String>,
     pub(crate) pass: Option<String>,
     pub(crate) token: Option<String>,
+    pub(crate) nkey: Option<String>,
+    /// The nonce signed, in base64.
+    pub(crate) sig: Option<String>,
+}
+
+impl Creds {
+    const fn is_blank(&self) -> bool {
+        self.user.is_none() && self.pass.is_none() && self.token.is_none() && self.nkey.is_none()
+    }
 }
 
 /// The outcome of checking credentials.
@@ -69,7 +81,7 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
     }
     let mut seen = Vec::new();
     for u in &opts.users {
-        let Login::Password { user, .. } = &u.login;
+        let user = name(&u.login);
         if seen.contains(&user) {
             return Err(format!("user {user:?} twice"));
         }
@@ -88,6 +100,28 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// What names a user: its user name or its NKey.
+const fn name(login: &Login) -> &String {
+    match login {
+        Login::Password { user, .. } => user,
+        Login::Nkey(key) => key,
+    }
+}
+
+/// Whether `key` is a public user NKey.
+pub(crate) fn is_user_nkey(key: &str) -> bool {
+    key.starts_with('U') && nkeys::KeyPair::from_public_key(key).is_ok()
+}
+
+/// A fresh nonce for a client to sign: 11 random bytes in URL-safe base64.
+pub(crate) fn nonce() -> String {
+    let mut raw = [0u8; 11];
+    // The OS failing to give randomness leaves the nonce all zeros: still
+    // a nonce, but a guessable one. It does not happen on supported systems.
+    let _ = getrandom::getrandom(&mut raw);
+    BASE64URL_NOPAD.encode(&raw)
+}
+
 impl Auth {
     /// The authentication `opts` ask for, if any. `opts` are valid.
     pub(crate) fn new(opts: &Options, accounts: &[String]) -> Option<Auth> {
@@ -98,16 +132,21 @@ impl Auth {
             name.and_then(|n| accounts.iter().position(|a| a == n))
                 .map_or(GLOBAL, |i| i as u32)
         };
-        let users = opts
-            .users
-            .iter()
-            .map(|u| {
-                let Login::Password { user, password } = &u.login;
-                (user.clone(), (password.clone(), id(u.account.as_ref())))
-            })
-            .collect();
+        let (mut users, mut nkeys) = (FxHashMap::default(), FxHashMap::default());
+        for u in &opts.users {
+            let account = id(u.account.as_ref());
+            match &u.login {
+                Login::Password { user, password } => {
+                    users.insert(user.clone(), (password.clone(), account));
+                }
+                Login::Nkey(key) => {
+                    nkeys.insert(key.clone(), account);
+                }
+            }
+        }
         Some(Auth {
             users,
+            nkeys,
             token: opts.token.clone(),
             no_auth_user: opts.no_auth_user.clone(),
             timeout: opts.auth_timeout,
@@ -120,20 +159,31 @@ impl Auth {
         self.no_auth_user.is_some()
     }
 
-    /// Checks what a client gave.
-    pub(crate) fn check(&self, c: &Creds) -> Check {
-        let blank = c.user.is_none() && c.pass.is_none() && c.token.is_none();
-        let user = match (&c.user, &self.no_auth_user) {
-            (Some(u), _) => Some(u),
-            (None, Some(u)) if blank => {
-                // Known to exist: the options were validated.
-                return self
-                    .users
-                    .get(u)
-                    .map_or(Check::Fail, |(_, a)| Check::Pass(*a));
-            }
-            (None, _) => None,
-        };
+    /// Whether clients get a nonce to sign: some users have NKeys.
+    pub(crate) fn wants_nonce(&self) -> bool {
+        !self.nkeys.is_empty()
+    }
+
+    /// Checks what a client gave, after an `INFO` with `nonce`.
+    pub(crate) fn check(&self, c: &Creds, nonce: &[u8]) -> Check {
+        if c.is_blank()
+            && let Some(u) = &self.no_auth_user
+        {
+            // Known to exist: the options were validated.
+            let account = self
+                .users
+                .get(u)
+                .map(|(_, a)| a)
+                .or_else(|| self.nkeys.get(u));
+            return account.map_or(Check::Fail, |a| Check::Pass(*a));
+        }
+        if let Some(key) = &c.nkey {
+            return match self.nkeys.get(key) {
+                Some(a) if signed(key, nonce, c.sig.as_deref()) => Check::Pass(*a),
+                _ => Check::Fail,
+            };
+        }
+        let user = c.user.as_ref();
         if let Some(name) = user
             && let Some((secret, account)) = self.users.get(name)
         {
@@ -144,6 +194,20 @@ impl Auth {
             _ => Check::Fail,
         }
     }
+}
+
+/// Whether `sig` is `nonce` signed with the seed of public NKey `key`.
+fn signed(key: &str, nonce: &[u8], sig: Option<&str>) -> bool {
+    let Some(sig) = sig else {
+        return false;
+    };
+    let Ok(sig) = BASE64URL_NOPAD
+        .decode(sig.as_bytes())
+        .or_else(|_| BASE64.decode(sig.as_bytes()))
+    else {
+        return false;
+    };
+    nkeys::KeyPair::from_public_key(key).is_ok_and(|k| k.verify(nonce, &sig).is_ok())
 }
 
 /// Compares what a client gave with `secret`, plain or a bcrypt hash.
@@ -194,6 +258,7 @@ mod tests {
             user: user.map(Into::into),
             pass: pass.map(Into::into),
             token: token.map(Into::into),
+            ..Creds::default()
         }
     }
 
@@ -208,18 +273,24 @@ mod tests {
         validate(&opts).unwrap();
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
         assert_eq!(
-            auth.check(&creds(Some("a"), Some("pa"), None)),
+            auth.check(&creds(Some("a"), Some("pa"), None), b""),
             Check::Pass(1)
         );
-        assert_eq!(auth.check(&creds(Some("a"), Some("pg"), None)), Check::Fail);
-        assert_eq!(auth.check(&creds(Some("x"), Some("pa"), None)), Check::Fail);
         assert_eq!(
-            auth.check(&creds(None, None, None)),
+            auth.check(&creds(Some("a"), Some("pg"), None), b""),
+            Check::Fail
+        );
+        assert_eq!(
+            auth.check(&creds(Some("x"), Some("pa"), None), b""),
+            Check::Fail
+        );
+        assert_eq!(
+            auth.check(&creds(None, None, None), b""),
             Check::Pass(GLOBAL),
             "no_auth_user"
         );
-        assert_eq!(auth.check(&creds(None, Some("pa"), None)), Check::Fail);
-        assert_eq!(auth.check(&creds(None, None, Some("t"))), Check::Fail);
+        assert_eq!(auth.check(&creds(None, Some("pa"), None), b""), Check::Fail);
+        assert_eq!(auth.check(&creds(None, None, Some("t")), b""), Check::Fail);
     }
 
     #[test]
@@ -230,11 +301,14 @@ mod tests {
         };
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
         assert_eq!(
-            auth.check(&creds(None, None, Some("s3cret"))),
+            auth.check(&creds(None, None, Some("s3cret")), b""),
             Check::Pass(GLOBAL)
         );
-        assert_eq!(auth.check(&creds(None, None, Some("s3cre"))), Check::Fail);
-        assert_eq!(auth.check(&creds(None, None, None)), Check::Fail);
+        assert_eq!(
+            auth.check(&creds(None, None, Some("s3cre")), b""),
+            Check::Fail
+        );
+        assert_eq!(auth.check(&creds(None, None, None), b""), Check::Fail);
     }
 
     #[test]
@@ -245,12 +319,12 @@ mod tests {
             ..Options::default()
         };
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
-        let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("pw"), None)) else {
+        let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("pw"), None), b"") else {
             panic!("not deferred");
         };
         assert_eq!(p.account, GLOBAL);
         assert!(p.holds());
-        let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("nope"), None)) else {
+        let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("nope"), None), b"") else {
             panic!("not deferred");
         };
         assert!(!p.holds());
@@ -260,6 +334,74 @@ mod tests {
             account: GLOBAL,
         };
         assert!(!broken.holds());
+    }
+
+    /// A user NKey made for these tests: its seed and public key.
+    const SEED: &str = "SUABXPISJ672XCVCU7XD7CVTTXYTBXTGZ4LX3WZCSLCPKHDPCXCLZVMVPI";
+    const PUBLIC: &str = "UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ";
+
+    #[test]
+    fn an_nkey_user_passes_with_the_nonce_signed() {
+        let opts = Options {
+            accounts: vec!["A".into()],
+            users: vec![User {
+                login: Login::Nkey(PUBLIC.into()),
+                account: Some("A".into()),
+            }],
+            ..Options::default()
+        };
+        validate(&opts).unwrap();
+        let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
+        assert!(auth.wants_nonce());
+        let nonce = nonce();
+        assert_eq!(nonce.len(), 15);
+        let sig = nkeys::KeyPair::from_seed(SEED)
+            .unwrap()
+            .sign(nonce.as_bytes())
+            .unwrap();
+        let with = |sig: Option<String>| Creds {
+            nkey: Some(PUBLIC.into()),
+            sig,
+            ..Creds::default()
+        };
+        let n = nonce.as_bytes();
+        assert_eq!(
+            auth.check(&with(Some(BASE64URL_NOPAD.encode(&sig))), n),
+            Check::Pass(1)
+        );
+        assert_eq!(
+            auth.check(&with(Some(BASE64.encode(&sig))), n),
+            Check::Pass(1)
+        );
+        assert_eq!(
+            auth.check(&with(Some(BASE64URL_NOPAD.encode(&sig))), b"other"),
+            Check::Fail
+        );
+        assert_eq!(auth.check(&with(None), n), Check::Fail);
+        assert_eq!(auth.check(&with(Some("!!".into())), n), Check::Fail);
+        let stranger = Creds {
+            nkey: Some("UNKNOWN".into()),
+            ..with(None)
+        };
+        assert_eq!(auth.check(&stranger, n), Check::Fail);
+        assert!(is_user_nkey(PUBLIC));
+        assert!(!is_user_nkey(SEED));
+        assert!(!is_user_nkey("UABC"));
+    }
+
+    #[test]
+    fn an_nkey_no_auth_user_needs_no_signature() {
+        let opts = Options {
+            users: vec![User {
+                login: Login::Nkey(PUBLIC.into()),
+                account: None,
+            }],
+            no_auth_user: Some(PUBLIC.into()),
+            ..Options::default()
+        };
+        validate(&opts).unwrap();
+        let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
+        assert_eq!(auth.check(&Creds::default(), b"x"), Check::Pass(GLOBAL));
     }
 
     #[test]

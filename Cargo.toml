@@ -43,6 +43,9 @@ memchr = { version = "2.7", default-features = false }
 rustc-hash = "2.1"
 hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
 bcrypt = { version = "0.17", default-features = false, features = ["std"] }
+data-encoding = "2.5"
+getrandom = "0.2"
+nkeys = { version = "0.4", default-features = false }
 tokio = { version = "1.53", default-features = false }
 zzq-tokio = { version = "=0.6.0", default-features = false }
 thiserror = { version = "2.0", default-features = false }

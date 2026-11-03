@@ -83,14 +83,14 @@ pub(super) fn accounts(o: &mut Options, item: &Item) -> Result<(), Bad> {
     }
 }
 
-/// A `users` list: each user a map of `user` and `password`.
+/// A `users` list: each user a map of `user` and `password`, or of `nkey`.
 fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
     let Value::Array(list) = &item.value else {
         return Err((item.line, "users: expected a list".into()));
     };
     list.iter()
         .map(|u| {
-            let (mut user, mut password) = (None, None);
+            let (mut user, mut password, mut nkey) = (None, None, None);
             for (key, v) in map(u, "users")? {
                 let key = key.to_ascii_lowercase();
                 let bad = |reason: &str| (v.line, format!("users: {key}: {reason}"));
@@ -101,8 +101,25 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                     "pass" | "password" => {
                         password = Some(string(v).ok_or_else(|| bad("expected a string"))?);
                     }
+                    "nkey" => {
+                        let k = string(v).ok_or_else(|| bad("expected a string"))?;
+                        if !crate::auth::is_user_nkey(&k) {
+                            return Err(bad("not a public user NKey"));
+                        }
+                        nkey = Some(k);
+                    }
                     _ => return Err(bad("not supported")),
                 }
+            }
+            let account = account.map(str::to_owned);
+            if let Some(key) = nkey {
+                if user.is_some() || password.is_some() {
+                    return Err((u.line, "users: an NKey user has no name or password".into()));
+                }
+                return Ok(User {
+                    login: Login::Nkey(key),
+                    account,
+                });
             }
             let user = user.ok_or_else(|| (u.line, "users: a user needs a name".to_owned()))?;
             Ok(User {
@@ -110,7 +127,7 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                     user,
                     password: password.unwrap_or_default(),
                 },
-                account: account.map(str::to_owned),
+                account,
             })
         })
         .collect()

@@ -71,6 +71,9 @@ pub enum Login {
         /// The password, or its hash.
         password: String,
     },
+    /// `nkey` in its `CONNECT`, a public user NKey (`U...`), with `sig`: the
+    /// nonce of the server's `INFO`, signed with the key's seed.
+    Nkey(String),
 }
 
 impl Default for Options {
