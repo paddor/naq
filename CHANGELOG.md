@@ -24,6 +24,11 @@ Notable changes to naq. The format follows
   `INFO`, `-ERR`, `+OK`, `PING` and `PONG`.
 - `naq-bench`: `naq_codec`, the codec's cost on one core: parsing `PUB`,
   encoding `MSG`, and both.
+- `naq-bench`: `naq_hop`, a batched OMQ hop between lanes of two contexts:
+  publishes per second and round trip, with the sockets on the lanes or
+  on OMQ's IO threads.
+- `naq-bench`: `naq_index`, subject lookups in a hash map of literal
+  subjects against zzq's topic trie.
 - `naq-bench`: `naq_load`, a raw-wire NATS load generator. Batched
   publishers stamp each payload; subscribers count and check order. A
   shared window bounds messages in flight, so every message is delivered.

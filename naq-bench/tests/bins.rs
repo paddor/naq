@@ -1,4 +1,4 @@
-//! `naq_load`, `naq_sink` and `naq_codec` as processes.
+//! The benchmark binaries as processes.
 
 #![expect(clippy::unwrap_used, clippy::panic, reason = "tests fail loudly")]
 
@@ -9,6 +9,8 @@ use std::process::{Child, Command, Stdio};
 const LOAD: &str = env!("CARGO_BIN_EXE_naq_load");
 const SINK: &str = env!("CARGO_BIN_EXE_naq_sink");
 const CODEC: &str = env!("CARGO_BIN_EXE_naq_codec");
+const HOP: &str = env!("CARGO_BIN_EXE_naq_hop");
+const INDEX: &str = env!("CARGO_BIN_EXE_naq_index");
 
 /// A sink process, killed on drop.
 struct SinkProc(Child, String);
@@ -103,7 +105,7 @@ fn source_feeds_a_subscribe_only_load() {
 
 #[test]
 fn bins_print_usage_and_reject_bad_arguments() {
-    for bin in [LOAD, SINK, CODEC] {
+    for bin in [LOAD, SINK, CODEC, HOP, INDEX] {
         let help = Command::new(bin).arg("--help").output().unwrap();
         assert!(help.status.success());
         assert!(String::from_utf8_lossy(&help.stdout).starts_with("usage:"));
@@ -205,5 +207,48 @@ fn codec_records_each_kernel_and_fails_on_rejected_frames() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hop_and_index_record_their_runs() {
+    let dir = std::env::temp_dir().join(format!("naq-hop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let record = dir.join("runs.jsonl");
+    let out = Command::new(HOP)
+        .args([
+            "--batch",
+            "4k",
+            "--warmup",
+            "0.05",
+            "--duration",
+            "0.1",
+            "--pings",
+            "20",
+        ])
+        .arg("--record")
+        .arg(&record)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let out = Command::new(INDEX)
+        .args(["--subjects", "3", "--duration", "0.01", "--record"])
+        .arg(&record)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let benches: Vec<String> = std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["bench"].to_string())
+        .collect();
+    assert_eq!(benches, ["\"hop\"", "\"index\"", "\"index\"", "\"index\""]);
+    for bin in [HOP, INDEX] {
+        let out = Command::new(bin)
+            .args(["--duration", "0.01", "--record", "/nonexistent/x"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

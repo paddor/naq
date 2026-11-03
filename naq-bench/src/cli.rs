@@ -7,9 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-use crate::codec;
 use crate::load::{Config, Report};
 use crate::sink::Mode;
+use crate::{codec, hop, index};
 
 /// Usage of `naq_load`.
 pub const LOAD_USAGE: &str = "\
@@ -94,6 +94,128 @@ pub fn codec_record(args: &CodecArgs, report: &codec::Report) -> Value {
     stamp(&mut m, &args.tags);
     m.insert("bench".into(), "codec".into());
     m.insert("subject".into(), args.cfg.subject.clone().into());
+    if let Ok(Value::Object(r)) = serde_json::to_value(report) {
+        m.extend(r);
+    }
+    Value::Object(m)
+}
+
+/// Usage of `naq_hop`.
+pub const HOP_USAGE: &str = "\
+usage: naq_hop [options]
+  --mode M             lane: OMQ sockets on the lanes; omq: on OMQ's threads (lane)
+  --payload BYTES      payload size (16)
+  --batch BYTES        publishes per OMQ message, in bytes (64k)
+  --warmup SECS        before measuring (2)
+  --duration SECS      measured (10)
+  --pings N            round trips for the latency (10000)
+  --tag KEY=VALUE      extra label, repeatable
+  --record FILE        append the JSON line
+BYTES take k and m suffixes (KiB, MiB).";
+
+/// Parsed `naq_hop` arguments.
+#[derive(Debug, Clone, Default)]
+pub struct HopArgs {
+    /// The run.
+    pub cfg: hop::Config,
+    /// Extra labels.
+    pub tags: BTreeMap<String, String>,
+    /// File to append the record to.
+    pub record: Option<PathBuf>,
+}
+
+/// Parses `naq_hop` arguments.
+///
+/// # Errors
+///
+/// A message naming the bad argument.
+pub fn hop_args(args: &[String]) -> Result<HopArgs, String> {
+    let mut a = HopArgs::default();
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let val = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        let c = &mut a.cfg;
+        match flag.as_str() {
+            "--mode" => c.mode = val.parse()?,
+            "--payload" => c.payload = size(flag, val)?,
+            "--batch" => c.batch = size(flag, val)?,
+            "--warmup" => c.warmup = secs(flag, val)?,
+            "--duration" => c.duration = secs(flag, val)?,
+            "--pings" => c.pings = parse(flag, val)?,
+            "--tag" => tag(&mut a.tags, val)?,
+            "--record" => a.record = Some(val.into()),
+            _ => return Err(format!("unknown argument {flag:?}")),
+        }
+    }
+    Ok(a)
+}
+
+/// The JSON record of a hop run.
+pub fn hop_record(args: &HopArgs, report: &hop::Report) -> Value {
+    let mut m = Map::new();
+    stamp(&mut m, &args.tags);
+    m.insert("bench".into(), "hop".into());
+    if let Ok(Value::Object(r)) = serde_json::to_value(report) {
+        m.extend(r);
+    }
+    Value::Object(m)
+}
+
+/// Usage of `naq_index`.
+pub const INDEX_USAGE: &str = "\
+usage: naq_index [options]
+  --subjects N         distinct subjects, repeatable (1, 1000, 100000)
+  --duration SECS      per kind and size (2)
+  --tag KEY=VALUE      extra label, repeatable
+  --record FILE        append the JSON lines";
+
+/// Parsed `naq_index` arguments.
+#[derive(Debug, Clone)]
+pub struct IndexArgs {
+    /// Index sizes to measure.
+    pub subjects: Vec<usize>,
+    /// Per kind and size.
+    pub duration: Duration,
+    /// Extra labels.
+    pub tags: BTreeMap<String, String>,
+    /// File to append the records to.
+    pub record: Option<PathBuf>,
+}
+
+/// Parses `naq_index` arguments.
+///
+/// # Errors
+///
+/// A message naming the bad argument.
+pub fn index_args(args: &[String]) -> Result<IndexArgs, String> {
+    let mut a = IndexArgs {
+        subjects: Vec::new(),
+        duration: Duration::from_secs(2),
+        tags: BTreeMap::new(),
+        record: None,
+    };
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let val = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--subjects" => a.subjects.push(parse(flag, val)?),
+            "--duration" => a.duration = secs(flag, val)?,
+            "--tag" => tag(&mut a.tags, val)?,
+            "--record" => a.record = Some(val.into()),
+            _ => return Err(format!("unknown argument {flag:?}")),
+        }
+    }
+    if a.subjects.is_empty() {
+        a.subjects = vec![1, 1000, 100_000];
+    }
+    Ok(a)
+}
+
+/// The JSON record of an index run.
+pub fn index_record(args: &IndexArgs, report: &index::Report) -> Value {
+    let mut m = Map::new();
+    stamp(&mut m, &args.tags);
+    m.insert("bench".into(), "index".into());
     if let Ok(Value::Object(r)) = serde_json::to_value(report) {
         m.extend(r);
     }
@@ -328,6 +450,62 @@ mod tests {
         assert_eq!(
             (v["subject"].as_str(), v["tags"]["rep"].as_str()),
             (Some("a.b"), Some("2"))
+        );
+    }
+
+    #[test]
+    fn parses_hop_args() {
+        let a = hop_args(&strings(
+            "--mode omq --payload 1k --batch 256k --warmup 0 --duration 1 --pings 10 \
+         --tag rep=1 --record /tmp/h.jsonl",
+        ))
+        .unwrap();
+        let c = &a.cfg;
+        assert_eq!(
+            (c.mode, c.payload, c.batch, c.pings),
+            (hop::Mode::Omq, 1024, 256 << 10, 10)
+        );
+        assert_eq!(
+            (c.warmup, c.duration),
+            (Duration::ZERO, Duration::from_secs(1))
+        );
+        assert_eq!(a.record, Some("/tmp/h.jsonl".into()));
+        for bad in ["--mode x", "--pings", "--pings x", "--nope 1", "--tag x"] {
+            assert!(hop_args(&strings(bad)).is_err(), "{bad}");
+        }
+        let r = hop::Report {
+            mode: hop::Mode::Lane,
+            payload: 16,
+            batch: 1,
+            msgs_s: 1.0,
+            mb_s: 1.0,
+            rtt_p50_us: 1.0,
+            rtt_p99_us: 2.0,
+        };
+        let v = hop_record(&a, &r);
+        assert_eq!(
+            (v["bench"].as_str(), v["mode"].as_str()),
+            (Some("hop"), Some("lane"))
+        );
+        assert_eq!(v["tags"]["rep"].as_str(), Some("1"));
+    }
+
+    #[test]
+    fn parses_index_args() {
+        let a = index_args(&strings(
+            "--subjects 5 --subjects 7 --duration 0.01 --tag k=v",
+        ))
+        .unwrap();
+        assert_eq!(a.subjects, [5, 7]);
+        assert_eq!(index_args(&[]).unwrap().subjects, [1, 1000, 100_000]);
+        for bad in ["--subjects x", "--duration", "--nope 1"] {
+            assert!(index_args(&strings(bad)).is_err(), "{bad}");
+        }
+        let r = index::run(index::Kind::Hash, 3, a.duration);
+        let v = index_record(&a, &r);
+        assert_eq!(
+            (v["bench"].as_str(), v["kind"].as_str()),
+            (Some("index"), Some("hash"))
         );
     }
 

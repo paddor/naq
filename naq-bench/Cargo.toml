@@ -13,7 +13,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+bytes = { workspace = true, features = ["std"] }
 naq-proto.workspace = true
+omq-tokio = { version = "=0.33.0", default-features = false }
+rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+zzq-proto = { version = "=0.6.0", default-features = false, features = ["std"] }
+zzq-tokio.workspace = true
