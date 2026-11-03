@@ -79,6 +79,12 @@ Notable changes to naq. The format follows
   the `http_port`, `monitor_port` and `http` keys, and `-m PORT`;
   `Server::monitor_addr` tells where. Lanes count without atomics and
   publish their counts once per batch.
+- `naq`: TLS for clients (`Options::tls`, `Tls`, the `tls` block with
+  `cert_file`, `key_file`, `ca_file`, `verify`, `timeout` and
+  `handshake_first`). As in `nats-server`, `INFO` goes out in the clear
+  and the client starts the handshake; with `handshake_first` the
+  handshake comes first. `verify` asks clients for certificates from the
+  CA. `INFO` has `tls_required` and `tls_verify`.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

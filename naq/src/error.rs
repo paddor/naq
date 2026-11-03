@@ -27,6 +27,9 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    /// The TLS certificates or key cannot be used.
+    #[error("tls: {0}")]
+    Tls(String),
     /// Options that contradict themselves.
     #[error("bad options: {0}")]
     Options(String),

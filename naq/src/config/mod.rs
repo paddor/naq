@@ -119,6 +119,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 o.http_host = host;
                 o.http_port = Some(port);
             }
+            "tls" => o.tls = Some(tls(item)?),
             "http_port" | "monitor_port" => {
                 o.http_port = Some(int(item).ok_or_else(|| bad("expected a port"))?);
             }
@@ -131,6 +132,58 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
         }
     }
     Ok(())
+}
+
+/// `tls { cert_file, key_file, ca_file, verify, timeout, handshake_first }`.
+fn tls(item: &Item) -> Result<crate::Tls, Bad> {
+    let Value::Map(m) = &item.value else {
+        return Err((item.line, "tls: expected a map".into()));
+    };
+    let (mut cert, mut key, mut ca) = (None, None, None);
+    let mut t = crate::Tls {
+        cert_file: std::path::PathBuf::default(),
+        key_file: std::path::PathBuf::default(),
+        ca_file: None,
+        verify: false,
+        timeout: Duration::from_secs(2),
+        handshake_first: false,
+    };
+    for (k, v) in m {
+        let k = k.to_ascii_lowercase();
+        let bad = |reason: &str| (v.line, format!("tls: {k}: {reason}"));
+        let path = || {
+            string(v)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| bad("expected a path"))
+        };
+        let flag = || match v.value {
+            Value::Bool(b) => Ok(b),
+            _ => Err(bad("expected true or false")),
+        };
+        match k.as_str() {
+            "cert_file" => cert = Some(path()?),
+            "key_file" => key = Some(path()?),
+            "ca_file" => ca = Some(path()?),
+            "verify" => t.verify = flag()?,
+            "handshake_first" | "first" | "immediate" => t.handshake_first = flag()?,
+            "timeout" => {
+                t.timeout = match v.value {
+                    Value::Int(n) => u64::try_from(n)
+                        .map(Duration::from_secs)
+                        .map_err(|_| bad("expected seconds"))?,
+                    Value::Float(f) => {
+                        Duration::try_from_secs_f64(f).map_err(|_| bad("expected seconds"))?
+                    }
+                    _ => duration(v).map_err(|e| bad(&e))?,
+                };
+            }
+            _ => return Err(bad("not supported")),
+        }
+    }
+    t.cert_file = cert.ok_or_else(|| (item.line, "tls: cert_file missing".to_owned()))?;
+    t.key_file = key.ok_or_else(|| (item.line, "tls: key_file missing".to_owned()))?;
+    t.ca_file = ca;
+    Ok(t)
 }
 
 pub(super) fn string(item: &Item) -> Option<String> {

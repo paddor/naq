@@ -88,6 +88,7 @@ impl ClientOpts {
 }
 
 #[derive(Debug, Serialize)]
+#[expect(clippy::struct_excessive_bools, reason = "the flags of INFO, as sent")]
 struct Info<'a> {
     server_id: &'a str,
     server_name: &'a str,
@@ -104,6 +105,10 @@ struct Info<'a> {
     auth_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tls_required: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tls_verify: bool,
     #[serde(rename = "connect_info", skip_serializing_if = "std::ops::Not::not")]
     bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,6 +139,8 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
         client_id: to.id,
         client_ip: to.ip,
         nonce: to.nonce,
+        tls_required: shared.tls.is_some(),
+        tls_verify: shared.tls.as_ref().is_some_and(|t| t.verify),
         // Before the CONNECT, a client need not authenticate if it may
         // connect as the no_auth_user.
         auth_required: shared

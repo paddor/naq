@@ -17,6 +17,9 @@ bcrypt.workspace = true
 data-encoding.workspace = true
 getrandom.workspace = true
 nkeys.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
 hashbrown.workspace = true
 memchr.workspace = true
 naq-proto.workspace = true
@@ -28,6 +31,7 @@ tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", 
 zzq-tokio.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 serde_json.workspace = true
 
 [lints]

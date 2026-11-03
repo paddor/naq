@@ -221,7 +221,38 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
         return;
     };
     let (ip, port) = peer(&stream);
-    let _ = stream.drive(ConnDriver { lane, ip, port }).await;
+    let client = Rc::new(Client::new(lane.shared.next_client()));
+    let nonce = lane
+        .shared
+        .auth
+        .as_ref()
+        .filter(|a| a.wants_nonce())
+        .map(|_| crate::auth::nonce().into_boxed_str());
+    let mut info = Vec::new();
+    let to = handshake::To {
+        id: client.id,
+        ip: &ip,
+        nonce: nonce.as_deref(),
+    };
+    handshake::info(&lane.shared, &to, None, &mut info);
+    {
+        let mut meta = client.meta.borrow_mut();
+        meta.ip = ip;
+        meta.port = port;
+    }
+    if lane.shared.tls.is_some() {
+        return crate::tls::serve(lane, client, nonce, info, stream).await;
+    }
+    client.out.borrow_mut().extend_from_slice(&info);
+    let shared = lane.shared.clone();
+    let driver = ConnDriver {
+        lane,
+        client,
+        nonce,
+    };
+    if stream.drive(driver).await.is_err() {
+        shared.client_gone();
+    }
 }
 
 /// The client's IP address, as text.
@@ -237,8 +268,8 @@ fn peer(stream: &Stream) -> (String, u16) {
 
 struct ConnDriver {
     lane: Rc<Lane>,
-    ip: String,
-    port: u16,
+    client: Rc<Client>,
+    nonce: Option<Box<str>>,
 }
 
 impl Driver for ConnDriver {
@@ -249,34 +280,22 @@ impl Driver for ConnDriver {
         R: AsyncRead + Unpin + 'static,
         W: AsyncWrite + Unpin + 'static,
     {
-        serve(self.lane, (self.ip, self.port), reader, writer)
+        serve(self.lane, self.client, self.nonce, reader, writer)
     }
 }
 
-async fn serve<R, W>(lane: Rc<Lane>, (ip, port): (String, u16), mut r: R, w: W)
-where
+/// Serves `client`, whose `INFO` went out or is queued, over `r` and `w`.
+pub(crate) async fn serve<R, W>(
+    lane: Rc<Lane>,
+    client: Rc<Client>,
+    nonce: Option<Box<str>>,
+    mut r: R,
+    w: W,
+) where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let client = Rc::new(Client::new(lane.shared.next_client()));
-    {
-        let mut meta = client.meta.borrow_mut();
-        meta.ip.clone_from(&ip);
-        meta.port = port;
-    }
     lane.clients.borrow_mut().insert(client.id, client.clone());
-    let nonce = lane
-        .shared
-        .auth
-        .as_ref()
-        .filter(|a| a.wants_nonce())
-        .map(|_| crate::auth::nonce().into_boxed_str());
-    let to = handshake::To {
-        id: client.id,
-        ip: &ip,
-        nonce: nonce.as_deref(),
-    };
-    handshake::info(&lane.shared, &to, None, &mut client.out.borrow_mut());
     let opts = &lane.shared.opts;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, lane.shared.clone()));
     client.wake_writer();
@@ -284,6 +303,7 @@ where
     let ping = ping::Pinger::new(now, opts.ping_interval);
     let auth_by = lane.shared.auth.as_ref().map(|a| now + a.timeout);
     let fwd = (0..lane.lanes()).map(|_| Out::default()).collect();
+    let ip = client.meta.borrow().ip.clone();
     let mut conn = Conn {
         lane,
         client,
@@ -357,11 +377,7 @@ impl Conn {
             self.client.unsubscribe(&self.lane, &sid);
         }
         self.lane.clients.borrow_mut().remove(&self.client.id);
-        // Relaxed: a counter, read now and then.
-        self.lane
-            .shared
-            .gone
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.lane.shared.client_gone();
         self.lane.flush();
         self.client.close();
         if tokio::time::timeout(CLOSE_LINGER, &mut writer)

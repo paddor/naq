@@ -42,6 +42,8 @@ pub(crate) struct Shared {
     pub(crate) started: std::time::SystemTime,
     /// Clients that went away.
     pub(crate) gone: AtomicU64,
+    /// TLS for clients, if they must use it.
+    pub(crate) tls: Option<crate::tls::Acceptor>,
     next_client: AtomicU64,
 }
 
@@ -50,6 +52,12 @@ impl Shared {
     pub(crate) fn next_client(&self) -> u64 {
         // Relaxed: IDs only need to be distinct.
         self.next_client.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Notes that a client went away.
+    pub(crate) fn client_gone(&self) {
+        // Relaxed: a counter, read now and then.
+        self.gone.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Clients accepted so far.
@@ -74,11 +82,17 @@ impl Server {
     ///
     /// # Errors
     ///
-    /// [`Error::Options`] if `opts` contradict themselves,
+    /// [`Error::Options`] if `opts` contradict themselves, [`Error::Tls`] if
+    /// the TLS certificates or key cannot be read,
     /// [`Error::Lanes`] if the lane threads cannot start,
     /// [`Error::Listen`] if the client or monitoring port cannot be bound.
     pub fn start(opts: &Options) -> Result<Server, Error> {
         auth::validate(opts).map_err(Error::Options)?;
+        let tls = opts
+            .tls
+            .as_ref()
+            .map(crate::tls::Acceptor::new)
+            .transpose()?;
         let accounts = auth::accounts(opts);
         let auth = Auth::new(opts, &accounts);
         let ctx = Context::with_config(&Config {
@@ -107,6 +121,7 @@ impl Server {
             events: stats::Events::default(),
             started: std::time::SystemTime::now(),
             gone: AtomicU64::new(0),
+            tls,
             next_client: AtomicU64::new(1),
         });
         let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();

@@ -53,6 +53,8 @@ pub struct Options {
     pub http_port: Option<u16>,
     /// Host for monitoring; `None` for [`Options::host`] (`http`).
     pub http_host: Option<String>,
+    /// TLS for every client (`tls`).
+    pub tls: Option<Tls>,
     /// Permissions of users that have none of their own
     /// (`authorization { default_permissions }`).
     pub default_permissions: Option<Permissions>,
@@ -150,6 +152,27 @@ impl Default for Options {
             default_permissions: None,
             http_port: None,
             http_host: None,
+            tls: None,
         }
     }
+}
+
+/// TLS for clients (`tls`). By default the server sends `INFO` in the clear
+/// and the client starts the handshake after it, as NATS clients do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tls {
+    /// PEM file of the server's certificate chain (`cert_file`).
+    pub cert_file: std::path::PathBuf,
+    /// PEM file of its private key (`key_file`).
+    pub key_file: std::path::PathBuf,
+    /// PEM file of the certificate authorities client certificates must
+    /// chain to (`ca_file`).
+    pub ca_file: Option<std::path::PathBuf>,
+    /// Clients must present a certificate that chains to `ca_file`
+    /// (`verify`).
+    pub verify: bool,
+    /// How long a handshake may take (`timeout`).
+    pub timeout: Duration,
+    /// The handshake comes first, before `INFO` (`handshake_first`).
+    pub handshake_first: bool,
 }
