@@ -38,8 +38,9 @@ mod index;
 mod lane;
 mod mailbox;
 mod options;
+mod perms;
 mod server;
 
 pub use error::Error;
-pub use options::{Login, Options, User};
+pub use options::{Login, Options, Permissions, Responses, Rules, User};
 pub use server::Server;

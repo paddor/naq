@@ -1,0 +1,79 @@
+# Publish and subscribe permissions.
+#! authorization {
+#!   users: [
+#!     {user: p, password: p, permissions: {
+#!       publish: {allow: ["orders.>", "_INBOX.>"], deny: "orders.secret"}
+#!       subscribe: {allow: ["orders.>", "jobs workers"], deny: "orders.secret"}
+#!     }}
+#!     {user: o, password: o, permissions: {publish: "logs"}}
+#!     {user: r, password: r, permissions: {subscribe: "svc", allow_responses: true}}
+#!     {user: x, password: x}
+#!   ]
+#! }
+
+# Publishes outside the allow list, or in the deny list, are refused.
+a> CONNECT {"user":"p","pass":"p"}
+a> PUB orders.new 1
+a> 1
+a> PUB orders.secret 1
+a> 2
+a> PUB other 1
+a> 3
+
+# Subscriptions too; a queue entry allows that queue group only.
+a> SUB orders.* 1
+a> SUB > 2
+a> SUB orders.secret 3
+a> SUB jobs workers 4
+a> SUB jobs others 5
+a> SUB jobs 6
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< +OK
+a< +OK
+a< -ERR 'Permissions Violation for Publish to "orders.secret"'
+a< -ERR 'Permissions Violation for Publish to "other"'
+a< +OK
+a< -ERR 'Permissions Violation for Subscription to ">"'
+a< -ERR 'Permissions Violation for Subscription to "orders.secret"'
+a< +OK
+a< -ERR 'Permissions Violation for Subscription to "jobs" using queue "others"'
+a< -ERR 'Permissions Violation for Subscription to "jobs"'
+
+# A wildcard subscription does not get what the deny list keeps out.
+x> CONNECT {"verbose":false,"user":"x","pass":"x"}
+x> PUB orders.secret 1
+x> s
+x> PUB orders.open 1
+x> o
+x< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< MSG orders.open 1 1
+a< o
+
+# A list alone is the allow list.
+b> CONNECT {"verbose":false,"user":"o","pass":"o"}
+b> PUB logs 1
+b> l
+b> PUB other 1
+b> m
+b< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< -ERR 'Permissions Violation for Publish to "other"'
+
+# allow_responses: replies to requests it got, once each, nothing else.
+c> CONNECT {"verbose":false,"user":"r","pass":"r"}
+c> SUB svc 1
+c< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+x> SUB _INBOX.x 9
+x> PUB svc _INBOX.x 3
+x> req
+c< MSG svc 1 _INBOX.x 3
+c< req
+c> PUB _INBOX.x 3
+c> one
+c> PUB _INBOX.x 3
+c> two
+c> PUB anything 1
+c> z
+c< -ERR 'Permissions Violation for Publish to "_INBOX.x"'
+c< -ERR 'Permissions Violation for Publish to "anything"'
+x< MSG _INBOX.x 9 3
+x< one

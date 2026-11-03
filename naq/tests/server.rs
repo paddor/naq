@@ -552,6 +552,7 @@ fn with_users(lanes: usize) -> Server {
                     password: "p".into(),
                 },
                 account: Some(if u.starts_with('a') { "A" } else { "B" }.into()),
+                permissions: None,
             })
             .collect(),
         auth_timeout: Duration::from_millis(100),
@@ -596,6 +597,7 @@ fn an_nkey_user_logs_in_by_signing_the_nonce() {
         users: vec![naq::User {
             login: naq::Login::Nkey(key.public_key()),
             account: None,
+            permissions: None,
         }],
         ..Options::default()
     });

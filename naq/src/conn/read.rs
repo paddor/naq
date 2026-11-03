@@ -11,9 +11,10 @@ use tokio::time::Instant;
 
 use super::ping::Tick;
 use super::{Client, Close, Conn, Stage};
-use crate::auth::{Check, Creds, Pending};
+use crate::auth::{Check, Creds, Grant, Pending};
 use crate::index::{Entry, Few, Found, Index, Interest};
 use crate::lane::{Batch, Lane, Out, Queued};
+use crate::perms::{Held, quoted};
 
 /// Bytes a read may fill at least. With less room, the buffer grows by
 /// [`READ_CHUNK`] or takes back what was parsed already.
@@ -185,6 +186,9 @@ impl Conn {
                     // Delivered all the same, as by `nats-server`.
                     self.error("Invalid Publish Subject");
                 }
+                if self.client.guarded.get() && !self.may_publish(p.subject) {
+                    return Ok(Step::Next);
+                }
                 self.ok();
                 self.busy = true;
                 self.publish(&p, buf);
@@ -301,27 +305,70 @@ impl Conn {
     /// Compares a password with its bcrypt hash off the lane, then finishes
     /// the `CONNECT`.
     async fn verify(&mut self, p: Pending) -> Result<(), Close> {
-        let account = p.account;
+        let grant = p.grant.clone();
         let holds = tokio::task::spawn_blocking(move || p.holds()).await;
         if !matches!(holds, Ok(true)) {
             return Err(Close::Auth);
         }
-        self.bind(account);
+        self.bind(grant);
         self.connected()
     }
 
     /// Puts the client into `account`. Subscriptions in another it had are
     /// dropped, as a new `CONNECT` drops them in `nats-server`.
-    fn bind(&mut self, account: u32) {
+    fn bind(&mut self, grant: Grant) {
         self.auth_by = None;
-        if self.client.account.get() == account {
+        let held = grant.perms.map(|p| Rc::new(Held::new(p)));
+        self.client.guarded.set(held.is_some());
+        *self.client.held.borrow_mut() = held;
+        if self.client.account.get() == grant.account {
             return;
         }
         let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
         for sid in sids {
             self.client.unsubscribe(&self.lane, &sid);
         }
-        self.client.account.set(account);
+        self.client.account.set(grant.account);
+    }
+
+    /// Whether its permissions let it publish to `subject`; if not, it is
+    /// told.
+    #[cold]
+    #[inline(never)]
+    fn may_publish(&self, subject: &[u8]) -> bool {
+        let held = self.client.held.borrow().clone();
+        if held.is_none_or(|h| h.may_publish(subject)) {
+            return true;
+        }
+        self.error(&format!(
+            "Permissions Violation for Publish to {}",
+            quoted(subject)
+        ));
+        false
+    }
+
+    /// Whether its permissions let it subscribe as `s` asks; if not, it is
+    /// told.
+    #[cold]
+    #[inline(never)]
+    fn may_subscribe(&self, s: &Sub<'_>) -> bool {
+        let held = self.client.held.borrow().clone();
+        if held.is_none_or(|h| h.perms.subscribe(s.subject, s.queue)) {
+            return true;
+        }
+        let text = match s.queue {
+            Some(q) => format!(
+                "Permissions Violation for Subscription to {} using queue {}",
+                quoted(s.subject),
+                quoted(q)
+            ),
+            None => format!(
+                "Permissions Violation for Subscription to {}",
+                quoted(s.subject)
+            ),
+        };
+        self.error(&text);
+        false
     }
 
     /// The rest of a `CONNECT`, from a client that is who it says.
@@ -357,6 +404,9 @@ impl Conn {
 
     #[inline(never)]
     fn subscribe(&mut self, s: &Sub<'_>) {
+        if self.client.guarded.get() && !self.may_subscribe(s) {
+            return;
+        }
         if self.client.subs.borrow().contains_key(s.sid) {
             return self.ok();
         }

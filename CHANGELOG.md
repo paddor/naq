@@ -66,6 +66,13 @@ Notable changes to naq. The format follows
 - `naq`: NKey users (`Login::Nkey`, `{nkey: U...}` in a `users` list).
   With any, `INFO` carries a fresh nonce; the client signs it with the
   key's seed and sends `nkey` and `sig` in its `CONNECT`.
+- `naq`: permissions (`Permissions`, `Rules`, `Responses`; `permissions`
+  of a user, `default_permissions` of `authorization`). Publish and
+  subscribe allow and deny lists of filters, `subject queue` entries for
+  queue groups, and `allow_responses`, replies to requests a client got.
+  Violations get `-ERR 'Permissions Violation for ...'` as `nats-server`
+  words them; the connection stays. A wildcard subscription does not get
+  messages on subjects its client may not subscribe to.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

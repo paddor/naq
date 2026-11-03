@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 use zzq_tokio::transport::{Driver, Stream};
 
 use crate::lane::{self, Lane, Out};
+use crate::perms::Held;
 use crate::server::Shared;
 
 /// How long a closed connection's writer may take to write what is left,
@@ -42,6 +43,10 @@ pub(crate) struct Client {
     pub(crate) subs: RefCell<FxHashMap<Box<[u8]>, Sub>>,
     /// Its account's id.
     pub(crate) account: Cell<u32>,
+    /// Its permissions, if any limit it.
+    pub(crate) held: RefCell<Option<Rc<Held>>>,
+    /// Whether `held` is set: deliveries check it.
+    pub(crate) guarded: Cell<bool>,
     closed: Cell<bool>,
     /// Wakes the writer.
     wake: Notify,
@@ -60,6 +65,8 @@ impl Client {
             headers: Cell::new(false),
             subs: RefCell::default(),
             account: Cell::new(crate::auth::GLOBAL),
+            held: RefCell::default(),
+            guarded: Cell::new(false),
             closed: Cell::new(false),
             wake: Notify::new(),
             drained: Notify::new(),
@@ -85,6 +92,24 @@ impl Client {
             .borrow_mut()
             .remove(&sub.subject, queue, self.id, sid);
         lane.announce(account, &sub.subject, queue, false);
+    }
+
+    /// Whether its permissions let it get `m`. Notes requests it may reply
+    /// to.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn accepts(&self, m: &naq_proto::client::Pub<'_>) -> bool {
+        let held = self.held.borrow();
+        let Some(h) = held.as_ref() else {
+            return true;
+        };
+        if h.perms.hides(m.subject) {
+            return false;
+        }
+        if let Some(reply) = m.reply {
+            h.got_request(reply, tokio::time::Instant::now());
+        }
+        true
     }
 
     /// Closes the connection once the writer wrote what is queued.

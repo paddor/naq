@@ -80,7 +80,7 @@ impl Lane {
         stalled: &mut Option<Rc<Client>>,
     ) -> bool {
         let c = &e.client;
-        if c.is_closed() || c.id == skip || e.is_spent() {
+        if c.is_closed() || c.id == skip || e.is_spent() || (c.guarded.get() && !c.accepts(m)) {
             return false;
         }
         let len = {

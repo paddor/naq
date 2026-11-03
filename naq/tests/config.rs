@@ -234,3 +234,76 @@ fn nkey_users_come_from_the_users_list() {
         .unwrap();
     assert_eq!(o.users[0].login, naq::Login::Nkey(key.into()));
 }
+
+#[test]
+fn permissions_come_in_every_form_nats_server_takes() {
+    let opts: Options = "authorization {\n  default_permissions: {publish: [a, b], subscribe: {deny: c}}\n  users: [\n    \
+                         {user: u, permissions: {pub: {allow: \"x.>\", deny: [x.y]}, sub: \"q w\", allow_responses: {max: 3, expires: \"5s\"}}}\n    \
+                         {user: v, permissions: {allow_responses: true}}\n  ]\n}\n"
+        .parse()
+        .unwrap();
+    let defaults = opts.default_permissions.unwrap();
+    assert_eq!(
+        defaults.publish.allow.as_deref(),
+        Some(&["a".to_owned(), "b".to_owned()][..])
+    );
+    assert_eq!(defaults.subscribe.allow, None);
+    assert_eq!(defaults.subscribe.deny, ["c"]);
+    let first = opts.users[0].permissions.clone().unwrap();
+    assert_eq!(
+        first.publish.allow.as_deref(),
+        Some(&["x.>".to_owned()][..])
+    );
+    assert_eq!(first.publish.deny, ["x.y"]);
+    assert_eq!(
+        first.subscribe.allow.as_deref(),
+        Some(&["q w".to_owned()][..])
+    );
+    assert_eq!(
+        first.responses,
+        Some(naq::Responses {
+            max: 3,
+            expires: Duration::from_secs(5)
+        })
+    );
+    let second = opts.users[1].permissions.clone().unwrap();
+    assert_eq!(second.responses, Some(naq::Responses::default()));
+    let off: Options =
+        "authorization { users: [{user: a, permissions: {allow_responses: false}}] }\n"
+            .parse()
+            .unwrap();
+    assert_eq!(off.users[0].permissions.clone().unwrap().responses, None);
+}
+
+#[test]
+fn permissions_naq_cannot_use_are_an_error() {
+    for (perms, reason) in [
+        ("{bogus: 1}", "permissions: bogus: not supported"),
+        ("{publish: {only: x}}", "permissions: only: not supported"),
+        ("{publish: [1]}", "permissions: expected subjects"),
+        ("{publish: \"a..b\"}", "permissions: bad subject \"a..b\""),
+        (
+            "{allow_responses: 1}",
+            "allow_responses: expected a boolean or a map",
+        ),
+        (
+            "{allow_responses: {max: x}}",
+            "allow_responses: max: expected a count",
+        ),
+        (
+            "{allow_responses: {expires: 5}}",
+            "allow_responses: expires: expected a duration",
+        ),
+        (
+            "{allow_responses: {bad: 5}}",
+            "allow_responses: bad: not supported",
+        ),
+        ("1", "permissions: expected a map"),
+    ] {
+        let text = format!("authorization {{ users: [{{user: a, permissions: {perms}}}] }}\n");
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: got, .. }) => assert_eq!(got, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}

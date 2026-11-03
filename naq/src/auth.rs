@@ -1,10 +1,12 @@
 //! Who may connect, and the account each client gets.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use data_encoding::{BASE64, BASE64URL_NOPAD};
 use rustc_hash::FxHashMap;
 
+use crate::perms::Perms;
 use crate::{Login, Options};
 
 /// The account id of `$G`, the global account.
@@ -14,9 +16,11 @@ pub(crate) const GLOBAL: u32 = 0;
 #[derive(Debug)]
 pub(crate) struct Auth {
     /// By user name: the password or its hash, and the account id.
-    users: FxHashMap<String, (String, u32)>,
-    /// By public NKey: the account id.
-    nkeys: FxHashMap<String, u32>,
+    users: FxHashMap<String, (String, Grant)>,
+    /// By public NKey.
+    nkeys: FxHashMap<String, Grant>,
+    /// For token clients.
+    token_grant: Grant,
     token: Option<String>,
     no_auth_user: Option<String>,
     /// How long a client has to authenticate.
@@ -40,11 +44,31 @@ impl Creds {
     }
 }
 
+/// What a client that authenticated gets: its account and permissions.
+#[derive(Debug, Clone)]
+pub(crate) struct Grant {
+    pub(crate) account: u32,
+    /// `None`: it may publish and subscribe to anything.
+    pub(crate) perms: Option<Arc<Perms>>,
+}
+
+impl PartialEq for Grant {
+    fn eq(&self, other: &Grant) -> bool {
+        let same = match (&self.perms, &other.perms) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        self.account == other.account && same
+    }
+}
+
+impl Eq for Grant {}
+
 /// The outcome of checking credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Check {
-    /// They hold, for this account.
-    Pass(u32),
+    /// They hold.
+    Pass(Grant),
     /// They do not.
     Fail,
     /// They hold if a bcrypt comparison does.
@@ -56,8 +80,8 @@ pub(crate) enum Check {
 pub(crate) struct Pending {
     hash: String,
     password: String,
-    /// The account the client gets if it holds.
-    pub(crate) account: u32,
+    /// What the client gets if it holds.
+    pub(crate) grant: Grant,
 }
 
 impl Pending {
@@ -132,21 +156,36 @@ impl Auth {
             name.and_then(|n| accounts.iter().position(|a| a == n))
                 .map_or(GLOBAL, |i| i as u32)
         };
+        let defaults = opts
+            .default_permissions
+            .as_ref()
+            .map(|p| Arc::new(Perms::new(p)));
         let (mut users, mut nkeys) = (FxHashMap::default(), FxHashMap::default());
         for u in &opts.users {
-            let account = id(u.account.as_ref());
+            let grant = Grant {
+                account: id(u.account.as_ref()),
+                perms: u
+                    .permissions
+                    .as_ref()
+                    .map(|p| Arc::new(Perms::new(p)))
+                    .or_else(|| defaults.clone()),
+            };
             match &u.login {
                 Login::Password { user, password } => {
-                    users.insert(user.clone(), (password.clone(), account));
+                    users.insert(user.clone(), (password.clone(), grant));
                 }
                 Login::Nkey(key) => {
-                    nkeys.insert(key.clone(), account);
+                    nkeys.insert(key.clone(), grant);
                 }
             }
         }
         Some(Auth {
             users,
             nkeys,
+            token_grant: Grant {
+                account: GLOBAL,
+                perms: defaults,
+            },
             token: opts.token.clone(),
             no_auth_user: opts.no_auth_user.clone(),
             timeout: opts.auth_timeout,
@@ -173,24 +212,24 @@ impl Auth {
             let account = self
                 .users
                 .get(u)
-                .map(|(_, a)| a)
+                .map(|(_, g)| g)
                 .or_else(|| self.nkeys.get(u));
-            return account.map_or(Check::Fail, |a| Check::Pass(*a));
+            return account.map_or(Check::Fail, |g| Check::Pass(g.clone()));
         }
         if let Some(key) = &c.nkey {
             return match self.nkeys.get(key) {
-                Some(a) if signed(key, nonce, c.sig.as_deref()) => Check::Pass(*a),
+                Some(g) if signed(key, nonce, c.sig.as_deref()) => Check::Pass(g.clone()),
                 _ => Check::Fail,
             };
         }
         let user = c.user.as_ref();
         if let Some(name) = user
-            && let Some((secret, account)) = self.users.get(name)
+            && let Some((secret, grant)) = self.users.get(name)
         {
-            return compare(secret, c.pass.as_deref().unwrap_or_default(), *account);
+            return compare(secret, c.pass.as_deref().unwrap_or_default(), grant);
         }
         match (&self.token, &c.token) {
-            (Some(t), Some(given)) => compare(t, given, GLOBAL),
+            (Some(t), Some(given)) => compare(t, given, &self.token_grant),
             _ => Check::Fail,
         }
     }
@@ -211,16 +250,16 @@ fn signed(key: &str, nonce: &[u8], sig: Option<&str>) -> bool {
 }
 
 /// Compares what a client gave with `secret`, plain or a bcrypt hash.
-fn compare(secret: &str, given: &str, account: u32) -> Check {
+fn compare(secret: &str, given: &str, grant: &Grant) -> Check {
     if is_bcrypt(secret) {
         return Check::Bcrypt(Pending {
             hash: secret.to_owned(),
             password: given.to_owned(),
-            account,
+            grant: grant.clone(),
         });
     }
     if same(secret.as_bytes(), given.as_bytes()) {
-        Check::Pass(account)
+        Check::Pass(grant.clone())
     } else {
         Check::Fail
     }
@@ -243,6 +282,13 @@ mod tests {
     use super::*;
     use crate::User;
 
+    fn pass(account: u32) -> Check {
+        Check::Pass(Grant {
+            account,
+            perms: None,
+        })
+    }
+
     fn user(name: &str, password: &str, account: Option<&str>) -> User {
         User {
             login: Login::Password {
@@ -250,6 +296,7 @@ mod tests {
                 password: password.into(),
             },
             account: account.map(Into::into),
+            permissions: None,
         }
     }
 
@@ -274,7 +321,7 @@ mod tests {
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
         assert_eq!(
             auth.check(&creds(Some("a"), Some("pa"), None), b""),
-            Check::Pass(1)
+            pass(1)
         );
         assert_eq!(
             auth.check(&creds(Some("a"), Some("pg"), None), b""),
@@ -286,7 +333,7 @@ mod tests {
         );
         assert_eq!(
             auth.check(&creds(None, None, None), b""),
-            Check::Pass(GLOBAL),
+            pass(GLOBAL),
             "no_auth_user"
         );
         assert_eq!(auth.check(&creds(None, Some("pa"), None), b""), Check::Fail);
@@ -302,7 +349,7 @@ mod tests {
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
         assert_eq!(
             auth.check(&creds(None, None, Some("s3cret")), b""),
-            Check::Pass(GLOBAL)
+            pass(GLOBAL)
         );
         assert_eq!(
             auth.check(&creds(None, None, Some("s3cre")), b""),
@@ -322,7 +369,7 @@ mod tests {
         let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("pw"), None), b"") else {
             panic!("not deferred");
         };
-        assert_eq!(p.account, GLOBAL);
+        assert_eq!(p.grant.account, GLOBAL);
         assert!(p.holds());
         let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("nope"), None), b"") else {
             panic!("not deferred");
@@ -331,7 +378,10 @@ mod tests {
         let broken = Pending {
             hash: "$2a$bad".into(),
             password: "pw".into(),
-            account: GLOBAL,
+            grant: Grant {
+                account: GLOBAL,
+                perms: None,
+            },
         };
         assert!(!broken.holds());
     }
@@ -347,6 +397,7 @@ mod tests {
             users: vec![User {
                 login: Login::Nkey(PUBLIC.into()),
                 account: Some("A".into()),
+                permissions: None,
             }],
             ..Options::default()
         };
@@ -367,12 +418,9 @@ mod tests {
         let n = nonce.as_bytes();
         assert_eq!(
             auth.check(&with(Some(BASE64URL_NOPAD.encode(&sig))), n),
-            Check::Pass(1)
+            pass(1)
         );
-        assert_eq!(
-            auth.check(&with(Some(BASE64.encode(&sig))), n),
-            Check::Pass(1)
-        );
+        assert_eq!(auth.check(&with(Some(BASE64.encode(&sig))), n), pass(1));
         assert_eq!(
             auth.check(&with(Some(BASE64URL_NOPAD.encode(&sig))), b"other"),
             Check::Fail
@@ -395,13 +443,14 @@ mod tests {
             users: vec![User {
                 login: Login::Nkey(PUBLIC.into()),
                 account: None,
+                permissions: None,
             }],
             no_auth_user: Some(PUBLIC.into()),
             ..Options::default()
         };
         validate(&opts).unwrap();
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
-        assert_eq!(auth.check(&Creds::default(), b"x"), Check::Pass(GLOBAL));
+        assert_eq!(auth.check(&Creds::default(), b"x"), pass(GLOBAL));
     }
 
     #[test]

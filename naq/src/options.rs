@@ -48,6 +48,9 @@ pub struct Options {
     /// How long a client has to authenticate, from the moment it connects
     /// (`authorization { timeout }`).
     pub auth_timeout: Duration,
+    /// Permissions of users that have none of their own
+    /// (`authorization { default_permissions }`).
+    pub default_permissions: Option<Permissions>,
 }
 
 /// A user that may connect.
@@ -57,6 +60,51 @@ pub struct User {
     pub login: Login,
     /// The account it uses; `None` for `$G`.
     pub account: Option<String>,
+    /// What it may publish and subscribe to; `None` for the default
+    /// permissions, if any, else anything.
+    pub permissions: Option<Permissions>,
+}
+
+/// What a user may publish and subscribe to (`permissions`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Permissions {
+    /// Subjects it may publish to.
+    pub publish: Rules,
+    /// Subjects it may subscribe to. An entry `subject queue` allows that
+    /// queue group only.
+    pub subscribe: Rules,
+    /// Replies it may publish to requests it got, even where `publish`
+    /// does not allow them (`allow_responses`). With these and no `publish`
+    /// allow list, it may publish replies only.
+    pub responses: Option<Responses>,
+}
+
+/// Subjects allowed, and those denied among them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rules {
+    /// Filters allowed; `None` allows every subject.
+    pub allow: Option<Vec<String>>,
+    /// Filters denied, whatever `allow` says.
+    pub deny: Vec<String>,
+}
+
+/// Replies a user may publish to requests it got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Responses {
+    /// Replies to one request.
+    pub max: u32,
+    /// How long after the request; zero for no limit.
+    pub expires: Duration,
+}
+
+impl Default for Responses {
+    /// One reply within two minutes, as `nats-server` defaults.
+    fn default() -> Self {
+        Responses {
+            max: 1,
+            expires: Duration::from_secs(120),
+        }
+    }
 }
 
 /// How a user proves who it is.
@@ -94,6 +142,7 @@ impl Default for Options {
             token: None,
             no_auth_user: None,
             auth_timeout: Duration::from_secs(2),
+            default_permissions: None,
         }
     }
 }

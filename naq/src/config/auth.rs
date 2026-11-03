@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::parse::{Item, Value};
 use super::{Bad, string};
-use crate::{Login, Options, User};
+use crate::{Login, Options, Permissions, Responses, Rules, User};
 
 /// `authorization { user, password, token, timeout, users }`.
 pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
@@ -23,6 +23,9 @@ pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
                 o.auth_timeout = timeout(v).ok_or_else(|| bad("expected seconds or a duration"))?;
             }
             "users" => o.users.extend(users(v, None)?),
+            "default_permissions" | "default_permission" | "permissions" => {
+                o.default_permissions = Some(permissions(v)?);
+            }
             _ => return Err(bad("not supported")),
         }
     }
@@ -33,6 +36,7 @@ pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
                 password: password.unwrap_or_default(),
             },
             account: None,
+            permissions: None,
         }),
         (None, Some(_)) => return Err((item.line, "authorization: password without user".into())),
         (None, None) => {}
@@ -90,7 +94,7 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
     };
     list.iter()
         .map(|u| {
-            let (mut user, mut password, mut nkey) = (None, None, None);
+            let (mut user, mut password, mut nkey, mut perms) = (None, None, None, None);
             for (key, v) in map(u, "users")? {
                 let key = key.to_ascii_lowercase();
                 let bad = |reason: &str| (v.line, format!("users: {key}: {reason}"));
@@ -101,6 +105,7 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                     "pass" | "password" => {
                         password = Some(string(v).ok_or_else(|| bad("expected a string"))?);
                     }
+                    "permissions" | "permission" | "authorization" => perms = Some(permissions(v)?),
                     "nkey" => {
                         let k = string(v).ok_or_else(|| bad("expected a string"))?;
                         if !crate::auth::is_user_nkey(&k) {
@@ -119,6 +124,7 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                 return Ok(User {
                     login: Login::Nkey(key),
                     account,
+                    permissions: perms,
                 });
             }
             let user = user.ok_or_else(|| (u.line, "users: a user needs a name".to_owned()))?;
@@ -128,6 +134,7 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                     password: password.unwrap_or_default(),
                 },
                 account,
+                permissions: perms,
             })
         })
         .collect()
@@ -147,5 +154,102 @@ fn timeout(item: &Item) -> Option<Duration> {
         Value::Float(f) => Duration::try_from_secs_f64(*f).ok(),
         Value::Str(_) => super::duration(item).ok(),
         _ => None,
+    }
+}
+
+/// `permissions { publish, subscribe, allow_responses }`.
+fn permissions(item: &Item) -> Result<Permissions, Bad> {
+    let mut p = Permissions::default();
+    for (key, v) in map(item, "permissions")? {
+        let key = key.to_ascii_lowercase();
+        match key.as_str() {
+            "pub" | "publish" | "import" => p.publish = rules(v, false)?,
+            "sub" | "subscribe" | "export" => p.subscribe = rules(v, true)?,
+            "allow_responses" | "publish_allow_responses" => p.responses = responses(v)?,
+            _ => return Err((v.line, format!("permissions: {key}: not supported"))),
+        }
+    }
+    Ok(p)
+}
+
+/// A subject, a list of them (all allowed), or `{ allow, deny }`.
+fn rules(item: &Item, queues: bool) -> Result<Rules, Bad> {
+    let Value::Map(m) = &item.value else {
+        return Ok(Rules {
+            allow: Some(subjects(item, queues)?),
+            deny: Vec::new(),
+        });
+    };
+    let mut r = Rules::default();
+    for (key, v) in m {
+        match key.to_ascii_lowercase().as_str() {
+            "allow" => r.allow = Some(subjects(v, queues)?),
+            "deny" => r.deny = subjects(v, queues)?,
+            k => return Err((v.line, format!("permissions: {k}: not supported"))),
+        }
+    }
+    Ok(r)
+}
+
+/// Subjects, each maybe with a queue group after a blank where `queues`.
+fn subjects(item: &Item, queues: bool) -> Result<Vec<String>, Bad> {
+    let list = match &item.value {
+        Value::Array(a) => a.iter().collect(),
+        _ => vec![item],
+    };
+    list.into_iter()
+        .map(|i| {
+            let s =
+                string(i).ok_or_else(|| (i.line, "permissions: expected subjects".to_owned()))?;
+            let (subject, queue) = match s.split_once(' ') {
+                Some((subj, q)) if queues && !q.trim().is_empty() => (subj, Some(q.trim())),
+                _ => (s.as_str(), None),
+            };
+            if !naq_proto::subject::is_valid_filter(subject.as_bytes())
+                || queue.is_some_and(|q| q.contains(' '))
+            {
+                return Err((i.line, format!("permissions: bad subject {s:?}")));
+            }
+            Ok(s)
+        })
+        .collect()
+}
+
+/// `true`, `false` or `{ max, expires }`.
+fn responses(item: &Item) -> Result<Option<Responses>, Bad> {
+    let mut r = Responses::default();
+    match &item.value {
+        Value::Bool(on) => Ok(on.then_some(r)),
+        Value::Map(m) => {
+            for (key, v) in m {
+                let bad = |reason: &str| (v.line, format!("allow_responses: {key}: {reason}"));
+                match key.to_ascii_lowercase().as_str() {
+                    "max" | "max_msgs" | "max_messages" | "max_responses" => {
+                        let Value::Int(n) = v.value else {
+                            return Err(bad("expected a count"));
+                        };
+                        let n = u32::try_from(n).map_err(|_| bad("expected a count"))?;
+                        if n != 0 {
+                            r.max = n;
+                        }
+                    }
+                    "expires" | "expiration" | "ttl" => {
+                        let Value::Str(_) = v.value else {
+                            return Err(bad("expected a duration"));
+                        };
+                        let d = super::duration(v).map_err(|e| bad(&e))?;
+                        if !d.is_zero() {
+                            r.expires = d;
+                        }
+                    }
+                    _ => return Err(bad("not supported")),
+                }
+            }
+            Ok(Some(r))
+        }
+        _ => Err((
+            item.line,
+            "allow_responses: expected a boolean or a map".into(),
+        )),
     }
 }
