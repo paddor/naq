@@ -89,6 +89,9 @@ fn naq_replies_as_nats_server_does() {
                 failed += &mismatch(&path, "nats-server", &text, &got);
             }
         }
+        // naq picks its own WebSocket port: a free port found earlier may be
+        // taken by the time it binds.
+        let conf = config(&text).replace("$WS_PORT", "-1");
         let opts: naq::Options = conf.parse().unwrap();
         let server = naq::Server::start(&naq::Options {
             host: "127.0.0.1".into(),
@@ -97,6 +100,7 @@ fn naq_replies_as_nats_server_does() {
             ..opts
         })
         .unwrap();
+        let ws_addr = server.websocket_addr().unwrap_or(ws_addr);
         let got = replay(&want, server.addr(), ws_addr);
         if got != want {
             failed += &mismatch(&path, "naq", &want, &got);
