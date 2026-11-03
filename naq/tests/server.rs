@@ -58,7 +58,19 @@ impl Client {
         self.w.write_all(s.as_bytes()).unwrap();
     }
 
+    /// The next line, answering the server's `PING`s on the way, as a
+    /// client library does.
     fn line(&mut self) -> String {
+        loop {
+            let l = self.raw_line();
+            if l != "PING" {
+                return l;
+            }
+            self.send("PONG\r\n");
+        }
+    }
+
+    fn raw_line(&mut self) -> String {
         let mut l = String::new();
         let n = self.r.read_line(&mut l).unwrap();
         assert!(n > 0, "closed");
@@ -471,4 +483,55 @@ fn a_responder_on_another_lane_is_a_responder() {
     svc.send("PUB _INBOX.r 2\r\nok\r\n");
     req.expect("MSG _INBOX.r 1 2");
     req.expect("ok");
+}
+
+fn pinging(interval_ms: u64) -> Server {
+    server_with(Options {
+        ping_interval: Duration::from_millis(interval_ms),
+        ..Options::default()
+    })
+}
+
+#[test]
+fn a_client_that_stops_answering_pings_is_closed_as_stale() {
+    let s = pinging(50);
+    let mut c = Client::quiet(&s);
+    assert_eq!(c.raw_line(), "PING");
+    assert_eq!(c.raw_line(), "PING");
+    assert_eq!(c.raw_line(), "-ERR 'Stale Connection'");
+    assert_eq!(c.rest(), "");
+}
+
+#[test]
+fn a_client_that_answers_pings_stays() {
+    let s = pinging(50);
+    let mut c = Client::quiet(&s);
+    for _ in 0..4 {
+        assert_eq!(c.raw_line(), "PING");
+        c.send("PONG\r\n");
+    }
+    c.flush();
+}
+
+#[test]
+fn a_subscriber_whose_writes_stall_past_the_deadline_is_closed() {
+    let s = server_with(Options {
+        write_deadline: Duration::from_millis(100),
+        ..Options::default()
+    });
+    let mut slow = Client::quiet(&s);
+    slow.send("SUB s 1\r\n");
+    slow.flush();
+    let mut p = Client::quiet(&s);
+    let payload = "x".repeat(64 << 10);
+    for _ in 0..256 {
+        p.send(&format!("PUB s {}\r\n{payload}\r\n", payload.len()));
+    }
+    p.flush();
+    // The subscriber reads nothing for a while: the server's write to it
+    // stays stuck past the deadline.
+    std::thread::sleep(Duration::from_millis(500));
+    let rest = slow.rest();
+    assert!(rest.len() < 256 * (64 << 10), "{} bytes", rest.len());
+    p.flush();
 }

@@ -7,8 +7,10 @@ use bytes::{Buf, BytesMut};
 use naq_proto::client::{self, ClientOp, Limits, ParseError, Parsed, Pub, Sub, Unsub};
 use naq_proto::{encode, subject};
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::time::Instant;
 
-use super::{Client, Close, Conn};
+use super::ping::Tick;
+use super::{Client, Close, Conn, Stage};
 use crate::index::{Entry, Few, Found, Index, Interest};
 use crate::lane::{Batch, Lane, Out, Queued};
 
@@ -46,8 +48,13 @@ impl Conn {
         };
         let stall_mark = opts.max_pending / 4 * 3;
         let mut buf = BytesMut::with_capacity(READ_CHUNK);
+        let timer = tokio::time::sleep_until(self.ping.next);
+        tokio::pin!(timer);
         loop {
             let (at, stop) = self.parse(&buf, &limits);
+            if std::mem::take(&mut self.busy) {
+                self.ping.active(Instant::now());
+            }
             self.lane.flush();
             self.lane.expire();
             self.ship(&mut buf, at).await;
@@ -72,11 +79,19 @@ impl Conn {
                 return Close::Kicked;
             }
             make_room(&mut buf, need);
-            // Cancel-safe: a dropped read took no bytes, and a dropped
-            // `notified` passes its wake on.
+            if timer.deadline() != self.ping.next {
+                timer.as_mut().reset(self.ping.next);
+            }
+            // Cancel-safe: a dropped read took no bytes, a dropped `notified`
+            // passes its wake on, and the timer keeps its deadline.
             tokio::select! {
                 biased;
                 () = self.client.stop.notified() => return Close::Kicked,
+                () = &mut timer => {
+                    if let Some(close) = self.ping_tick() {
+                        return close;
+                    }
+                }
                 n = r.read_buf(&mut buf) => match n {
                     Ok(0) | Err(_) => return Close::Lost,
                     Ok(_) => {}
@@ -141,16 +156,26 @@ impl Conn {
                     self.error("Invalid Publish Subject");
                 }
                 self.ok();
+                self.busy = true;
                 self.publish(&p, buf);
             }
-            ClientOp::Sub(s) => self.subscribe(&s),
+            ClientOp::Sub(s) => {
+                self.busy = true;
+                self.subscribe(&s);
+            }
             ClientOp::Unsub(u) => {
                 self.unsubscribe(&u);
                 self.ok();
             }
-            ClientOp::Ping if self.unfenced => return Ok(Step::Fence),
-            ClientOp::Ping => self.pong(),
-            ClientOp::Pong => {}
+            ClientOp::Ping if self.unfenced => {
+                self.busy = true;
+                return Ok(Step::Fence);
+            }
+            ClientOp::Ping => {
+                self.busy = true;
+                self.pong();
+            }
+            ClientOp::Pong => self.ping.pong(),
             ClientOp::Connect(json) => self.connect(json)?,
             _ => return Err(Close::Parse(ParseError::UnknownOp)),
         }
@@ -193,12 +218,35 @@ impl Conn {
         }
     }
 
+    /// The ping timer fired: maybe a `PING`, maybe the end.
+    #[inline(never)]
+    fn ping_tick(&mut self) -> Option<Close> {
+        let opts = &self.lane.shared.opts;
+        match self
+            .ping
+            .tick(Instant::now(), opts.ping_interval, opts.max_pings_out)
+        {
+            Tick::Quiet => None,
+            Tick::Ping => {
+                self.reply(encode::PING);
+                self.lane.flush();
+                None
+            }
+            Tick::Stale => Some(Close::Stale),
+        }
+    }
+
     /// Applies a `CONNECT`.
     #[inline(never)]
     fn connect(&mut self, json: &[u8]) -> Result<(), Close> {
         self.opts.apply(json).map_err(|_| Close::Connect)?;
         self.client.headers.set(self.opts.headers);
-        self.connected = true;
+        if self.stage == Stage::Fresh {
+            self.stage = Stage::Connected;
+        }
+        let interval = self.lane.shared.opts.ping_interval;
+        let jitter = super::ping::jitter(interval, |n| self.lane.below(n));
+        self.ping.connected(Instant::now(), interval, jitter);
         if !(0..=1).contains(&self.opts.protocol) {
             return Err(Close::Refused("invalid client protocol"));
         }

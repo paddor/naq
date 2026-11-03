@@ -1,6 +1,7 @@
 //! The writer: hands a client's queued output to the socket.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -8,8 +9,13 @@ use super::Client;
 
 /// Writes `client`'s output until the connection closes. It takes all that
 /// is queued at once and writes it in one go, so the output of a batch of
-/// messages costs one write.
-pub(super) async fn writer<W: AsyncWrite + Unpin>(client: Rc<Client>, mut w: W) {
+/// messages costs one write. A write that takes longer than `deadline`
+/// closes the client as a slow consumer.
+pub(super) async fn writer<W: AsyncWrite + Unpin>(
+    client: Rc<Client>,
+    mut w: W,
+    deadline: Duration,
+) {
     // The buffer the next swap hands to the client, keeping its capacity.
     let mut spare = Vec::new();
     loop {
@@ -25,7 +31,12 @@ pub(super) async fn writer<W: AsyncWrite + Unpin>(client: Rc<Client>, mut w: W) 
             continue;
         }
         client.drained.notify_waiters();
-        if w.write_all(&buf).await.is_err() {
+        // Cancel-safe enough: on a timeout the client closes, and what was
+        // left unwritten no longer matters.
+        if !matches!(
+            tokio::time::timeout(deadline, w.write_all(&buf)).await,
+            Ok(Ok(()))
+        ) {
             client.close();
             return;
         }

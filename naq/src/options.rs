@@ -1,5 +1,7 @@
 //! Server settings.
 
+use std::time::Duration;
+
 /// Server settings. The defaults are those of `nats-server`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
@@ -20,6 +22,16 @@ pub struct Options {
     /// three quarters of it, its publishers wait; past it, it is closed as a
     /// slow consumer.
     pub max_pending: usize,
+    /// Time between `PING`s to a client that sent nothing meanwhile
+    /// (`ping_interval`). The first comes 2 seconds after the `CONNECT` at
+    /// the latest.
+    pub ping_interval: Duration,
+    /// `PING`s a client may leave unanswered; at the next, it is closed as
+    /// stale (`ping_max`).
+    pub max_pings_out: u32,
+    /// Longest a write to a client may take; past it, the client is closed
+    /// as a slow consumer (`write_deadline`).
+    pub write_deadline: Duration,
 }
 
 impl Default for Options {
@@ -32,6 +44,9 @@ impl Default for Options {
             max_payload: 1 << 20,
             max_control_line: 4096,
             max_pending: 64 << 20,
+            ping_interval: Duration::from_secs(120),
+            max_pings_out: 2,
+            write_deadline: Duration::from_secs(10),
         }
     }
 }

@@ -1,6 +1,7 @@
 //! One client connection: `INFO`, the read loop and the writer.
 
 mod handshake;
+mod ping;
 mod read;
 mod write;
 
@@ -99,6 +100,17 @@ pub(crate) struct Sub {
     pub(crate) queue: Option<Box<[u8]>>,
 }
 
+/// How far a client's handshake got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// No `CONNECT` yet.
+    Fresh,
+    /// Sent its `CONNECT`.
+    Connected,
+    /// Got its first `PONG` after the `CONNECT`.
+    Ready,
+}
+
 /// Why a connection ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Close {
@@ -114,6 +126,8 @@ enum Close {
     NoHeaders,
     /// A `CONNECT` the server refuses, with the `-ERR` it gets.
     Refused(&'static str),
+    /// It left too many `PING`s unanswered.
+    Stale,
 }
 
 /// The reader's side of a connection.
@@ -131,10 +145,12 @@ struct Conn {
     unfenced: bool,
     /// Its address, for `INFO`.
     ip: String,
-    /// Sent its `CONNECT`.
-    connected: bool,
-    /// Got its first `PONG` after the `CONNECT`.
-    ponged: bool,
+    /// How far its handshake got.
+    stage: Stage,
+    /// Its `PING`s.
+    ping: ping::Pinger,
+    /// Sent messages, subscriptions or a `PING` in the current read.
+    busy: bool,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -187,8 +203,10 @@ where
         false,
         &mut client.out.borrow_mut(),
     );
-    let writer = tokio::task::spawn_local(write::writer(client.clone(), w));
+    let opts = &lane.shared.opts;
+    let writer = tokio::task::spawn_local(write::writer(client.clone(), w, opts.write_deadline));
     client.wake_writer();
+    let ping = ping::Pinger::new(tokio::time::Instant::now(), opts.ping_interval);
     let fwd = (0..lane.lanes()).map(|_| Out::default()).collect();
     let mut conn = Conn {
         lane,
@@ -198,8 +216,9 @@ where
         fwd,
         unfenced: false,
         ip,
-        connected: false,
-        ponged: false,
+        stage: Stage::Fresh,
+        ping,
+        busy: false,
     };
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
@@ -223,9 +242,10 @@ impl Conn {
     /// clients that take one at any time.
     fn pong(&mut self) {
         self.reply(encode::PONG);
-        if !self.connected || std::mem::replace(&mut self.ponged, true) {
+        if self.stage != Stage::Connected {
             return;
         }
+        self.stage = Stage::Ready;
         if self.opts.protocol >= 1 {
             let mut out = self.client.out.borrow_mut();
             handshake::info(&self.lane.shared, self.client.id, &self.ip, true, &mut out);
@@ -265,6 +285,7 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::Parse(ParseError::MaxPayload(_)) => Some("Maximum Payload Violation"),
         Close::Parse(ParseError::ControlLine) => Some("Maximum Control Line Exceeded"),
         Close::Refused(text) => Some(text),
+        Close::Stale => Some("Stale Connection"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked

@@ -36,6 +36,12 @@ Notable changes to naq. The format follows
   `no_responders` without `headers`, and protocols other than 0 and 1,
   are refused with `-ERR` and closed.
 - `naq-proto`: `encode::no_responders`.
+- `naq`: `Options::ping_interval`, `max_pings_out` and `write_deadline`,
+  with the defaults of `nats-server`. The first `PING` comes 2 seconds
+  after the `CONNECT`; later ones only to clients that were quiet for an
+  interval. A client past its unanswered `PING`s gets
+  `-ERR 'Stale Connection'` and is closed; one whose writes stall past the
+  deadline is closed as a slow consumer.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing
