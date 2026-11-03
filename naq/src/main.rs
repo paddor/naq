@@ -6,7 +6,7 @@ const USAGE: &str = "\
 usage: naq [options]
   -a, --addr HOST      host to listen on (0.0.0.0)
   -p, --port PORT      client port (4222)
-  --lanes N            IO lanes, one thread each (1)
+  --lanes N            IO lanes, one thread each (one per core)
   --name NAME          server name (naq)";
 
 fn main() -> ExitCode {

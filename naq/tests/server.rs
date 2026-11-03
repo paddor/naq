@@ -10,8 +10,12 @@ use naq::{Options, Server};
 
 const WAIT: Duration = Duration::from_secs(5);
 
+/// A server on one lane.
 fn server() -> Server {
-    server_with(Options::default())
+    server_with(Options {
+        lanes: 1,
+        ..Options::default()
+    })
 }
 
 fn server_with(opts: Options) -> Server {

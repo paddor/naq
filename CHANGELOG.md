@@ -36,6 +36,8 @@ Notable changes to naq. The format follows
   `no_responders` without `headers`, and protocols other than 0 and 1,
   are refused with `-ERR` and closed.
 - `naq-proto`: `encode::no_responders`.
+- `naq`: `Options::lanes` and `--lanes` default to one lane per core the
+  process may run on.
 - `naq`: `Options::ping_interval`, `max_pings_out` and `write_deadline`,
   with the defaults of `nats-server`. The first `PING` comes 2 seconds
   after the `CONNECT`; later ones only to clients that were quiet for an

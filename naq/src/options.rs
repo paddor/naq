@@ -9,7 +9,8 @@ pub struct Options {
     pub host: String,
     /// Port to listen on for clients. 0 picks a free one.
     pub port: u16,
-    /// IO lanes, each on a thread of its own. 0 counts as 1.
+    /// IO lanes, each on a thread of its own. 0, the default, is one per
+    /// core the process may run on.
     pub lanes: usize,
     /// Name in `INFO`.
     pub server_name: String,
@@ -39,7 +40,7 @@ impl Default for Options {
         Options {
             host: "0.0.0.0".into(),
             port: 4222,
-            lanes: 1,
+            lanes: 0,
             server_name: "naq".into(),
             max_payload: 1 << 20,
             max_control_line: 4096,

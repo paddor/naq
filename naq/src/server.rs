@@ -58,7 +58,7 @@ impl Server {
     /// [`Error::Listen`] if the client port cannot be bound.
     pub fn start(opts: &Options) -> Result<Server, Error> {
         let ctx = Context::with_config(&Config {
-            io_threads: opts.lanes,
+            io_threads: lanes(opts.lanes),
             name: "naq".into(),
             ..Config::default()
         })
@@ -93,6 +93,14 @@ impl Server {
     pub const fn addr(&self) -> SocketAddr {
         self.addr
     }
+}
+
+/// The lanes to run for `wanted`: 0 is one per core the process may run on.
+fn lanes(wanted: usize) -> usize {
+    if wanted > 0 {
+        return wanted;
+    }
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
 /// Binds the client port on lane 0, where the accept loop runs.
