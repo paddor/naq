@@ -5,13 +5,13 @@
 //! trie. A subject matches the literal filter it names and every wildcard
 //! filter that fits it.
 
+mod literal;
 mod trie;
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use naq_proto::subject;
-use rustc_hash::FxHashMap;
 
 use crate::conn::Client;
 
@@ -160,26 +160,39 @@ impl<'a, T> Few<'a, T> {
     }
 }
 
-/// The members of queue group `name` in `found`, from its `from`th match
-/// on: across filters, one group.
-pub(crate) fn queue_groups<'a>(
-    found: &Few<'a, Interest>,
-    from: usize,
-    name: &[u8],
-) -> Few<'a, Group> {
-    let mut groups = Few::new();
-    for (n, g) in found.iter().skip(from).flat_map(|i| &i.queues) {
-        if **n == *name {
-            groups.push(g);
+/// The filters a subject matches.
+#[derive(Debug)]
+pub(crate) enum Found<'a> {
+    /// Only its literal filter: no wildcard filter is subscribed to.
+    One(&'a Interest),
+    /// Any number, wildcard ones among them.
+    Many(Few<'a, Interest>),
+}
+
+impl<'a> Found<'a> {
+    /// The members of queue group `name` from the `from`th match on: across
+    /// filters, one group.
+    pub(crate) fn queue_groups(&self, from: usize, name: &[u8]) -> Few<'a, Group> {
+        let mut groups = Few::new();
+        let mut add = |i: &'a Interest| {
+            for (n, g) in &i.queues {
+                if **n == *name {
+                    groups.push(g);
+                }
+            }
+        };
+        match self {
+            Found::One(i) => add(i),
+            Found::Many(found) => found.iter().skip(from).for_each(add),
         }
+        groups
     }
-    groups
 }
 
 /// Interest by filter.
 #[derive(Debug, Default)]
 pub(crate) struct Index {
-    literal: FxHashMap<Box<[u8]>, Interest>,
+    literal: literal::Literals,
     wild: trie::Node,
 }
 
@@ -228,22 +241,30 @@ impl Index {
             .find(|e| e.client.id == id && *e.sid == *sid)
     }
 
-    /// The interest of every filter that matches `subject`.
-    #[inline]
-    pub(crate) fn matches(&self, subject: &[u8]) -> Few<'_, Interest> {
+    /// The interest of every filter that matches `subject`, if any does.
+    #[expect(
+        clippy::inline_always,
+        reason = "measured: a call here costs every publish"
+    )]
+    #[inline(always)]
+    pub(crate) fn matches(&self, subject: &[u8]) -> Option<Found<'_>> {
+        let literal = self.literal.get(subject);
+        if self.wild.is_empty() {
+            return literal.map(Found::One);
+        }
         let mut found = Few::new();
-        if let Some(i) = self.literal.get(subject) {
+        if let Some(i) = literal {
             found.push(i);
         }
-        if !self.wild.is_empty() && subject::has_all_tokens(subject) {
+        if subject::has_all_tokens(subject) {
             self.wild.matches(subject, &mut found);
         }
-        found
+        (!found.is_empty()).then_some(Found::Many(found))
     }
 
     fn interest(&mut self, filter: &[u8]) -> &mut Interest {
         if subject::is_literal(filter) {
-            self.literal.entry(filter.into()).or_default()
+            self.literal.interest(filter)
         } else {
             self.wild.interest(filter)
         }
@@ -258,12 +279,9 @@ impl Index {
             });
             return;
         }
-        if let Some(i) = self.literal.get_mut(filter) {
+        self.literal.change(filter, |i| {
             i.change(queue, f);
-            if i.is_empty() {
-                self.literal.remove(filter);
-            }
-        }
+        });
     }
 }
 
@@ -272,10 +290,11 @@ mod tests {
     use super::*;
 
     fn lanes(idx: &Index, subject: &[u8]) -> Vec<Vec<(usize, u32)>> {
-        idx.matches(subject)
-            .iter()
-            .map(|i| i.plain.lanes.clone())
-            .collect()
+        match idx.matches(subject) {
+            None => Vec::new(),
+            Some(Found::One(i)) => vec![i.plain.lanes.clone()],
+            Some(Found::Many(f)) => f.iter().map(|i| i.plain.lanes.clone()).collect(),
+        }
     }
 
     #[test]
@@ -291,7 +310,7 @@ mod tests {
         idx.remote(b"a", None, 3, false);
         idx.remote(b"b", None, 1, false);
         idx.remote(b"a", None, 1, false);
-        assert!(idx.matches(b"a").is_empty(), "forgotten");
+        assert!(idx.matches(b"a").is_none(), "forgotten");
         assert!(idx.literal.is_empty());
     }
 
@@ -334,8 +353,9 @@ mod tests {
         idx.remote(b"a", Some(b"q"), 1, true);
         idx.remote(b"a", Some(b"q"), 2, true);
         idx.remote(b"a", Some(b"r"), 1, true);
-        let m = idx.matches(b"a");
-        let i = m.iter().next().unwrap();
+        let Some(Found::One(i)) = idx.matches(b"a") else {
+            panic!("one literal match");
+        };
         assert!(i.plain.is_empty());
         let w: Vec<_> = i.queues.iter().map(|(n, g)| (&**n, g.weight())).collect();
         assert_eq!(w, [(&b"q"[..], 2), (&b"r"[..], 1)]);

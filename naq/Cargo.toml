@@ -13,6 +13,7 @@ readme.workspace = true
 
 [dependencies]
 bytes = { workspace = true, features = ["std"] }
+hashbrown.workspace = true
 memchr.workspace = true
 naq-proto.workspace = true
 rustc-hash.workspace = true

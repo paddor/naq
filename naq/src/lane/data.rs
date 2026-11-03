@@ -6,14 +6,18 @@ use bytes::Bytes;
 use naq_proto::client::Pub;
 
 use super::Lane;
-use crate::index::queue_groups;
+use crate::index::Found;
 use crate::mailbox::Receiver;
 
-/// Offset and length in a batch's chunk, or in its queue names.
+/// Offset and length in a batch's chunk, or in its queue names; or
+/// [`Span::NONE`]. Without an `Option`, a forward stays 40 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Span(u32, u32);
 
 impl Span {
+    /// No part.
+    const NONE: Span = Span(u32::MAX, 0);
+
     /// Where `part` lies in `base`, which holds it.
     #[inline]
     fn of(base: &[u8], part: &[u8]) -> Span {
@@ -21,10 +25,22 @@ impl Span {
         Span(at as u32, part.len() as u32)
     }
 
+    /// Where `part`, if any, lies in `base`.
+    #[inline]
+    fn of_some(base: &[u8], part: Option<&[u8]>) -> Span {
+        part.map_or(Span::NONE, |p| Span::of(base, p))
+    }
+
     #[inline]
     fn get(self, chunk: &[u8]) -> &[u8] {
         let (at, len) = (self.0 as usize, self.1 as usize);
         chunk.get(at..at + len).unwrap_or_default()
+    }
+
+    /// The part, unless this is [`Span::NONE`].
+    #[inline]
+    fn get_some(self, chunk: &[u8]) -> Option<&[u8]> {
+        (self != Span::NONE).then(|| self.get(chunk))
     }
 }
 
@@ -32,22 +48,22 @@ impl Span {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Fwd {
     subject: Span,
-    reply: Option<Span>,
-    headers: Option<Span>,
+    reply: Span,
+    headers: Span,
     payload: Span,
-    /// For one member of this queue group, in the batch's names; else for
-    /// the plain subscriptions.
-    queue: Option<Span>,
+    /// For one member of this queue group, in the batch's names; else, as
+    /// [`Span::NONE`], for the plain subscriptions.
+    queue: Span,
 }
 
 impl Fwd {
     /// `p`, which lies in `base`.
     #[inline]
-    fn of(base: &[u8], p: &Pub<'_>, queue: Option<Span>) -> Fwd {
+    fn of(base: &[u8], p: &Pub<'_>, queue: Span) -> Fwd {
         Fwd {
             subject: Span::of(base, p.subject),
-            reply: p.reply.map(|r| Span::of(base, r)),
-            headers: p.headers.map(|h| Span::of(base, h)),
+            reply: Span::of_some(base, p.reply),
+            headers: Span::of_some(base, p.headers),
             payload: Span::of(base, p.payload),
             queue,
         }
@@ -76,17 +92,19 @@ impl Out {
     }
 
     /// Forwards `p`, which lies in `base`, for the lane's plain
-    /// subscriptions; once, however many filters it matched.
+    /// subscriptions. With `once`, not if the last forward was that already.
     #[inline]
-    pub(crate) fn plain(&mut self, base: &[u8], p: &Pub<'_>) {
-        let f = Fwd::of(base, p, None);
-        if !self
-            .msgs
-            .last()
-            .is_some_and(|l| l.payload == f.payload && l.queue.is_none())
+    pub(crate) fn plain(&mut self, base: &[u8], p: &Pub<'_>, once: bool) {
+        let f = Fwd::of(base, p, Span::NONE);
+        if once
+            && self
+                .msgs
+                .last()
+                .is_some_and(|l| l.payload == f.payload && l.queue == Span::NONE)
         {
-            self.msgs.push(f);
+            return;
         }
+        self.msgs.push(f);
     }
 
     /// Forwards `p`, which lies in `base`, for one member of queue group
@@ -95,7 +113,7 @@ impl Out {
         let at = self.names.len();
         self.names.extend_from_slice(name);
         let span = Span(at as u32, name.len() as u32);
-        self.msgs.push(Fwd::of(base, p, Some(span)));
+        self.msgs.push(Fwd::of(base, p, span));
     }
 }
 
@@ -127,21 +145,24 @@ impl Lane {
     fn deliver_fwd(&self, b: &Batch, f: &Fwd, stalled: &mut Option<Rc<crate::conn::Client>>) {
         let p = Pub {
             subject: f.subject.get(&b.chunk),
-            reply: f.reply.map(|s| s.get(&b.chunk)),
-            headers: f.headers.map(|s| s.get(&b.chunk)),
+            reply: f.reply.get_some(&b.chunk),
+            headers: f.headers.get_some(&b.chunk),
             payload: f.payload.get(&b.chunk),
         };
         let index = self.index.borrow();
-        let found = index.matches(p.subject);
-        match f.queue {
-            None => {
-                for i in found.iter() {
-                    // The publisher is on another lane: nothing to skip.
+        let Some(found) = index.matches(p.subject) else {
+            return;
+        };
+        // The publisher is on another lane: nothing to skip.
+        match (&found, f.queue.get_some(&b.out.names)) {
+            (Found::One(i), None) => self.deliver(&i.plain.local, &p, 0, stalled),
+            (Found::Many(all), None) => {
+                for i in all.iter() {
                     self.deliver(&i.plain.local, &p, 0, stalled);
                 }
             }
-            Some(q) => {
-                let groups = queue_groups(&found, 0, q.get(&b.out.names));
+            (_, Some(name)) => {
+                let groups = found.queue_groups(0, name);
                 self.deliver_any(&groups, &p, stalled);
             }
         }

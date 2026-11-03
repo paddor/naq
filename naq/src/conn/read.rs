@@ -9,8 +9,8 @@ use naq_proto::subject;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Client, Close, Conn};
-use crate::index::{Entry, Few, Interest, queue_groups};
-use crate::lane::{Batch, Out};
+use crate::index::{Entry, Few, Found, Interest};
+use crate::lane::{Batch, Lane, Out};
 
 /// Bytes a read may fill at least. With less room, the buffer grows by
 /// [`READ_CHUNK`] or takes back what was parsed already.
@@ -164,34 +164,29 @@ impl Conn {
     /// other lane with interest. `p` lies in `buf`.
     #[inline]
     fn publish(&mut self, p: &Pub<'_>, buf: &[u8]) {
-        // A handle of its own: the index borrow must not hold `self`.
-        let lane = Rc::clone(&self.lane);
-        let index = lane.index.borrow();
-        let found = index.matches(p.subject);
-        if found.is_empty() {
+        let index = self.lane.index.borrow();
+        let Some(found) = index.matches(p.subject) else {
             return;
-        }
-        let skip = if self.opts.echo { 0 } else { self.client.id };
-        let mut stalled = None;
-        for i in found.iter() {
-            lane.deliver(&i.plain.local, p, skip, &mut stalled);
-            for &(to, _) in &i.plain.lanes {
-                self.fwd[to].plain(buf, p);
-            }
-        }
-        for (k, i) in found.iter().enumerate() {
-            for (name, _) in &i.queues {
-                if merged_before(&found, k, name) {
-                    continue;
-                }
-                let groups = queue_groups(&found, k, name);
-                if let Some(to) = lane.deliver_queue(&groups, p, skip, &mut stalled) {
-                    self.fwd[to].queue(buf, p, name);
+        };
+        let mut r = Routing {
+            lane: &self.lane,
+            fwd: &mut self.fwd,
+            p,
+            buf,
+            skip: if self.opts.echo { 0 } else { self.client.id },
+            stalled: None,
+        };
+        match &found {
+            Found::One(i) => {
+                r.plain(i, false);
+                for (name, _) in &i.queues {
+                    r.queue(&found, 0, name);
                 }
             }
+            Found::Many(all) => r.many(&found, all),
         }
-        if stalled.is_some() {
-            self.stalled = stalled;
+        if let Some(s) = r.stalled {
+            self.stalled = Some(s);
         }
     }
 
@@ -235,6 +230,66 @@ impl Conn {
             }
         }
         self.client.unsubscribe(&self.lane, u.sid);
+    }
+}
+
+/// A publish being routed on its lane.
+struct Routing<'a, 'p> {
+    lane: &'a Lane,
+    /// Publishes for each other lane.
+    fwd: &'a mut [Out],
+    p: &'a Pub<'p>,
+    /// The read buffer `p` lies in.
+    buf: &'a [u8],
+    /// The publisher's client ID without echo, else 0.
+    skip: u64,
+    /// A subscriber past the stall mark.
+    stalled: Option<Rc<Client>>,
+}
+
+impl Routing<'_, '_> {
+    /// Delivers to the plain subscriptions of `i` here, and forwards to
+    /// each other lane with some; with `once`, unless forwarded there for
+    /// another filter already.
+    #[expect(
+        clippy::inline_always,
+        reason = "measured: a call here costs every publish"
+    )]
+    #[inline(always)]
+    fn plain(&mut self, i: &Interest, once: bool) {
+        self.lane
+            .deliver(&i.plain.local, self.p, self.skip, &mut self.stalled);
+        for &(to, _) in &i.plain.lanes {
+            self.fwd[to].plain(self.buf, self.p, once);
+        }
+    }
+
+    /// Routes to the filters in `all`, wildcard ones among them: each
+    /// plain subscription once, each queue group once across filters.
+    #[inline(never)]
+    fn many(&mut self, found: &Found<'_>, all: &Few<'_, Interest>) {
+        for i in all.iter() {
+            self.plain(i, true);
+        }
+        for (k, i) in all.iter().enumerate() {
+            for (name, _) in &i.queues {
+                if !merged_before(all, k, name) {
+                    self.queue(found, k, name);
+                }
+            }
+        }
+    }
+
+    /// Delivers to one member of queue group `name`, from the `k`th match
+    /// on, here or on the lane of the member picked.
+    fn queue(&mut self, found: &Found<'_>, k: usize, name: &[u8]) {
+        let groups = found.queue_groups(k, name);
+        let to = self
+            .lane
+            .deliver_queue(&groups, self.p, self.skip, &mut self.stalled);
+        if let Some(to) = to {
+            self.fwd[to].queue(self.buf, self.p, name);
+        }
     }
 }
 
