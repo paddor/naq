@@ -31,6 +31,11 @@ Notable changes to naq. The format follows
   with `-ERR 'Invalid Publish Subject'`; `SUB` to a broken filter gets
   `-ERR 'Invalid Subject'`.
 - `naq-proto`: `subject`, the rules of subjects and filters.
+- `naq`: request/reply status: a client with `no_responders` gets status
+  503 on its reply subscription when no one got its request.
+  `no_responders` without `headers`, and protocols other than 0 and 1,
+  are refused with `-ERR` and closed.
+- `naq-proto`: `encode::no_responders`.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

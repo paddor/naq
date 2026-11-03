@@ -1,0 +1,70 @@
+# A request with a responder gets its reply.
+a> CONNECT {"verbose":false,"headers":true,"no_responders":true}
+a> SUB _INBOX.a.* 1
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> CONNECT {"verbose":false}
+b> SUB svc 1
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a> PUB svc _INBOX.a.1 2
+a> hi
+b< MSG svc 1 _INBOX.a.1 2
+b< hi
+b> PUB _INBOX.a.1 3
+b> yes
+a< MSG _INBOX.a.1 1 3
+a< yes
+
+# No one got it: a status 503 to the requester's reply subscription.
+a> PUB nosvc _INBOX.a.2 2
+a> hi
+a> HPUB nosvc _INBOX.a.3 12 12
+a> NATS/1.0\r\n\r\n
+
+# Not without a reply subject, nor without a subscription on it.
+a> PUB nosvc 0
+a>
+a> PUB nosvc _INBOX.b.1 0
+a>
+a< HMSG _INBOX.a.2 1 37 37
+a< NATS/1.0 503\r\nNats-Subject: nosvc\r\n\r\n
+a< HMSG _INBOX.a.3 1 37 37
+a< NATS/1.0 503\r\nNats-Subject: nosvc\r\n\r\n
+
+# A queue group counts as a responder; a lone member that is the
+# requester without echo does not.
+c> CONNECT {"verbose":false,"headers":true,"no_responders":true,"echo":false}
+c> SUB rep 1
+c> SUB work q 2
+c> PUB work rep 1
+c> x
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+c< HMSG rep 1 36 36
+c< NATS/1.0 503\r\nNats-Subject: work\r\n\r\n
+b> SUB work q 2
+c> PUB work rep 1
+c> y
+b< MSG work 2 rep 1
+b< y
+
+# Without no_responders, nothing.
+d> CONNECT {"verbose":false,"headers":true}
+d> SUB rep 1
+d> PUB none rep 0
+d>
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+
+# no_responders needs headers.
+e> CONNECT {"verbose":false,"no_responders":true}
+e< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+e< -ERR 'no responders requires headers support'
+e< (closed)
+
+# Protocols other than 0 and 1 are refused.
+f> CONNECT {"verbose":false,"protocol":2}
+f< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+f< -ERR 'invalid client protocol'
+f< (closed)
+g> CONNECT {"verbose":false,"protocol":-1}
+g< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+g< -ERR 'invalid client protocol'
+g< (closed)

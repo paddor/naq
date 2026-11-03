@@ -28,6 +28,34 @@ pub fn err(out: &mut impl BufMut, text: &str) {
     out.put_slice(b"'\r\n");
 }
 
+/// Appends the status `503` that tells a requester no one got its request
+/// on `subject`: an `HMSG` to its subscription `sid` on `reply`, as
+/// `nats-server` sends it.
+///
+/// # Examples
+///
+/// ```
+/// let mut out = Vec::new();
+/// naq_proto::encode::no_responders(&mut out, b"_INBOX.1", b"9", b"svc");
+/// assert_eq!(out, b"HMSG _INBOX.1 9 35 35\r\nNATS/1.0 503\r\nNats-Subject: svc\r\n\r\n\r\n");
+/// ```
+pub fn no_responders(out: &mut impl BufMut, reply: &[u8], sid: &[u8], subject: &[u8]) {
+    let mut digits = Digits::default();
+    // The header block around the subject.
+    let len = decimal(32 + subject.len(), &mut digits);
+    out.put_slice(b"HMSG ");
+    out.put_slice(reply);
+    out.put_u8(b' ');
+    out.put_slice(sid);
+    out.put_u8(b' ');
+    out.put_slice(len);
+    out.put_u8(b' ');
+    out.put_slice(len);
+    out.put_slice(b"\r\nNATS/1.0 503\r\nNats-Subject: ");
+    out.put_slice(subject);
+    out.put_slice(b"\r\n\r\n\r\n");
+}
+
 /// A message for one subscription: `MSG`, or `HMSG` with headers.
 ///
 /// # Examples

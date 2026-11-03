@@ -446,3 +446,29 @@ fn a_maximum_ends_a_subscription_on_another_lane() {
     p.flush();
     assert_eq!(count_until_done(&mut sub), 3);
 }
+
+#[test]
+fn a_responder_on_another_lane_is_a_responder() {
+    let s = lanes(2);
+    let mut req = Client::new(
+        &s,
+        r#"{"verbose":false,"headers":true,"no_responders":true}"#,
+    );
+    let mut svc = Client::quiet(&s);
+    req.send("SUB _INBOX.r 1\r\nPING\r\n");
+    req.expect("PONG");
+    req.send("PUB svc _INBOX.r 1\r\nx\r\n");
+    req.expect("HMSG _INBOX.r 1 35 35");
+    req.expect("NATS/1.0 503");
+    req.expect("Nats-Subject: svc");
+    req.expect("");
+    req.expect("");
+    svc.send("SUB svc 1\r\nPING\r\n");
+    svc.expect("PONG");
+    req.send("PUB svc _INBOX.r 1\r\ny\r\n");
+    svc.expect("MSG svc 1 _INBOX.r 1");
+    svc.expect("y");
+    svc.send("PUB _INBOX.r 2\r\nok\r\n");
+    req.expect("MSG _INBOX.r 1 2");
+    req.expect("ok");
+}

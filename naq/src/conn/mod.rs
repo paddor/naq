@@ -112,6 +112,8 @@ enum Close {
     Connect,
     /// An `HPUB` from a client that did not ask for headers.
     NoHeaders,
+    /// A `CONNECT` the server refuses, with the `-ERR` it gets.
+    Refused(&'static str),
 }
 
 /// The reader's side of a connection.
@@ -262,6 +264,7 @@ const fn farewell(close: Close) -> Option<&'static str> {
     match close {
         Close::Parse(ParseError::MaxPayload(_)) => Some("Maximum Payload Violation"),
         Close::Parse(ParseError::ControlLine) => Some("Maximum Control Line Exceeded"),
+        Close::Refused(text) => Some(text),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked

@@ -22,6 +22,8 @@ pub(super) struct ClientOpts {
     pub(super) headers: bool,
     /// Protocol version; 1 and up take `INFO` at any time.
     pub(super) protocol: i32,
+    /// Wants status 503 for requests no one got.
+    pub(super) no_responders: bool,
 }
 
 impl Default for ClientOpts {
@@ -32,6 +34,7 @@ impl Default for ClientOpts {
             echo: true,
             headers: false,
             protocol: 0,
+            no_responders: false,
         }
     }
 }
@@ -44,6 +47,7 @@ struct Connect {
     echo: Option<bool>,
     headers: Option<bool>,
     protocol: Option<i32>,
+    no_responders: Option<bool>,
 }
 
 impl ClientOpts {
@@ -57,6 +61,7 @@ impl ClientOpts {
             echo: keep(c.echo, self.echo),
             headers: keep(c.headers, self.headers),
             protocol: c.protocol.unwrap_or(self.protocol),
+            no_responders: keep(c.no_responders, self.no_responders),
         };
         Ok(())
     }
@@ -121,6 +126,7 @@ mod tests {
                 echo: true,
                 headers: true,
                 protocol: 0,
+                no_responders: false,
             }
         );
         o.apply(br#"{"echo":false}"#).unwrap();

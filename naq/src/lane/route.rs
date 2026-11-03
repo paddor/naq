@@ -10,6 +10,17 @@ use super::Lane;
 use crate::conn::Client;
 use crate::index::{Entry, Few, Group};
 
+/// Where a queue group's message went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Queued {
+    /// To a member on this lane.
+    Here,
+    /// To be forwarded to a member on this lane.
+    Lane(usize),
+    /// No member took it.
+    Nowhere,
+}
+
 /// Where a queue group's pick went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pick {
@@ -99,7 +110,8 @@ impl Lane {
         true
     }
 
-    /// Encodes `m` for every subscription in `local`.
+    /// Encodes `m` for every subscription in `local`. Returns whether any
+    /// took it.
     #[inline]
     pub(crate) fn deliver(
         &self,
@@ -107,10 +119,12 @@ impl Lane {
         m: &Pub<'_>,
         skip: u64,
         stalled: &mut Option<Rc<Client>>,
-    ) {
+    ) -> bool {
+        let mut any = false;
         for e in local {
-            self.deliver_to(e, m, skip, stalled);
+            any |= self.deliver_to(e, m, skip, stalled);
         }
+        any
     }
 
     /// Picks the member of the queue group made of `groups` that gets the
@@ -136,26 +150,26 @@ impl Lane {
     }
 
     /// Delivers `m` to one member of the queue group made of `groups`, each
-    /// member on any lane as likely as the others. Returns the lane to
-    /// forward it to when the member picked is on another lane, or when none
-    /// here takes it.
+    /// member on any lane as likely as the others.
     pub(crate) fn deliver_queue(
         &self,
         groups: &Few<'_, Group>,
         m: &Pub<'_>,
         skip: u64,
         stalled: &mut Option<Rc<Client>>,
-    ) -> Option<usize> {
-        match self.pick(groups)? {
-            Pick::Lane(l) => Some(l),
-            Pick::Local(n) => {
+    ) -> Queued {
+        let lane = match self.pick(groups) {
+            None => return Queued::Nowhere,
+            Some(Pick::Lane(l)) => Some(l),
+            Some(Pick::Local(n)) => {
                 if first_taker(groups, n, |e| self.deliver_to(e, m, skip, stalled)) {
-                    return None;
+                    return Queued::Here;
                 }
                 // No member here took it: one on another lane may.
                 groups.iter().find_map(|g| g.lanes.first().map(|&(l, _)| l))
             }
-        }
+        };
+        lane.map_or(Queued::Nowhere, Queued::Lane)
     }
 
     /// Delivers `m`, from another lane, to one member on this lane of the

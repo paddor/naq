@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use naq_proto::client::{self, ClientOp, Limits, ParseError, Parsed, Pub, Sub, Unsub};
-use naq_proto::subject;
+use naq_proto::{encode, subject};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Client, Close, Conn};
-use crate::index::{Entry, Few, Found, Interest};
-use crate::lane::{Batch, Lane, Out};
+use crate::index::{Entry, Few, Found, Index, Interest};
+use crate::lane::{Batch, Lane, Out, Queued};
 
 /// Bytes a read may fill at least. With less room, the buffer grows by
 /// [`READ_CHUNK`] or takes back what was parsed already.
@@ -127,6 +127,9 @@ impl Conn {
         }
     }
 
+    // Inlined into the parse loop; what is rare stays out of line, so it
+    // remains small enough.
+    #[inline]
     fn handle(&mut self, op: ClientOp<'_>, buf: &[u8]) -> Result<Step, Close> {
         match op {
             ClientOp::Pub(p) => {
@@ -148,12 +151,7 @@ impl Conn {
             ClientOp::Ping if self.unfenced => return Ok(Step::Fence),
             ClientOp::Ping => self.pong(),
             ClientOp::Pong => {}
-            ClientOp::Connect(json) => {
-                self.opts.apply(json).map_err(|_| Close::Connect)?;
-                self.client.headers.set(self.opts.headers);
-                self.connected = true;
-                self.ok();
-            }
+            ClientOp::Connect(json) => self.connect(json)?,
             _ => return Err(Close::Parse(ParseError::UnknownOp)),
         }
         Ok(Step::Next)
@@ -166,6 +164,7 @@ impl Conn {
     fn publish(&mut self, p: &Pub<'_>, buf: &[u8]) {
         let index = self.lane.index.borrow();
         let Some(found) = index.matches(p.subject) else {
+            self.nobody_got(&index, p);
             return;
         };
         let mut r = Routing {
@@ -175,6 +174,7 @@ impl Conn {
             buf,
             skip: if self.opts.echo { 0 } else { self.client.id },
             stalled: None,
+            delivered: false,
         };
         match &found {
             Found::One(i) => {
@@ -188,8 +188,41 @@ impl Conn {
         if let Some(s) = r.stalled {
             self.stalled = Some(s);
         }
+        if !r.delivered {
+            self.nobody_got(&index, p);
+        }
     }
 
+    /// Applies a `CONNECT`.
+    #[inline(never)]
+    fn connect(&mut self, json: &[u8]) -> Result<(), Close> {
+        self.opts.apply(json).map_err(|_| Close::Connect)?;
+        self.client.headers.set(self.opts.headers);
+        self.connected = true;
+        if !(0..=1).contains(&self.opts.protocol) {
+            return Err(Close::Refused("invalid client protocol"));
+        }
+        if self.opts.no_responders && !self.opts.headers {
+            return Err(Close::Refused("no responders requires headers support"));
+        }
+        self.ok();
+        Ok(())
+    }
+
+    /// After a publish no subscription got: the status 503 to a requester
+    /// that asked for it.
+    #[cold]
+    #[inline(never)]
+    fn nobody_got(&self, index: &Index, p: &Pub<'_>) {
+        if self.opts.no_responders
+            && let Some(reply) = p.reply
+            && no_responders(index, &self.client, reply, p.subject)
+        {
+            self.lane.mark(&self.client);
+        }
+    }
+
+    #[inline(never)]
     fn subscribe(&mut self, s: &Sub<'_>) {
         if self.client.subs.borrow().contains_key(s.sid) {
             return self.ok();
@@ -213,6 +246,7 @@ impl Conn {
     }
 
     /// Ends a subscription, now or after its maximum of messages.
+    #[inline(never)]
     fn unsubscribe(&mut self, u: &Unsub<'_>) {
         let max = u.max.unwrap_or(0) as u64;
         if max > 0 {
@@ -233,6 +267,29 @@ impl Conn {
     }
 }
 
+/// Tells `client` that no one got its request on `subject`: a status 503
+/// to its own subscription on `reply`, if it has one. Returns whether it
+/// had one.
+fn no_responders(index: &Index, client: &Client, reply: &[u8], subject: &[u8]) -> bool {
+    let own = |i: &Interest| {
+        i.plain
+            .local
+            .iter()
+            .find(|e| e.client.id == client.id)
+            .map(|e| e.sid.clone())
+    };
+    let sid = match index.matches(reply) {
+        Some(Found::One(i)) => own(i),
+        Some(Found::Many(all)) => all.iter().find_map(own),
+        None => None,
+    };
+    let Some(sid) = sid else {
+        return false;
+    };
+    encode::no_responders(&mut *client.out.borrow_mut(), reply, &sid, subject);
+    true
+}
+
 /// A publish being routed on its lane.
 struct Routing<'a, 'p> {
     lane: &'a Lane,
@@ -245,6 +302,8 @@ struct Routing<'a, 'p> {
     skip: u64,
     /// A subscriber past the stall mark.
     stalled: Option<Rc<Client>>,
+    /// Some subscription got it, here or on another lane.
+    delivered: bool,
 }
 
 impl Routing<'_, '_> {
@@ -257,10 +316,12 @@ impl Routing<'_, '_> {
     )]
     #[inline(always)]
     fn plain(&mut self, i: &Interest, once: bool) {
-        self.lane
+        self.delivered |= self
+            .lane
             .deliver(&i.plain.local, self.p, self.skip, &mut self.stalled);
         for &(to, _) in &i.plain.lanes {
             self.fwd[to].plain(self.buf, self.p, once);
+            self.delivered = true;
         }
     }
 
@@ -284,11 +345,16 @@ impl Routing<'_, '_> {
     /// on, here or on the lane of the member picked.
     fn queue(&mut self, found: &Found<'_>, k: usize, name: &[u8]) {
         let groups = found.queue_groups(k, name);
-        let to = self
+        match self
             .lane
-            .deliver_queue(&groups, self.p, self.skip, &mut self.stalled);
-        if let Some(to) = to {
-            self.fwd[to].queue(self.buf, self.p, name);
+            .deliver_queue(&groups, self.p, self.skip, &mut self.stalled)
+        {
+            Queued::Here => self.delivered = true,
+            Queued::Lane(to) => {
+                self.fwd[to].queue(self.buf, self.p, name);
+                self.delivered = true;
+            }
+            Queued::Nowhere => {}
         }
     }
 }

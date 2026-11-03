@@ -155,7 +155,9 @@ impl Lane {
         };
         // The publisher is on another lane: nothing to skip.
         match (&found, f.queue.get_some(&b.out.names)) {
-            (Found::One(i), None) => self.deliver(&i.plain.local, &p, 0, stalled),
+            (Found::One(i), None) => {
+                self.deliver(&i.plain.local, &p, 0, stalled);
+            }
             (Found::Many(all), None) => {
                 for i in all.iter() {
                     self.deliver(&i.plain.local, &p, 0, stalled);

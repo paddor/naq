@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(crate) use data::{Batch, Out};
+pub(crate) use route::Queued;
 
 use crate::conn::Client;
 use crate::index::Index;
