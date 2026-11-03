@@ -1,0 +1,26 @@
+# Limits from the configuration file.
+#! max_payload: 100
+#! max_control_line: 64
+
+# INFO tells the client the payload limit; a publish over it is refused.
+a> CONNECT {"verbose":false}
+a> PUB foo 100
+a> 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":100,"proto":1}
+b> CONNECT {"verbose":false}
+b> PUB foo 101
+b< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":100,"proto":1}
+b< -ERR 'Maximum Payload Violation'
+b< (closed)
+
+# A control line over its limit.
+c> CONNECT {"verbose":false}
+c> SUB aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1
+c< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":100,"proto":1}
+c< -ERR 'maximum control line exceeded'
+c< (closed)
+d> CONNECT {"verbose":false}
+d> SUB aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1
+d> PING
+d< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":100,"proto":1}
+d< PONG

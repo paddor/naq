@@ -283,7 +283,7 @@ impl Conn {
 const fn farewell(close: Close) -> Option<&'static str> {
     match close {
         Close::Parse(ParseError::MaxPayload(_)) => Some("Maximum Payload Violation"),
-        Close::Parse(ParseError::ControlLine) => Some("Maximum Control Line Exceeded"),
+        Close::Parse(ParseError::ControlLine) => Some("maximum control line exceeded"),
         Close::Refused(text) => Some(text),
         Close::Stale => Some("Stale Connection"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)

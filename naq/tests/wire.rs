@@ -9,7 +9,8 @@
 //! - `a< text`: what client `a` got, one server operation per line, a
 //!   message's payload on a line of its own. `INFO` keeps only the fields
 //!   that do not change between runs. `(closed)` is the server closing.
-//! - `#` comments and blank lines, kept as they are.
+//! - `#` comments and blank lines, kept as they are. `#! text` is also a
+//!   line of the configuration file both servers run with.
 //!
 //! A client's lines go out in one write when the script moves to another
 //! client, and at its end, so the server reads them together whatever the
@@ -59,9 +60,10 @@ fn naq_replies_as_nats_server_does() {
     let mut failed = String::new();
     for path in scripts() {
         let text = std::fs::read_to_string(&path).unwrap();
+        let conf = config(&text);
         let mut want = text.clone();
         if let Some(go) = &go {
-            let server = GoServer::start(go);
+            let server = GoServer::start(go, &path, &conf);
             let got = replay(&text, server.addr);
             if bless {
                 std::fs::write(&path, &got).unwrap();
@@ -70,11 +72,12 @@ fn naq_replies_as_nats_server_does() {
                 failed += &mismatch(&path, "nats-server", &text, &got);
             }
         }
+        let opts: naq::Options = conf.parse().unwrap();
         let server = naq::Server::start(&naq::Options {
             host: "127.0.0.1".into(),
             port: 0,
             lanes: 1,
-            ..naq::Options::default()
+            ..opts
         })
         .unwrap();
         let got = replay(&want, server.addr());
@@ -83,6 +86,15 @@ fn naq_replies_as_nats_server_does() {
         }
     }
     assert!(failed.is_empty(), "{failed}");
+}
+
+/// The configuration in the `#!` lines of `script`.
+fn config(script: &str) -> String {
+    script
+        .lines()
+        .filter_map(|l| l.strip_prefix("#!"))
+        .map(|l| l.strip_prefix(' ').unwrap_or(l).to_owned() + "\n")
+        .collect()
 }
 
 fn scripts() -> Vec<PathBuf> {
@@ -424,13 +436,19 @@ struct GoServer {
 }
 
 impl GoServer {
-    fn start(bin: &Path) -> GoServer {
+    /// Starts `bin` with configuration `conf` for `script`.
+    fn start(bin: &Path, script: &Path, conf: &str) -> GoServer {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("wire");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{}.conf", script.file_name().unwrap().display()));
+        std::fs::write(&file, conf).unwrap();
         let child = Command::new(bin)
+            .args(["-c".as_ref(), file.as_os_str()])
             .args(["-a", "127.0.0.1", "-p", &port.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -233,7 +233,7 @@ fn protocol_errors_close_the_connection() {
     long.push_str(&"a".repeat(5000));
     let (mut c, _) = Client::raw(&s);
     c.send(&long);
-    assert_eq!(c.rest(), "-ERR 'Maximum Control Line Exceeded'\r\n");
+    assert_eq!(c.rest(), "-ERR 'maximum control line exceeded'\r\n");
 }
 
 #[test]

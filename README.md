@@ -5,7 +5,9 @@ engine: shared-nothing IO lanes, no locks on the message path, batched
 wakes and writes.
 
 The server runs core publish and subscribe: wildcards, queue groups,
-`UNSUB` maximums. One account so far, plain TCP, no authentication.
+`UNSUB` maximums. One account so far, plain TCP, no authentication. It
+reads `nats-server` configuration files (`naq -c FILE`), the keys it
+serves so far.
 
 | Crate | Role |
 | --- | --- |

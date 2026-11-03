@@ -94,3 +94,40 @@ fn fails_when_it_cannot_start() {
         assert!(err.starts_with("naq: "), "{err}");
     }
 }
+
+#[test]
+fn takes_a_configuration_file_that_flags_override() {
+    let dir = std::env::temp_dir().join(format!("naq-bin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("server.conf");
+    std::fs::write(&conf, "server_name: fromfile\nport: 1\n").unwrap();
+    let mut child = Command::new(NAQ)
+        .args(["-c".as_ref(), conf.as_os_str()])
+        .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stderr.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let _proc = Proc(child);
+    let addr = line
+        .strip_prefix("[naq] Listening for client connections on ")
+        .unwrap_or_else(|| panic!("{line:?}"))
+        .trim();
+    let mut r = BufReader::new(TcpStream::connect(addr).unwrap());
+    let mut info = String::new();
+    r.read_line(&mut info).unwrap();
+    assert!(info.contains(r#""server_name":"fromfile""#), "{info}");
+    std::fs::write(&conf, "bogus: 1\n").unwrap();
+    let out = Command::new(NAQ)
+        .args(["-c".as_ref(), conf.as_os_str()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("bogus: not supported"));
+    let out = Command::new(NAQ).arg("-c").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

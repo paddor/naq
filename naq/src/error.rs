@@ -2,7 +2,7 @@
 
 use std::io;
 
-/// Why a server did not start.
+/// Why a server did not start, or its configuration could not be read.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -18,6 +18,23 @@ pub enum Error {
     /// The IO lanes could not start.
     #[error("cannot start the IO lanes")]
     Lanes(#[source] io::Error),
+    /// A configuration file could not be read.
+    #[error("cannot read {path}")]
+    Read {
+        /// The file.
+        path: String,
+        /// The read error.
+        #[source]
+        source: io::Error,
+    },
+    /// A configuration does not parse, or holds what naq cannot use.
+    #[error("{at}: {reason}")]
+    Config {
+        /// File and line, or the line alone.
+        at: String,
+        /// What is wrong.
+        reason: String,
+    },
 }
 
 /// An engine error as an I/O error, so engine types stay private.

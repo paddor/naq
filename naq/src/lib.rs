@@ -31,6 +31,7 @@
 
 #![forbid(unsafe_code)]
 
+mod config;
 mod conn;
 mod error;
 mod index;

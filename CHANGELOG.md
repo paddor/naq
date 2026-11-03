@@ -44,6 +44,15 @@ Notable changes to naq. The format follows
   interval. A client past its unanswered `PING`s gets
   `-ERR 'Stale Connection'` and is closed; one whose writes stall past the
   deadline is closed as a slow consumer.
+- `naq`: `nats-server` configuration files. `Options::from_file` and
+  `Options: FromStr` read the syntax (`:`, `=` or blanks between keys and
+  values, maps, arrays, size suffixes, `$variables`, `include`) and the
+  keys `listen`, `host`, `port`, `server_name`, `max_payload`,
+  `max_control_line`, `max_pending`, `ping_interval`, `ping_max` and
+  `write_deadline`; log settings are ignored, other keys are an error.
+  The binary takes `-c FILE`; its other flags override the file.
+- `naq`: `-ERR 'maximum control line exceeded'` in the case `nats-server`
+  sends it.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing
