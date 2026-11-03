@@ -23,7 +23,7 @@ use zzq_tokio::transport::{Driver, Stream};
 use crate::lane::{self, Lane, Out};
 use crate::perms::Held;
 use crate::server::Shared;
-use crate::stats::Tally;
+use crate::stats::{Events, Tally};
 
 /// How long a closed connection's writer may take to write what is left,
 /// such as to a client that stopped reading.
@@ -297,7 +297,10 @@ pub(crate) async fn serve<R, W>(
 {
     lane.clients.borrow_mut().insert(client.id, client.clone());
     let opts = &lane.shared.opts;
-    let writer = tokio::task::spawn_local(write::writer(client.clone(), w, lane.shared.clone()));
+    let shared = lane.shared.clone();
+    let slow = move || Events::note(&shared.events.slow_consumers);
+    let deadline = lane.shared.opts.write_deadline;
+    let writer = tokio::task::spawn_local(write::writer(client.clone(), w, deadline, slow));
     client.wake_writer();
     let now = tokio::time::Instant::now();
     let ping = ping::Pinger::new(now, opts.ping_interval);

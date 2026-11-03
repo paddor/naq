@@ -112,3 +112,8 @@ Notable changes to naq. The format follows
   load generator CPU.
 - `naq-bench`: `naq_sink`, a fake server that measures the load generator
   alone: a sink for publishers, or a `MSG` source for subscribers.
+
+### Fixed
+
+- `naq`: the writer flushes after each write, so output a TLS stream
+  buffered no longer waits for the client's next output.
