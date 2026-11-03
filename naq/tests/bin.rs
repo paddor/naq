@@ -131,3 +131,51 @@ fn takes_a_configuration_file_that_flags_override() {
     assert_eq!(out.status.code(), Some(2));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn takes_the_flags_nats_server_harnesses_pass() {
+    let dir = std::env::temp_dir().join(format!("naq-bin-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (log, pid) = (dir.join("naq.log"), dir.join("naq.pid"));
+    let child = Command::new(NAQ)
+        .args([
+            "-a",
+            "127.0.0.1",
+            "-p",
+            "-1",
+            "--lanes",
+            "1",
+            "--store_dir",
+            "/nowhere",
+        ])
+        .args([
+            "-l".as_ref(),
+            log.as_os_str(),
+            "-P".as_ref(),
+            pid.as_os_str(),
+        ])
+        .spawn()
+        .unwrap();
+    let proc = Proc(child);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let line = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.ends_with('\n') {
+            break text;
+        }
+        assert!(std::time::Instant::now() < deadline, "no log line");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let addr = line
+        .trim()
+        .strip_prefix("[naq] Listening for client connections on ")
+        .unwrap_or_else(|| panic!("{line:?}"));
+    assert_ne!(addr, "127.0.0.1:0");
+    TcpStream::connect(addr).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&pid).unwrap(),
+        proc.0.id().to_string()
+    );
+    drop(proc);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

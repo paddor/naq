@@ -85,6 +85,10 @@ Notable changes to naq. The format follows
   and the client starts the handshake; with `handshake_first` the
   handshake comes first. `verify` asks clients for certificates from the
   CA. `INFO` has `tls_required` and `tls_verify`.
+- `naq`: the binary takes `-p -1` for a free port, `-l FILE` for its
+  log, `-P FILE` for its process ID and accepts `--store_dir`, so
+  harnesses that start `nats-server` can start naq. The `async-nats`
+  client tests pass but those for lame duck mode and JWTs.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing
