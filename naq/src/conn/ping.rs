@@ -28,6 +28,8 @@ pub(super) enum Tick {
 pub(super) struct Pinger {
     /// When the timer fires next.
     pub(super) next: Instant,
+    /// Time between `PING`s to a quiet client.
+    pub(super) interval: Duration,
     /// `PING`s sent and not answered.
     out: u32,
     /// The last read with messages or subscriptions in it, or a `PING`.
@@ -41,6 +43,7 @@ impl Pinger {
     pub(super) fn new(now: Instant, interval: Duration) -> Pinger {
         Pinger {
             next: now + interval,
+            interval,
             out: 0,
             last_in: now,
             sent_at: None,

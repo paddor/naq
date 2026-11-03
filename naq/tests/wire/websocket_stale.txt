@@ -1,0 +1,12 @@
+# A client that leaves PINGs unanswered is closed as stale.
+#! ping_interval: "200ms"
+#! ping_max: 1
+#! websocket { port: $WS_PORT, no_tls: true }
+
+ws> CONNECT {"verbose":false}
+ws!
+ws< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< PING
+ws< -ERR 'Stale Connection'
+ws< (close 1001 Stale Connection)
+ws< (closed)

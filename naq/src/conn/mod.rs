@@ -20,6 +20,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use zzq_tokio::transport::{Driver, Stream};
 
+use crate::auth::Creds;
 use crate::lane::{self, Lane, Out};
 use crate::perms::Held;
 use crate::server::Shared;
@@ -53,6 +54,8 @@ pub(crate) struct Client {
     /// Who it is, for monitoring.
     pub(crate) meta: RefCell<Meta>,
     closed: Cell<bool>,
+    /// Why the server ended it, once it did.
+    ended: Cell<Option<Close>>,
     /// Wakes the writer.
     wake: Notify,
     /// The writer took the output: room for publishers that wait.
@@ -82,6 +85,7 @@ impl Client {
                 version: None,
             }),
             closed: Cell::new(false),
+            ended: Cell::new(None),
             wake: Notify::new(),
             drained: Notify::new(),
             stop: Notify::new(),
@@ -94,6 +98,11 @@ impl Client {
 
     pub(crate) const fn is_closed(&self) -> bool {
         self.closed.get()
+    }
+
+    /// Why the server ended the connection, once it did.
+    pub(crate) const fn ended(&self) -> Option<Close> {
+        self.ended.get()
     }
 
     /// Ends subscription `sid`, on this lane and then on the others.
@@ -167,7 +176,7 @@ enum Stage {
 
 /// Why a connection ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Close {
+pub(crate) enum Close {
     /// The client closed it, or reading failed.
     Lost,
     /// The server closed it, as for a slow consumer.
@@ -186,6 +195,18 @@ enum Close {
     Auth,
     /// It did not authenticate in time.
     AuthTimeout,
+}
+
+/// The refusal of a `CONNECT` with a protocol other than 0 and 1.
+pub(crate) const BAD_PROTOCOL: &str = "invalid client protocol";
+
+/// What a client's transport adds to it.
+#[derive(Debug)]
+pub(crate) struct Via {
+    /// It came over WebSocket.
+    pub(crate) ws: bool,
+    /// Credentials from its cookies, for a `CONNECT` without them.
+    pub(crate) cookies: Option<Box<Creds>>,
 }
 
 /// The reader's side of a connection.
@@ -213,6 +234,7 @@ struct Conn {
     auth_by: Option<tokio::time::Instant>,
     /// What it may sign to log in with an NKey.
     nonce: Option<Box<str>>,
+    via: Via,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -221,6 +243,30 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
         return;
     };
     let (ip, port) = peer(&stream);
+    let (hello, info) = greet(&lane, ip, port, false);
+    if lane.shared.tls.is_some() {
+        return crate::tls::serve(lane, hello, info, stream).await;
+    }
+    hello.client.out.borrow_mut().extend_from_slice(&info);
+    let shared = lane.shared.clone();
+    let driver = ConnDriver { lane, hello };
+    if stream.drive(driver).await.is_err() {
+        shared.client_gone();
+    }
+}
+
+/// A client to serve, as its transport brought it.
+#[derive(Debug)]
+pub(crate) struct Hello {
+    pub(crate) client: Rc<Client>,
+    /// What it may sign to log in with an NKey.
+    pub(crate) nonce: Option<Box<str>>,
+    pub(crate) via: Via,
+}
+
+/// A new client from `ip` and `port`, over WebSocket if `ws`, and its
+/// `INFO`.
+pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec<u8>) {
     let client = Rc::new(Client::new(lane.shared.next_client()));
     let nonce = lane
         .shared
@@ -233,6 +279,7 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
         id: client.id,
         ip: &ip,
         nonce: nonce.as_deref(),
+        ws,
     };
     handshake::info(&lane.shared, &to, None, &mut info);
     {
@@ -240,19 +287,8 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
         meta.ip = ip;
         meta.port = port;
     }
-    if lane.shared.tls.is_some() {
-        return crate::tls::serve(lane, client, nonce, info, stream).await;
-    }
-    client.out.borrow_mut().extend_from_slice(&info);
-    let shared = lane.shared.clone();
-    let driver = ConnDriver {
-        lane,
-        client,
-        nonce,
-    };
-    if stream.drive(driver).await.is_err() {
-        shared.client_gone();
-    }
+    let via = Via { ws, cookies: None };
+    (Hello { client, nonce, via }, info)
 }
 
 /// The client's IP address, as text.
@@ -260,7 +296,7 @@ fn peer(stream: &Stream) -> (String, u16) {
     match stream {
         Stream::Tcp(s) => s
             .peer_addr()
-            .map(|a| (a.ip().to_string(), a.port()))
+            .map(|a| (a.ip().to_canonical().to_string(), a.port()))
             .unwrap_or_default(),
         _ => (String::new(), 0),
     }
@@ -268,8 +304,7 @@ fn peer(stream: &Stream) -> (String, u16) {
 
 struct ConnDriver {
     lane: Rc<Lane>,
-    client: Rc<Client>,
-    nonce: Option<Box<str>>,
+    hello: Hello,
 }
 
 impl Driver for ConnDriver {
@@ -280,21 +315,17 @@ impl Driver for ConnDriver {
         R: AsyncRead + Unpin + 'static,
         W: AsyncWrite + Unpin + 'static,
     {
-        serve(self.lane, self.client, self.nonce, reader, writer)
+        serve(self.lane, self.hello, reader, writer)
     }
 }
 
-/// Serves `client`, whose `INFO` went out or is queued, over `r` and `w`.
-pub(crate) async fn serve<R, W>(
-    lane: Rc<Lane>,
-    client: Rc<Client>,
-    nonce: Option<Box<str>>,
-    mut r: R,
-    w: W,
-) where
+/// Serves a client whose `INFO` went out or is queued, over `r` and `w`.
+pub(crate) async fn serve<R, W>(lane: Rc<Lane>, hello: Hello, mut r: R, w: W)
+where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
+    let Hello { client, nonce, via } = hello;
     lane.clients.borrow_mut().insert(client.id, client.clone());
     let opts = &lane.shared.opts;
     let shared = lane.shared.clone();
@@ -303,7 +334,8 @@ pub(crate) async fn serve<R, W>(
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, deadline, slow));
     client.wake_writer();
     let now = tokio::time::Instant::now();
-    let ping = ping::Pinger::new(now, opts.ping_interval);
+    let ws_ping = via.ws.then(|| lane.shared.ws.as_ref()?.opts.ping_interval);
+    let ping = ping::Pinger::new(now, ws_ping.flatten().unwrap_or(opts.ping_interval));
     let auth_by = lane.shared.auth.as_ref().map(|a| now + a.timeout);
     let fwd = (0..lane.lanes()).map(|_| Out::default()).collect();
     let ip = client.meta.borrow().ip.clone();
@@ -320,6 +352,7 @@ pub(crate) async fn serve<R, W>(
         busy: false,
         auth_by,
         nonce,
+        via,
     };
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
@@ -354,6 +387,7 @@ impl Conn {
                 id: self.client.id,
                 ip: &self.ip,
                 nonce: self.nonce.as_deref(),
+                ws: self.via.ws,
             };
             handshake::info(
                 shared,
@@ -382,6 +416,7 @@ impl Conn {
         self.lane.clients.borrow_mut().remove(&self.client.id);
         self.lane.shared.client_gone();
         self.lane.flush();
+        self.client.ended.set(Some(close));
         self.client.close();
         if tokio::time::timeout(CLOSE_LINGER, &mut writer)
             .await

@@ -1,0 +1,67 @@
+# WebSocket clients speak the client protocol over frames.
+#! websocket { port: $WS_PORT, no_tls: true }
+
+# Messages between WebSocket and TCP clients.
+ws> CONNECT {"verbose":false,"protocol":1}
+ws> SUB a 1
+ws> PING
+ws< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< PONG
+ws< INFO {"client_ip":"127.0.0.1","connect_info":true,"headers":true,"max_payload":1048576,"proto":1,"remote_account":"$G"}
+a> CONNECT {"verbose":false}
+a> SUB b 1
+a> PUB a 2
+a> hi
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< MSG a 1 2
+ws< hi
+ws> PUB b 3
+ws> you
+a< MSG b 1 3
+a< you
+a> PING
+a< PONG
+
+# Verbose, and an operation split across frames.
+ws2> CONNECT {}
+ws2~ PUB a 5\r\nhel
+ws2~ lo\r\n
+ws2> PING
+ws2< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws2< +OK
+ws2< +OK
+ws2< PONG
+ws< MSG a 1 5
+ws< hello
+
+# A ping frame gets a pong frame; a pong frame nothing.
+ws3> CONNECT {"verbose":false}
+ws3! \x89\x83\x00\x00\x00\x00hey
+ws3! \x8a\x82\x00\x00\x00\x00no
+ws3> PING
+ws3< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws3< (pong hey)
+ws3< PONG
+
+# Text frames and fragments carry the protocol too.
+ws4> CONNECT {"verbose":false}
+ws4! \x01\x83\x00\x00\x00\x00PIN
+ws4! \x80\x83\x00\x00\x00\x00G\r\n
+ws4! \x81\x86\x00\x00\x00\x00PING\r\n
+ws4> PING
+ws4< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws4< PONG
+ws4< PONG
+ws4< PONG
+
+# A close frame is echoed, and the connection ends.
+ws5> CONNECT {"verbose":false}
+ws5! \x88\x85\x00\x00\x00\x00\x03\xe8bye
+ws5< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws5< (close 1000 bye)
+ws5< (closed)
+ws6> CONNECT {"verbose":false}
+ws6! \x88\x80\x00\x00\x00\x00
+ws6< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws6< (close)
+ws6< (closed)

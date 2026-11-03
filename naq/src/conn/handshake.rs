@@ -109,6 +109,8 @@ struct Info<'a> {
     tls_required: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     tls_verify: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tls_available: bool,
     #[serde(rename = "connect_info", skip_serializing_if = "std::ops::Not::not")]
     bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,25 +123,38 @@ pub(super) struct To<'a> {
     pub(super) ip: &'a str,
     /// For it to sign, if it may log in with an NKey.
     pub(super) nonce: Option<&'a str>,
+    /// It came over WebSocket.
+    pub(super) ws: bool,
 }
 
 /// Appends the `INFO` for client `to`. The one that follows the first
 /// `PONG` names the client's account, `bound`.
 pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut Vec<u8>) {
+    // A WebSocket client sees its own port, and TLS as that port has it.
+    let ws = shared.ws.as_ref().filter(|_| to.ws);
+    let (host, port, tls) = match ws {
+        Some(w) => (w.opts.host.as_str(), w.addr.port(), w.tls.is_some()),
+        None => (
+            shared.opts.host.as_str(),
+            shared.addr.port(),
+            shared.tls.is_some(),
+        ),
+    };
     let info = Info {
         server_id: &shared.server_id,
         server_name: &shared.opts.server_name,
         version: env!("CARGO_PKG_VERSION"),
         proto: 1,
         go: "",
-        host: &shared.opts.host,
-        port: shared.addr.port(),
+        host,
+        port,
         headers: true,
         max_payload: shared.opts.max_payload,
         client_id: to.id,
         client_ip: to.ip,
         nonce: to.nonce,
-        tls_required: shared.tls.is_some(),
+        tls_required: tls,
+        tls_available: tls && ws.is_some(),
         tls_verify: shared.tls.as_ref().is_some_and(|t| t.verify),
         // Before the CONNECT, a client need not authenticate if it may
         // connect as the no_auth_user.

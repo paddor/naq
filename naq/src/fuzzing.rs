@@ -31,6 +31,16 @@ pub fn index(data: &[u8]) {
     check(&idx, subj, &filters, |lane| lane % 2 == 1);
 }
 
+/// Reads a WebSocket upgrade request and the frames after it.
+///
+/// # Panics
+///
+/// When the reader keeps more than it read, or compression does not round
+/// trip.
+pub fn websocket(data: &[u8]) {
+    crate::ws::fuzz(data);
+}
+
 fn check(idx: &Index, subj: &[u8], filters: &[&[u8]], kept: impl Fn(usize) -> bool) {
     let mut want: Vec<usize> = filters
         .iter()
@@ -64,5 +74,12 @@ mod tests {
         index(b"a.b.c\na.b.c\na.*.c\na.>\n>\nb.*\n*.*.*\na.b\n\na..b\n");
         index(b"");
         index(b"x\n*\n>\nx\n");
+    }
+
+    #[test]
+    fn websocket_input_is_read_without_panics() {
+        websocket(b"GET / HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n\x02\x82\x80\0\0\0\0\x89\x80\0\0\0\0");
+        websocket(b"\x16\x03\x01\n");
+        websocket(b"");
     }
 }

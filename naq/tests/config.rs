@@ -322,3 +322,125 @@ fn monitoring_takes_a_port_or_a_host_and_port() {
     assert!("http: nope\n".parse::<Options>().is_err());
     assert!("http_port: -1\n".parse::<Options>().is_err());
 }
+
+#[test]
+fn the_websocket_block_sets_its_own_port() {
+    let o: Options = "websocket {\n  listen: 127.0.0.1:8080\n  no_tls: true\n  same_origin: true\n  \
+                      allowed_origins: http://a.example\n  handshake_timeout: \"5s\"\n  compression: true\n  \
+                      headers { X-Frame-Options: DENY }\n  ping_interval: 30\n  user_cookie: u\n  \
+                      pass_cookie: p\n  token_cookie: t\n}\n"
+        .parse()
+        .unwrap();
+    let w = o.websocket.unwrap();
+    assert_eq!(
+        w,
+        naq::Websocket {
+            host: "127.0.0.1".into(),
+            port: 8080,
+            no_tls: true,
+            same_origin: true,
+            allowed_origins: vec!["http://a.example".into()],
+            handshake_timeout: Duration::from_secs(5),
+            compression: true,
+            headers: vec![("X-Frame-Options".into(), "DENY".into())],
+            ping_interval: Some(Duration::from_secs(30)),
+            cookies: naq::Cookies {
+                user: Some("u".into()),
+                pass: Some("p".into()),
+                token: Some("t".into()),
+            },
+            ..naq::Websocket::default()
+        }
+    );
+    let o: Options = "ws { port: -1, no_tls: true, origins: [\"https://b\"] }\n"
+        .parse()
+        .unwrap();
+    let w = o.websocket.unwrap();
+    assert_eq!((w.host.as_str(), w.port), ("0.0.0.0", 0));
+    assert_eq!(w.allowed_origins, ["https://b"]);
+    let o: Options = "websocket { no_tls: true }\n".parse().unwrap();
+    assert_eq!(o.websocket, None, "no port, no websocket");
+    let o: Options = "websocket { port: 0, no_tls: true }\n".parse().unwrap();
+    assert_eq!(o.websocket, None);
+}
+
+#[test]
+fn websocket_settings_that_cannot_run_are_an_error() {
+    for (text, reason) in [
+        (
+            "websocket { port: 1 }",
+            "websocket requires TLS configuration",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, allowed_origins: [\"ftp://x\"] }",
+            "unable to parse allowed origin \"ftp://x\": allowed origins must be absolute URLs with http or https scheme",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, headers { Upgrade: x } }",
+            "websocket: invalid header \"Upgrade\" not allowed",
+        ),
+    ] {
+        let e = text.parse::<Options>().unwrap_err();
+        assert!(
+            matches!(&e, Error::Config { reason: r, .. } if r == reason),
+            "{text}: {e}"
+        );
+    }
+}
+
+#[test]
+fn websocket_settings_naq_cannot_use_are_an_error() {
+    for (text, reason) in [
+        (
+            "websocket { port: 1, no_tls: true, jwt_cookie: j }",
+            "websocket: jwt_cookie: not supported",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, advertise: a }",
+            "websocket: advertise: not supported",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, no_auth_user: a }",
+            "websocket: no_auth_user: not supported",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, authorization { token: t } }",
+            "websocket: authorization: not supported",
+        ),
+        (
+            "websocket { port: 70000 }",
+            "websocket: port: expected a port",
+        ),
+        (
+            "websocket { port: 1, no_tls: 1 }",
+            "websocket: no_tls: expected true or false",
+        ),
+        (
+            "websocket { port: 1, headers: 1 }",
+            "websocket: headers: expected a map of strings",
+        ),
+        (
+            "websocket { port: 1, origins: 1 }",
+            "websocket: origins: expected strings",
+        ),
+        (
+            "websocket { port: 1, ping_interval: x }",
+            "websocket: ping_interval: bad duration \"x\"",
+        ),
+        (
+            "websocket { port: 1, user_cookie: 1 }",
+            "websocket: user_cookie: expected a string",
+        ),
+        (
+            "websocket { port: 1, listen: x }",
+            "websocket: listen: expected host:port",
+        ),
+        ("websocket: 1", "websocket: expected a map"),
+    ] {
+        let e = text.parse::<Options>().unwrap_err();
+        assert!(
+            matches!(&e, Error::Config { reason: r, .. } if r == reason),
+            "{text}: {e}"
+        );
+    }
+}

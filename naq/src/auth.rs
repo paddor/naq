@@ -39,6 +39,20 @@ pub(crate) struct Creds {
 }
 
 impl Creds {
+    /// Takes the credentials of `other` this has not.
+    pub(crate) fn fill(&mut self, other: &Creds) {
+        let blank = |f: &Option<String>| f.as_deref().is_none_or(str::is_empty);
+        if blank(&self.user) {
+            self.user.clone_from(&other.user);
+        }
+        if blank(&self.pass) {
+            self.pass.clone_from(&other.pass);
+        }
+        if blank(&self.token) {
+            self.token.clone_from(&other.token);
+        }
+    }
+
     const fn is_blank(&self) -> bool {
         self.user.is_none() && self.pass.is_none() && self.token.is_none() && self.nkey.is_none()
     }

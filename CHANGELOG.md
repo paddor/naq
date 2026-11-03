@@ -98,6 +98,19 @@ Notable changes to naq. The format follows
   splitting arguments as `nats-server` does and enforcing
   `max_control_line` and `max_payload`. `encode` writes `MSG`, `HMSG`,
   `INFO`, `-ERR`, `+OK`, `PING` and `PONG`.
+- `naq`: WebSocket clients (`Options::websocket`, `Websocket`, `Cookies`,
+  the `websocket` block) on a port of their own, as `ws://` or, with
+  `tls`, `wss://`; `Server::websocket_addr` tells where. The upgrade is
+  checked and refused as `nats-server` does it, with `same_origin` and
+  `allowed_origins`, `Nats-No-Masking`, `headers` added to the response and
+  `handshake_timeout`. Frames carry the client protocol either way; text
+  and fragmented frames are read, pings answered and close frames echoed.
+  `compression` deflates messages over 64 bytes for clients that ask.
+  `user_cookie`, `pass_cookie` and `token_cookie` fill a `CONNECT` without
+  credentials, and `ping_interval` sets the WebSocket clients' own. A
+  connection the server ends gets a close frame with the status of
+  `nats-server`, and one that breaks the protocol gets status 1002 and its
+  reason. The `async-nats` WebSocket tests pass.
 - `naq-bench`: `naq_codec`, the codec's cost on one core: parsing `PUB`,
   encoding `MSG`, and both.
 - `naq-bench`: `naq_hop`, a batched OMQ hop between lanes of two contexts:
@@ -117,3 +130,5 @@ Notable changes to naq. The format follows
 
 - `naq`: the writer flushes after each write, so output a TLS stream
   buffered no longer waits for the client's next output.
+- `naq`: the IPv4 wildcard host `0.0.0.0` binds as `[::]`, so IPv6
+  clients get in too, as with `nats-server`.

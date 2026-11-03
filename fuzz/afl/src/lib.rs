@@ -10,10 +10,11 @@ use naq_proto::encode::Msg;
 pub type Target = fn(&[u8]);
 
 /// Every target, by name.
-pub const TARGETS: [(&str, Target); 3] = [
+pub const TARGETS: [(&str, Target); 4] = [
     ("client_wire", client_wire),
     ("config", config),
     ("subjects", subjects),
+    ("websocket", websocket),
 ];
 
 /// Parses client operations until the input ends or breaks. An operation
@@ -78,4 +79,15 @@ pub fn config(data: &[u8]) {
 /// When they disagree.
 pub fn subjects(data: &[u8]) {
     naq::fuzzing::index(data);
+}
+
+/// A WebSocket upgrade request and the frames after it, read as a lane
+/// reads them.
+///
+/// # Panics
+///
+/// When the reader keeps more than it read, or compression does not round
+/// trip.
+pub fn websocket(data: &[u8]) {
+    naq::fuzzing::websocket(data);
 }

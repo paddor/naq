@@ -1,0 +1,32 @@
+# Compression for clients that ask: messages over 64 bytes go out deflated.
+#! websocket { port: $WS_PORT, no_tls: true, compression: true }
+
+ws! GET / HTTP/1.1\r\nHost: example.com\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws> CONNECT {"verbose":false}
+ws> SUB a 1
+ws> PUB a 2
+ws> hi
+ws> PUB a 100
+ws> 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+
+# A compressed frame from the client: PING, deflated.
+ws! \xc2\x88\x00\x00\x00\x00\x0a\xf0\xf4\x73\xe7\xe5\x02\x00
+ws> PING
+ws< HTTP/1.1 101 Switching Protocols
+ws< Connection: Upgrade
+ws< Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+ws< Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover
+ws< Upgrade: websocket
+ws< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< MSG a 1 2
+ws< hi
+ws< MSG a 1 100
+ws< 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
+ws< PONG
+ws< PONG
+
+# One that asks for none gets none.
+ws2> CONNECT {"verbose":false}
+ws2> PING
+ws2< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws2< PONG

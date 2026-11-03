@@ -1,0 +1,32 @@
+# Credentials from cookies, for a CONNECT without them.
+#! authorization { users [ { user: al, password: pw }, { user: bo, password: pb } ] }
+#! websocket { port: $WS_PORT, no_tls: true, user_cookie: u, pass_cookie: p }
+
+ws! GET / HTTP/1.1\r\nHost: example.com\r\nCookie: u=al; p=pw\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws> CONNECT {"verbose":false}
+ws< HTTP/1.1 101 Switching Protocols
+ws< Connection: Upgrade
+ws< Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+ws< Upgrade: websocket
+ws< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+
+# The CONNECT wins.
+ws2! GET / HTTP/1.1\r\nHost: example.com\r\nCookie: u=al; p=wrong\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws2> CONNECT {"verbose":false,"user":"bo","pass":"pb"}
+ws2< HTTP/1.1 101 Switching Protocols
+ws2< Connection: Upgrade
+ws2< Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+ws2< Upgrade: websocket
+ws2< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+
+# A wrong password.
+ws3! GET / HTTP/1.1\r\nHost: example.com\r\nCookie: u=al; p=wrong\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws3> CONNECT {"verbose":false}
+ws3< HTTP/1.1 101 Switching Protocols
+ws3< Connection: Upgrade
+ws3< Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+ws3< Upgrade: websocket
+ws3< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws3< -ERR 'Authorization Violation'
+ws3< (close 1008 Authentication Failure)
+ws3< (closed)

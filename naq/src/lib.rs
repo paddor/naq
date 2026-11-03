@@ -5,7 +5,8 @@
 //! locks. New connections go to the lanes in turn.
 //!
 //! Subjects with wildcards, queue groups, `UNSUB` maximums, accounts,
-//! users and permissions work as in `nats-server`, over TCP or TLS.
+//! users and permissions work as in `nats-server`, over TCP, TLS or
+//! WebSocket.
 //!
 //! # Examples
 //!
@@ -46,7 +47,8 @@ mod perms;
 mod server;
 mod stats;
 mod tls;
+mod ws;
 
 pub use error::Error;
-pub use options::{Login, Options, Permissions, Responses, Rules, Tls, User};
+pub use options::{Cookies, Login, Options, Permissions, Responses, Rules, Tls, User, Websocket};
 pub use server::Server;

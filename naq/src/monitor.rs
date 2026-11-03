@@ -254,7 +254,7 @@ fn rfc3339(t: SystemTime) -> String {
 }
 
 /// Year, month and day of `days` since 1970-01-01.
-const fn civil(days: i64) -> (i64, u32, u32) {
+pub(crate) const fn civil(days: i64) -> (i64, u32, u32) {
     // Howard Hinnant's days-to-civil.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

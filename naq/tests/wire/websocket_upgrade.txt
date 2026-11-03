@@ -1,0 +1,73 @@
+# The upgrade, checked and answered as nats-server does.
+#! websocket { port: $WS_PORT, no_tls: true, headers { "X-Frame-Options": "DENY" } }
+
+# A good request, with a header that asks for frames without a mask.
+ws! GET /any/path?x=1 HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nNats-No-Masking: true\r\n\r\n
+ws! \x82\x1bCONNECT {"verbose":false}\r\n
+ws> PING
+ws< HTTP/1.1 101 Switching Protocols
+ws< Connection: Upgrade
+ws< Nats-No-Masking: true
+ws< Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+ws< Upgrade: websocket
+ws< X-Frame-Options: DENY
+ws< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< PONG
+
+# Refusals.
+ws2! POST / HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws2< HTTP/1.1 405 Method Not Allowed
+ws2< Content-Length: 19
+ws2< Content-Type: text/plain; charset=utf-8
+ws2< Sec-Websocket-Version: 13
+ws2< X-Content-Type-Options: nosniff
+ws2< Method Not Allowed\n
+ws3! GET / HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: short\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws3< HTTP/1.1 400 Bad Request
+ws3< Content-Length: 12
+ws3< Content-Type: text/plain; charset=utf-8
+ws3< Sec-Websocket-Version: 13
+ws3< X-Content-Type-Options: nosniff
+ws3< Bad Request\n
+ws4! GET / HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 8\r\n\r\n
+ws4< HTTP/1.1 400 Bad Request
+ws4< Content-Length: 12
+ws4< Content-Type: text/plain; charset=utf-8
+ws4< Sec-Websocket-Version: 13
+ws4< X-Content-Type-Options: nosniff
+ws4< Bad Request\n
+ws5! GET / HTTP/1.1\r\nHost: example.com\r\nUpgrade: h2c\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws5< HTTP/1.1 400 Bad Request
+ws5< Content-Length: 12
+ws5< Content-Type: text/plain; charset=utf-8
+ws5< Sec-Websocket-Version: 13
+ws5< X-Content-Type-Options: nosniff
+ws5< Bad Request\n
+ws6! GET / HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: close\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws6< HTTP/1.1 400 Bad Request
+ws6< Connection: close
+ws6< Content-Length: 12
+ws6< Content-Type: text/plain; charset=utf-8
+ws6< Sec-Websocket-Version: 13
+ws6< X-Content-Type-Options: nosniff
+ws6< Bad Request\n
+ws7! GET /mqtt HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws7< HTTP/1.1 404 Not Found
+ws7< Content-Length: 10
+ws7< Content-Type: text/plain; charset=utf-8
+ws7< Sec-Websocket-Version: 13
+ws7< X-Content-Type-Options: nosniff
+ws7< Not Found\n
+
+# Data before the upgrade is answered.
+ws8! GET / HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n\x82\x80\x00\x00\x00\x00
+ws8< (closed)
+
+# A leaf node is upgraded, then closed: this server takes none.
+ws9! GET /leafnode HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n
+ws9< HTTP/1.1 101 Switching Protocols
+ws9< Connection: Upgrade
+ws9< Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+ws9< Upgrade: websocket
+ws9< X-Frame-Options: DENY
+ws9< (closed)

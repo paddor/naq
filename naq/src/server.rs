@@ -1,6 +1,6 @@
 //! Starting and stopping a server: lanes, the listener, accepting clients.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -10,6 +10,7 @@ use zzq_tokio::{Config, Context, Endpoint, LaneHandle};
 
 use crate::auth::{self, Auth};
 use crate::error::io;
+use crate::tls::Acceptor;
 use crate::{Error, Options, conn, lane, stats};
 
 /// How long the accept loop pauses after a failed accept, such as when the
@@ -44,6 +45,8 @@ pub(crate) struct Shared {
     pub(crate) gone: AtomicU64,
     /// TLS for clients, if they must use it.
     pub(crate) tls: Option<crate::tls::Acceptor>,
+    /// The WebSocket port, if there is one.
+    pub(crate) ws: Option<crate::ws::Door>,
     next_client: AtomicU64,
 }
 
@@ -75,6 +78,7 @@ pub struct Server {
     _ctx: Context,
     addr: SocketAddr,
     monitor: Option<SocketAddr>,
+    websocket: Option<SocketAddr>,
 }
 
 impl Server {
@@ -85,14 +89,10 @@ impl Server {
     /// [`Error::Options`] if `opts` contradict themselves, [`Error::Tls`] if
     /// the TLS certificates or key cannot be read,
     /// [`Error::Lanes`] if the lane threads cannot start,
-    /// [`Error::Listen`] if the client or monitoring port cannot be bound.
+    /// [`Error::Listen`] if the client, WebSocket or monitoring port cannot
+    /// be bound.
     pub fn start(opts: &Options) -> Result<Server, Error> {
-        auth::validate(opts).map_err(Error::Options)?;
-        let tls = opts
-            .tls
-            .as_ref()
-            .map(crate::tls::Acceptor::new)
-            .transpose()?;
+        let (tls, ws_tls) = check(opts)?;
         let accounts = auth::accounts(opts);
         let auth = Auth::new(opts, &accounts);
         let ctx = Context::with_config(&Config {
@@ -105,9 +105,11 @@ impl Server {
             addr: format!("{}:{}", opts.host, opts.port),
             source,
         };
-        let (listener, addr) = bind(&ctx, &opts.host, opts.port).map_err(listen)?;
+        let (client, addr) = bind(&ctx, &opts.host, opts.port).map_err(listen)?;
         let monitor = bind_monitor(&ctx, opts)?;
+        let ws = bind_websocket(&ctx, opts)?;
         let monitor_addr = monitor.as_ref().map(|(_, a)| *a);
+        let ws_addr = ws.as_ref().map(|(_, a)| *a);
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
         let shared = Arc::new(Shared {
             id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
@@ -122,27 +124,28 @@ impl Server {
             started: std::time::SystemTime::now(),
             gone: AtomicU64::new(0),
             tls,
+            ws: opts
+                .websocket
+                .clone()
+                .zip(ws_addr)
+                .map(|(opts, addr)| crate::ws::Door {
+                    opts,
+                    tls: ws_tls,
+                    addr,
+                }),
             next_client: AtomicU64::new(1),
         });
-        let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
-        for (l, rx) in lanes.iter().zip(rxs) {
-            let (s, index) = (shared.clone(), l.index());
-            l.run(move || lane::install(s, index, rx))
-                .map_err(|e| Error::Lanes(io(e)))?;
-        }
-        if let Some((m, _)) = monitor {
-            let s = shared.clone();
-            ctx.lane(0)
-                .spawn(move || crate::monitor::serve(m, s))
-                .map_err(|e| Error::Lanes(io(e)))?;
-        }
-        ctx.lane(0)
-            .spawn(move || accept(listener, lanes, shared))
-            .map_err(|e| Error::Lanes(io(e)))?;
+        let ports = Ports {
+            client,
+            monitor: monitor.map(|(l, _)| l),
+            ws: ws.map(|(l, _)| l),
+        };
+        run(&ctx, &shared, rxs, ports)?;
         Ok(Server {
             _ctx: ctx,
             addr,
             monitor: monitor_addr,
+            websocket: ws_addr,
         })
     }
 
@@ -155,6 +158,68 @@ impl Server {
     pub const fn monitor_addr(&self) -> Option<SocketAddr> {
         self.monitor
     }
+
+    /// Where WebSocket clients connect, if they may.
+    pub const fn websocket_addr(&self) -> Option<SocketAddr> {
+        self.websocket
+    }
+}
+
+/// Checks `opts` and reads the TLS files they name: for the client port
+/// and for the WebSocket port.
+fn check(opts: &Options) -> Result<(Option<Acceptor>, Option<Acceptor>), Error> {
+    auth::validate(opts).map_err(Error::Options)?;
+    if let Some(w) = &opts.websocket {
+        crate::ws::validate(w).map_err(Error::Options)?;
+    }
+    let tls = opts.tls.as_ref().map(Acceptor::new).transpose()?;
+    let ws_tls = opts
+        .websocket
+        .as_ref()
+        .and_then(|w| w.tls.as_ref())
+        .map(Acceptor::new)
+        .transpose()?;
+    Ok((tls, ws_tls))
+}
+
+/// The listeners of a server, bound.
+struct Ports {
+    client: Listener,
+    monitor: Option<Listener>,
+    ws: Option<Listener>,
+}
+
+/// Starts the lanes, then the accept loops of `ports` on lane 0.
+fn run(
+    ctx: &Context,
+    shared: &Arc<Shared>,
+    rxs: Vec<lane::LaneRx>,
+    ports: Ports,
+) -> Result<(), Error> {
+    let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
+    for (l, rx) in lanes.iter().zip(rxs) {
+        let (s, index) = (shared.clone(), l.index());
+        l.run(move || lane::install(s, index, rx))
+            .map_err(|e| Error::Lanes(io(e)))?;
+    }
+    let first = ctx.lane(0);
+    if let Some(m) = ports.monitor {
+        let s = shared.clone();
+        first
+            .spawn(move || crate::monitor::serve(m, s))
+            .map_err(|e| Error::Lanes(io(e)))?;
+    }
+    if let Some(w) = ports.ws {
+        let (l, s) = (lanes.clone(), shared.clone());
+        first
+            .spawn(move || accept(w, l, s, Door::Websocket))
+            .map_err(|e| Error::Lanes(io(e)))?;
+    }
+    let (c, s) = (ports.client, shared.clone());
+    first
+        .spawn(move || accept(c, lanes, s, Door::Client))
+        .map_err(|e| Error::Lanes(io(e)))?;
+    Ok(())
 }
 
 /// The lanes to run for `wanted`: 0 is one per core the process may run on.
@@ -178,6 +243,18 @@ fn bind_monitor(ctx: &Context, opts: &Options) -> Result<Option<(Listener, Socke
     Ok(Some(bound))
 }
 
+/// Binds the WebSocket port, if `opts` want one.
+fn bind_websocket(ctx: &Context, opts: &Options) -> Result<Option<(Listener, SocketAddr)>, Error> {
+    let Some(w) = &opts.websocket else {
+        return Ok(None);
+    };
+    let bound = bind(ctx, &w.host, w.port).map_err(|source| Error::Listen {
+        addr: format!("{}:{}", w.host, w.port),
+        source,
+    })?;
+    Ok(Some(bound))
+}
+
 /// The address `host` names: itself, or for a name such as `localhost`,
 /// its first IPv4 address if it has one, as Go listens.
 fn resolve(host: &str) -> std::io::Result<String> {
@@ -193,12 +270,21 @@ fn resolve(host: &str) -> std::io::Result<String> {
         .ok_or_else(|| std::io::Error::other(format!("no address for {host}")))
 }
 
-/// Binds `host` and `port` on lane 0, where the accept loops run.
+/// Binds `host` and `port` on lane 0, where the accept loops run. The
+/// IPv4 wildcard binds as `[::]`, for IPv6 clients too, as Go binds it.
 fn bind(ctx: &Context, host: &str, port: u16) -> std::io::Result<(Listener, SocketAddr)> {
-    let endpoint = Endpoint::Tcp {
-        host: resolve(host)?,
-        port,
-    };
+    let ip = resolve(host)?;
+    if ip == "0.0.0.0"
+        && let Ok((l, at)) = bind_ip(ctx, "::".into(), port)
+    {
+        return Ok((l, SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), at.port())));
+    }
+    bind_ip(ctx, ip, port)
+}
+
+/// Binds address `ip` and `port` on lane 0.
+fn bind_ip(ctx: &Context, ip: String, port: u16) -> std::io::Result<(Listener, SocketAddr)> {
+    let endpoint = Endpoint::Tcp { host: ip, port };
     let (tx, rx) = std::sync::mpsc::channel();
     let c = ctx.clone();
     ctx.lane(0)
@@ -222,8 +308,15 @@ fn bind(ctx: &Context, host: &str, port: u16) -> std::io::Result<(Listener, Sock
     Ok((listener, SocketAddr::new(ip, port)))
 }
 
-/// Accepts clients and hands them to the lanes in turn.
-async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Shared>) {
+/// The kind of client a port takes.
+#[derive(Debug, Clone, Copy)]
+enum Door {
+    Client,
+    Websocket,
+}
+
+/// Accepts clients at `door` and hands them to the lanes in turn.
+async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Shared>, door: Door) {
     let mut next = 0;
     loop {
         let stream = match listener.accept().await {
@@ -238,7 +331,10 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
         next += 1;
         let (s, index) = (shared.clone(), lane.index());
         // Fails only once the lane stopped, which drops the stream.
-        let _ = lane.spawn(move || conn::run(s, index, stream));
+        let _ = match door {
+            Door::Client => lane.spawn(move || conn::run(s, index, stream)),
+            Door::Websocket => lane.spawn(move || crate::ws::run(s, index, stream)),
+        };
     }
 }
 

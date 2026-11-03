@@ -19,6 +19,7 @@ fuzzing = []
 bytes = { workspace = true, features = ["std"] }
 bcrypt.workspace = true
 data-encoding.workspace = true
+flate2.workspace = true
 getrandom.workspace = true
 nkeys.workspace = true
 rustls.workspace = true
@@ -30,6 +31,7 @@ naq-proto.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1_smol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 zzq-tokio.workspace = true

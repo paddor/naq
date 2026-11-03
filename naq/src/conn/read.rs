@@ -261,7 +261,7 @@ impl Conn {
         let opts = &self.lane.shared.opts;
         match self
             .ping
-            .tick(Instant::now(), opts.ping_interval, opts.max_pings_out)
+            .tick(Instant::now(), self.ping.interval, opts.max_pings_out)
         {
             Tick::Quiet => None,
             Tick::Ping => {
@@ -279,7 +279,10 @@ impl Conn {
     /// Applies a `CONNECT`.
     #[inline(never)]
     fn connect(&mut self, json: &[u8]) -> Result<Step, Close> {
-        let (creds, names) = self.opts.apply(json).map_err(|_| Close::Connect)?;
+        let (mut creds, names) = self.opts.apply(json).map_err(|_| Close::Connect)?;
+        if let Some(cookies) = &self.via.cookies {
+            creds.fill(cookies);
+        }
         {
             let mut meta = self.client.meta.borrow_mut();
             (meta.name, meta.lang, meta.version) = names;
@@ -386,11 +389,11 @@ impl Conn {
         if self.stage == Stage::Fresh {
             self.stage = Stage::Connected;
         }
-        let interval = self.lane.shared.opts.ping_interval;
+        let interval = self.ping.interval;
         let jitter = super::ping::jitter(interval, |n| self.lane.below(n));
         self.ping.connected(Instant::now(), interval, jitter);
         if !(0..=1).contains(&self.opts.protocol) {
-            return Err(Close::Refused("invalid client protocol"));
+            return Err(Close::Refused(super::BAD_PROTOCOL));
         }
         if self.opts.no_responders && !self.opts.headers {
             return Err(Close::Refused("no responders requires headers support"));

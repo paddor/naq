@@ -55,6 +55,8 @@ pub struct Options {
     pub http_host: Option<String>,
     /// TLS for every client (`tls`).
     pub tls: Option<Tls>,
+    /// WebSocket clients, on a port of their own (`websocket`).
+    pub websocket: Option<Websocket>,
     /// Permissions of users that have none of their own
     /// (`authorization { default_permissions }`).
     pub default_permissions: Option<Permissions>,
@@ -153,6 +155,7 @@ impl Default for Options {
             http_port: None,
             http_host: None,
             tls: None,
+            websocket: None,
         }
     }
 }
@@ -179,4 +182,70 @@ pub struct Tls {
     /// does not gets `INFO` in the clear and then the handshake, as by
     /// default (`handshake_first: "300ms"`). `None` waits for TLS only.
     pub fallback: Option<Duration>,
+}
+
+/// WebSocket clients (`websocket`): NATS over binary frames, after an HTTP
+/// upgrade on a port of their own, as `ws://` or, with TLS, `wss://`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Websocket {
+    /// Host to listen on (`host`). It defaults to `0.0.0.0`, whatever
+    /// [`Options::host`] is, as in `nats-server`.
+    pub host: String,
+    /// Port to listen on (`port`). 0 picks a free one.
+    pub port: u16,
+    /// TLS for every WebSocket client (`tls`): the handshake comes first,
+    /// before the upgrade. `handshake_first` and `fallback` do not apply.
+    pub tls: Option<Tls>,
+    /// Plain `ws://` is meant (`no_tls`): without it, `tls` is required,
+    /// as `nats-server` requires it.
+    pub no_tls: bool,
+    /// A browser's `Origin` must be the host and port it connected to
+    /// (`same_origin`).
+    pub same_origin: bool,
+    /// Origins browsers may connect from, as `http` or `https` URLs
+    /// (`allowed_origins`). Empty allows any.
+    pub allowed_origins: Vec<String>,
+    /// How long TLS and the upgrade may take (`handshake_timeout`). Zero
+    /// waits without limit, as `nats-server` does by default.
+    pub handshake_timeout: Duration,
+    /// Messages are compressed for clients that ask (`compression`).
+    pub compression: bool,
+    /// Headers added to every upgrade response (`headers`).
+    pub headers: Vec<(String, String)>,
+    /// Time between `PING`s to WebSocket clients, in place of
+    /// [`Options::ping_interval`] (`ping_interval`).
+    pub ping_interval: Option<Duration>,
+    /// Cookies that carry credentials for a `CONNECT` without them.
+    pub cookies: Cookies,
+}
+
+impl Default for Websocket {
+    fn default() -> Self {
+        Websocket {
+            host: "0.0.0.0".into(),
+            port: 0,
+            tls: None,
+            no_tls: false,
+            same_origin: false,
+            allowed_origins: Vec::new(),
+            handshake_timeout: Duration::from_secs(10),
+            compression: false,
+            headers: Vec::new(),
+            ping_interval: None,
+            cookies: Cookies::default(),
+        }
+    }
+}
+
+/// Names of cookies that carry credentials, for clients such as browsers
+/// that cannot put them in their `CONNECT` (`user_cookie`, `pass_cookie`,
+/// `token_cookie`). A field the `CONNECT` has wins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cookies {
+    /// The cookie with the user name.
+    pub user: Option<String>,
+    /// The cookie with the password.
+    pub pass: Option<String>,
+    /// The cookie with the token.
+    pub token: Option<String>,
 }

@@ -1,0 +1,28 @@
+# Errors with a close status: as for TCP clients, then a close frame. On
+# frames that break the protocol and on other protocol errors, nats-server
+# drops what it has queued; naq sends the close frame (tests/websocket.rs).
+#! websocket { port: $WS_PORT, no_tls: true }
+
+# A close frame whose text is not UTF-8 gets status 1007.
+ws> CONNECT {"verbose":false}
+ws! \x88\x83\x00\x00\x00\x00\x03\xe8\xff
+ws< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< (close 1007 invalid utf8 body in close frame)
+ws< (closed)
+
+wsb> CONNECT {"verbose":false}
+wsb> PUB foo 2000000
+wsb< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+wsb< -ERR 'Maximum Payload Violation'
+wsb< (close 1009 Maximum Message Payload Exceeded)
+wsb< (closed)
+wse> CONNECT {"verbose":false,"protocol":2}
+wse< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+wse< -ERR 'invalid client protocol'
+wse< (close 1002 Bad Client Protocol Version)
+wse< (closed)
+wsf> CONNECT {"verbose":false,"no_responders":true}
+wsf< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+wsf< -ERR 'no responders requires headers support'
+wsf< (close 1011 No Responders Requires Headers)
+wsf< (closed)

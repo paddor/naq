@@ -9,8 +9,20 @@
 //! - `a< text`: what client `a` got, one server operation per line, a
 //!   message's payload on a line of its own. `INFO` keeps only the fields
 //!   that do not change between runs. `(closed)` is the server closing.
+//! - `a! text`: client `a` sends `text` as it is, with the same escapes,
+//!   outside WebSocket frames: an upgrade request or frames by hand. A
+//!   client whose last step is `!` gets no `PING` of the harness: its
+//!   replies are what comes until the server closes, or `(timeout)`.
 //! - `#` comments and blank lines, kept as they are. `#! text` is also a
-//!   line of the configuration file both servers run with.
+//!   line of the configuration file both servers run with; `$WS_PORT` in it
+//!   is a free port.
+//!
+//! A client whose name starts with `ws` connects to the WebSocket port. If
+//! its first step is `!`, that sends the upgrade request and the response
+//! is part of the transcript, headers sorted and `Date` left out;
+//! otherwise it upgrades quietly. Its `>` and `~` steps go out as a masked
+//! frame each, and the frames it gets become what they carry: NATS
+//! operations, or `(ping ...)`, `(pong ...)` and `(close status text)`.
 //!
 //! A client's lines go out in one write when the script moves to another
 //! client, and at its end, so the server reads them together whatever the
@@ -24,6 +36,9 @@
 //! transcript that differs is written to `CARGO_TARGET_TMPDIR/wire/`.
 
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
+
+#[path = "wire/ws.rs"]
+mod ws;
 
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
@@ -60,11 +75,13 @@ fn naq_replies_as_nats_server_does() {
     let mut failed = String::new();
     for path in scripts() {
         let text = std::fs::read_to_string(&path).unwrap();
-        let conf = config(&text);
+        let ws_port = free_port();
+        let conf = config(&text).replace("$WS_PORT", &ws_port.to_string());
+        let ws_addr = SocketAddr::from(([127, 0, 0, 1], ws_port));
         let mut want = text.clone();
         if let Some(go) = &go {
             let server = GoServer::start(go, &path, &conf);
-            let got = replay(&text, server.addr);
+            let got = replay(&text, server.addr, ws_addr);
             if bless {
                 std::fs::write(&path, &got).unwrap();
                 want = got;
@@ -80,7 +97,7 @@ fn naq_replies_as_nats_server_does() {
             ..opts
         })
         .unwrap();
-        let got = replay(&want, server.addr());
+        let got = replay(&want, server.addr(), ws_addr);
         if got != want {
             failed += &mismatch(&path, "naq", &want, &got);
         }
@@ -128,11 +145,22 @@ fn mismatch(path: &Path, who: &str, want: &str, got: &str) -> String {
     )
 }
 
-/// Replays `script` against the server at `addr` and returns the script
-/// with the replies it got in place of those it had.
-fn replay(script: &str, addr: SocketAddr) -> String {
+/// A port free a moment ago.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Replays `script` against the server at `addr`, with WebSocket clients
+/// at `ws_addr`, and returns the script with the replies it got in place of
+/// those it had.
+fn replay(script: &str, addr: SocketAddr, ws_addr: SocketAddr) -> String {
     let mut run = Run {
         addr,
+        ws_addr,
         clients: Vec::new(),
         last: None,
         out: String::new(),
@@ -153,7 +181,7 @@ fn replay(script: &str, addr: SocketAddr) -> String {
             run.sync_all();
         }
         run.out += &std::mem::take(&mut kept);
-        let at = known.unwrap_or_else(|| run.connect(name));
+        let at = known.unwrap_or_else(|| run.connect(name, kind == '!'));
         run.last = Some(at);
         run.out += line;
         run.out.push('\n');
@@ -161,16 +189,16 @@ fn replay(script: &str, addr: SocketAddr) -> String {
         if kind == '>' {
             bytes.extend_from_slice(b"\r\n");
         }
-        run.clients[at].send(&bytes);
+        run.clients[at].send(&bytes, kind == '!');
     }
     run.sync_all();
     run.out + &kept
 }
 
-/// The client, kind and text of a step line: `a> text`, `a~ text` or
-/// `a< text`.
+/// The client, kind and text of a step line: `a> text`, `a~ text`,
+/// `a! text` or `a< text`.
 fn step(line: &str) -> Option<(&str, char, &str)> {
-    let at = line.find(['>', '~', '<'])?;
+    let at = line.find(['>', '~', '!', '<'])?;
     let name = &line[..at];
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return None;
@@ -182,6 +210,7 @@ fn step(line: &str) -> Option<(&str, char, &str)> {
 
 struct Run {
     addr: SocketAddr,
+    ws_addr: SocketAddr,
     clients: Vec<Client>,
     /// The client that sent last.
     last: Option<usize>,
@@ -189,9 +218,15 @@ struct Run {
 }
 
 impl Run {
-    /// Connects client `name`.
-    fn connect(&mut self, name: &str) -> usize {
-        self.clients.push(Client::connect(name, self.addr));
+    /// Connects client `name`; a WebSocket client upgrades by hand if
+    /// `by_hand`.
+    fn connect(&mut self, name: &str, by_hand: bool) -> usize {
+        let c = if name.starts_with("ws") {
+            Client::websocket(name, self.ws_addr, by_hand)
+        } else {
+            Client::connect(name, self.addr)
+        };
+        self.clients.push(c);
         self.clients.len() - 1
     }
 
@@ -237,6 +272,13 @@ struct Client {
     /// Received, not yet turned into lines.
     buf: Vec<u8>,
     closed: bool,
+    /// For a WebSocket client.
+    ws: Option<ws::Ws>,
+    /// Sends that wait for an upgrade by hand to finish, and whether
+    /// they are raw.
+    held: Vec<(Vec<u8>, bool)>,
+    /// The last send was raw: no `PING` to sync on.
+    raw_last: bool,
 }
 
 impl Client {
@@ -252,13 +294,38 @@ impl Client {
             pings: std::collections::VecDeque::new(),
             buf: Vec::new(),
             closed: false,
+            ws: None,
+            held: Vec::new(),
+            raw_last: false,
         }
     }
 
-    fn send(&mut self, bytes: &[u8]) {
-        self.pending.extend_from_slice(bytes);
-        self.sent.extend_from_slice(bytes);
-        self.count_pings();
+    /// A WebSocket client, upgraded unless it does it `by_hand`.
+    fn websocket(name: &str, addr: SocketAddr, by_hand: bool) -> Client {
+        let mut c = Client::connect(name, addr);
+        c.ws = Some(if by_hand {
+            ws::Ws::default()
+        } else {
+            ws::Ws::upgrade(&mut c.stream)
+        });
+        c
+    }
+
+    /// Queues `bytes`: in a frame for a WebSocket client, unless `raw`.
+    /// Before an upgrade by hand is done, only its request goes out.
+    fn send(&mut self, bytes: &[u8], raw: bool) {
+        self.raw_last = raw;
+        if !raw {
+            self.sent.extend_from_slice(bytes);
+            self.count_pings();
+        }
+        match &self.ws {
+            Some(w) if !w.up && (!raw || !self.pending.is_empty()) => {
+                self.held.push((bytes.to_vec(), raw));
+            }
+            Some(w) if !raw => self.pending.extend(w.frame(bytes)),
+            _ => self.pending.extend_from_slice(bytes),
+        }
     }
 
     /// Notes the script's `PING`s among the operations sent so far.
@@ -289,8 +356,13 @@ impl Client {
         if self.closed {
             return lines;
         }
-        if self.parsed.is_some() {
-            self.pending.extend_from_slice(b"PING\r\n");
+        if self.ws.as_ref().is_some_and(|w| !w.up) && !self.upgrade_by_hand(&mut lines) {
+            return lines;
+        }
+        let quiet = std::mem::take(&mut self.raw_last);
+        if self.parsed.is_some() && !quiet {
+            self.send(b"PING\r\n", false);
+            self.pings.pop_back();
             self.pings.push_back(false);
         }
         // A server that closed may reset the connection: the replies show it.
@@ -298,7 +370,7 @@ impl Client {
         let deadline = Instant::now() + WAIT;
         loop {
             self.take_lines(&mut lines);
-            if self.pings.is_empty() && self.parsed.is_some() {
+            if self.pings.is_empty() && self.parsed.is_some() && !quiet {
                 return lines;
             }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
@@ -310,7 +382,7 @@ impl Client {
             match self.stream.read(&mut chunk) {
                 Ok(0) => {}
                 Ok(n) => {
-                    self.buf.extend_from_slice(&chunk[..n]);
+                    self.feed(&chunk[..n], &mut lines);
                     continue;
                 }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
@@ -322,6 +394,58 @@ impl Client {
             lines.push(vec!["(closed)".into()]);
             self.closed = true;
             return lines;
+        }
+    }
+
+    /// Writes the upgrade request the script queued and reads the
+    /// response into `lines`. False unless it upgraded.
+    fn upgrade_by_hand(&mut self, lines: &mut Vec<Vec<String>>) -> bool {
+        let _ = self.stream.write_all(&std::mem::take(&mut self.pending));
+        let deadline = Instant::now() + WAIT;
+        let ws = self.ws.as_mut().unwrap();
+        loop {
+            if let Some((http, up)) = ws.http() {
+                lines.extend(http.into_iter().map(|l| vec![l]));
+                // Refused: the rest is up to the server, as HTTP has it.
+                self.closed = !up;
+                for (bytes, raw) in std::mem::take(&mut self.held) {
+                    let framed = if raw { bytes } else { ws.frame(&bytes) };
+                    self.pending.extend(framed);
+                }
+                return up;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            self.stream
+                .set_read_timeout(Some(left.max(Duration::from_millis(1))))
+                .unwrap();
+            let mut chunk = [0; 16 << 10];
+            match self.stream.read(&mut chunk) {
+                Ok(n) if n > 0 => ws.feed(&chunk[..n]),
+                _ => {
+                    lines.push(vec!["(closed)".into()]);
+                    self.closed = true;
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Takes in bytes received: NATS bytes, or for a WebSocket client,
+    /// frames.
+    fn feed(&mut self, bytes: &[u8], lines: &mut Vec<Vec<String>>) {
+        let Some(w) = self.ws.as_mut() else {
+            self.buf.extend_from_slice(bytes);
+            return;
+        };
+        w.feed(bytes);
+        for got in w.take() {
+            match got {
+                ws::Got::Data(d) => self.buf.extend_from_slice(&d),
+                ws::Got::Line(l) => {
+                    self.take_lines(lines);
+                    lines.push(vec![l]);
+                }
+            }
         }
     }
 
@@ -438,11 +562,7 @@ struct GoServer {
 impl GoServer {
     /// Starts `bin` with configuration `conf` for `script`.
     fn start(bin: &Path, script: &Path, conf: &str) -> GoServer {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = free_port();
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("wire");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("{}.conf", script.file_name().unwrap().display()));

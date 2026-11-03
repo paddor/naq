@@ -630,3 +630,24 @@ fn a_host_name_binds_where_it_resolves() {
     );
     TcpStream::connect(s.addr()).unwrap();
 }
+
+#[test]
+fn the_wildcard_host_takes_ipv6_clients_too() {
+    // As Go binds `0.0.0.0`: `localhost` may resolve to `::1` alone.
+    let s = Server::start(&Options {
+        port: 0,
+        lanes: 1,
+        ..Options::default()
+    })
+    .unwrap();
+    assert!(s.addr().is_ipv4() && s.addr().ip().is_unspecified());
+    for (ip, shown) in [("::1", "::1"), ("127.0.0.1", "127.0.0.1")] {
+        let c = TcpStream::connect((ip, s.addr().port())).unwrap();
+        c.set_read_timeout(Some(WAIT)).unwrap();
+        let mut line = String::new();
+        BufReader::new(c).read_line(&mut line).unwrap();
+        // An IPv4 client shows as such, not as an IPv6 mapped address.
+        let want = format!("\"client_ip\":\"{shown}\"");
+        assert!(line.starts_with("INFO ") && line.contains(&want), "{line}");
+    }
+}

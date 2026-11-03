@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsAcceptor;
 use zzq_tokio::transport::Stream;
 
-use crate::conn::Client;
+use crate::conn::Hello;
 use crate::lane::Lane;
 use crate::{Error, Tls};
 
@@ -85,15 +85,19 @@ impl Acceptor {
     }
 }
 
-/// Runs a TLS client: `info` goes out in the clear before the handshake, or
+impl Acceptor {
+    /// The server side of a handshake over `tcp`, without a time limit.
+    pub(crate) async fn accept(
+        &self,
+        tcp: tokio::net::TcpStream,
+    ) -> Option<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
+        self.inner.accept(tcp).await.ok()
+    }
+}
+
+/// Runs a TLS client:  `info` goes out in the clear before the handshake, or
 /// over TLS after it, as the server is set up.
-pub(crate) async fn serve(
-    lane: Rc<Lane>,
-    client: Rc<Client>,
-    nonce: Option<Box<str>>,
-    info: Vec<u8>,
-    stream: Stream,
-) {
+pub(crate) async fn serve(lane: Rc<Lane>, hello: Hello, info: Vec<u8>, stream: Stream) {
     let Some(acc) = lane.shared.tls.as_ref() else {
         return;
     };
@@ -102,10 +106,10 @@ pub(crate) async fn serve(
         return;
     };
     if !sent {
-        client.out.borrow_mut().extend_from_slice(&info);
+        hello.client.out.borrow_mut().extend_from_slice(&info);
     }
     let (r, w) = tokio::io::split(tls);
-    crate::conn::serve(lane, client, nonce, r, w).await;
+    crate::conn::serve(lane, hello, r, w).await;
 }
 
 /// `INFO` and the handshake, in the order the server is set up for, or

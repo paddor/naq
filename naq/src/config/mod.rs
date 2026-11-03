@@ -2,6 +2,7 @@
 
 mod auth;
 mod parse;
+mod ws;
 
 use std::path::Path;
 use std::time::Duration;
@@ -70,10 +71,17 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
         at: at(line, file),
         reason,
     })?;
+    let whole = || file.map_or_else(|| "config".into(), |f| f.display().to_string());
     crate::auth::validate(&opts).map_err(|reason| Error::Config {
-        at: file.map_or_else(|| "config".into(), |f| f.display().to_string()),
+        at: whole(),
         reason,
     })?;
+    if let Some(w) = &opts.websocket {
+        crate::ws::validate(w).map_err(|reason| Error::Config {
+            at: whole(),
+            reason,
+        })?;
+    }
     Ok(opts)
 }
 
@@ -120,6 +128,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 o.http_port = Some(port);
             }
             "tls" => o.tls = Some(tls(item)?),
+            "websocket" | "ws" => o.websocket = ws::websocket(item)?,
             "http_port" | "monitor_port" => {
                 o.http_port = Some(int(item).ok_or_else(|| bad("expected a port"))?);
             }
