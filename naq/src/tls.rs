@@ -20,7 +20,10 @@ use crate::{Error, Tls};
 /// What the server needs for TLS clients.
 pub(crate) struct Acceptor {
     inner: TlsAcceptor,
-    pub(crate) first: bool,
+    first: bool,
+    /// With `first`: how long a client has to start TLS before it gets
+    /// `INFO` in the clear.
+    fallback: Option<Duration>,
     timeout: Duration,
     /// Clients present certificates.
     pub(crate) verify: bool,
@@ -75,6 +78,7 @@ impl Acceptor {
         Ok(Acceptor {
             inner: TlsAcceptor::from(Arc::new(config)),
             first: o.handshake_first,
+            fallback: o.fallback,
             timeout: o.timeout,
             verify: o.verify,
         })
@@ -93,36 +97,46 @@ pub(crate) async fn serve(
     let Some(acc) = lane.shared.tls.as_ref() else {
         return;
     };
-    let Some(tls) = handshake(acc, &info, stream).await else {
+    let Some((tls, sent)) = handshake(acc, &info, stream).await else {
         lane.shared.client_gone();
         return;
     };
-    if acc.first {
+    if !sent {
         client.out.borrow_mut().extend_from_slice(&info);
     }
     let (r, w) = tokio::io::split(tls);
     crate::conn::serve(lane, client, nonce, r, w).await;
 }
 
-/// `INFO` and the handshake, in the order the server is set up for.
+/// `INFO` and the handshake, in the order the server is set up for, or
+/// the client asks for. Tells whether `INFO` went out in the clear.
 async fn handshake(
     acc: &Acceptor,
     info: &[u8],
     stream: Stream,
-) -> Option<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
+) -> Option<(tokio_rustls::server::TlsStream<tokio::net::TcpStream>, bool)> {
     let Stream::Tcp(s) = stream else {
         return None;
     };
     s.set_nonblocking(true).ok()?;
     let mut tcp = tokio::net::TcpStream::from_std(s).ok()?;
     tcp.set_nodelay(true).ok()?;
-    if !acc.first {
+    let clear = match (acc.first, acc.fallback) {
+        (false, _) => true,
+        (true, None) => false,
+        // Nothing from the client in time: it waits for INFO.
+        (true, Some(wait)) => tokio::time::timeout(wait, tcp.peek(&mut [0u8; 1]))
+            .await
+            .is_err(),
+    };
+    if clear {
         tcp.write_all(info).await.ok()?;
     }
-    tokio::time::timeout(acc.timeout, acc.inner.accept(tcp))
+    let tls = tokio::time::timeout(acc.timeout, acc.inner.accept(tcp))
         .await
         .ok()?
-        .ok()
+        .ok()?;
+    Some((tls, clear))
 }
 
 #[cfg(test)]
@@ -147,6 +161,7 @@ mod tests {
             verify: true,
             timeout: Duration::from_secs(1),
             handshake_first: true,
+            fallback: None,
         };
         let a = Acceptor::new(&o).unwrap();
         let shown = format!("{a:?}");

@@ -175,4 +175,8 @@ pub struct Tls {
     pub timeout: Duration,
     /// The handshake comes first, before `INFO` (`handshake_first`).
     pub handshake_first: bool,
+    /// With `handshake_first`, how long a client has to start TLS; one that
+    /// does not gets `INFO` in the clear and then the handshake, as by
+    /// default (`handshake_first: "300ms"`). `None` waits for TLS only.
+    pub fallback: Option<Duration>,
 }

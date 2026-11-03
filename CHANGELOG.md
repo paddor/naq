@@ -89,6 +89,10 @@ Notable changes to naq. The format follows
   log, `-P FILE` for its process ID and accepts `--store_dir`, so
   harnesses that start `nats-server` can start naq. The `async-nats`
   client tests pass but those for lame duck mode and JWTs.
+- `naq`: `Tls::fallback` and `handshake_first: "300ms"`: TLS first for
+  clients that start it in time, `INFO` first for those that do not. A
+  host name such as `localhost` binds its first IPv4 address, as Go
+  binds it. The `async-nats` TLS, NKey, service and subject tests pass.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

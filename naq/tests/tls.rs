@@ -57,6 +57,7 @@ impl Pki {
             verify,
             timeout: Duration::from_secs(2),
             handshake_first: first,
+            fallback: None,
         }
     }
 
@@ -232,4 +233,30 @@ fn the_config_file_names_the_files() {
     ] {
         assert!(bad.parse::<Options>().is_err(), "{bad}");
     }
+}
+
+#[test]
+fn auto_mode_takes_tls_first_or_falls_back_to_info_first() {
+    let pki = Pki::new("auto");
+    let s = server(Tls {
+        fallback: Some(Duration::from_millis(100)),
+        ..pki.tls(false, true)
+    });
+    let mut tls = wrap(pki.client(false), tcp(&s));
+    tls.write_all(b"CONNECT {\"verbose\":false}\r\nPING\r\n")
+        .unwrap();
+    assert!(until(&mut tls, "PONG\r\n").starts_with("INFO "));
+    let mut t = tcp(&s);
+    let info = until(&mut t, "\r\n");
+    assert!(info.starts_with("INFO "), "{info}");
+    let mut tls = wrap(pki.client(false), t);
+    tls.write_all(b"CONNECT {\"verbose\":false}\r\nPING\r\n")
+        .unwrap();
+    assert_eq!(until(&mut tls, "PONG\r\n"), "PONG\r\n");
+    let o: Options = "tls { cert_file: a, key_file: b, handshake_first: \"300ms\" }\n"
+        .parse()
+        .unwrap();
+    let t = o.tls.unwrap();
+    assert!(t.handshake_first);
+    assert_eq!(t.fallback, Some(Duration::from_millis(300)));
 }

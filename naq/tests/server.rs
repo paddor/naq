@@ -613,3 +613,20 @@ fn an_nkey_user_logs_in_by_signing_the_nonce() {
     c.send(&format!("CONNECT {connect}\r\nPING\r\n"));
     c.expect("PONG");
 }
+
+#[test]
+fn a_host_name_binds_where_it_resolves() {
+    let s = Server::start(&Options {
+        host: "localhost".into(),
+        port: 0,
+        lanes: 1,
+        ..Options::default()
+    })
+    .unwrap();
+    assert_eq!(
+        s.addr().ip().to_string(),
+        "127.0.0.1",
+        "IPv4 first, as Go listens"
+    );
+    TcpStream::connect(s.addr()).unwrap();
+}

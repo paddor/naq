@@ -147,6 +147,7 @@ fn tls(item: &Item) -> Result<crate::Tls, Bad> {
         verify: false,
         timeout: Duration::from_secs(2),
         handshake_first: false,
+        fallback: None,
     };
     for (k, v) in m {
         let k = k.to_ascii_lowercase();
@@ -165,7 +166,15 @@ fn tls(item: &Item) -> Result<crate::Tls, Bad> {
             "key_file" => key = Some(path()?),
             "ca_file" => ca = Some(path()?),
             "verify" => t.verify = flag()?,
-            "handshake_first" | "first" | "immediate" => t.handshake_first = flag()?,
+            "handshake_first" | "first" | "immediate" => {
+                if let Value::Str(_) = v.value {
+                    // Auto: TLS first if the client starts it in time.
+                    t.fallback = Some(duration(v).map_err(|e| bad(&e))?);
+                    t.handshake_first = true;
+                } else {
+                    t.handshake_first = flag()?;
+                }
+            }
             "timeout" => {
                 t.timeout = match v.value {
                     Value::Int(n) => u64::try_from(n)

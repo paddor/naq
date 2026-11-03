@@ -178,10 +178,25 @@ fn bind_monitor(ctx: &Context, opts: &Options) -> Result<Option<(Listener, Socke
     Ok(Some(bound))
 }
 
+/// The address `host` names: itself, or for a name such as `localhost`,
+/// its first IPv4 address if it has one, as Go listens.
+fn resolve(host: &str) -> std::io::Result<String> {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(host.to_owned());
+    }
+    let addrs: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&(host, 0))?.collect();
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .map(|a| a.ip().to_string())
+        .ok_or_else(|| std::io::Error::other(format!("no address for {host}")))
+}
+
 /// Binds `host` and `port` on lane 0, where the accept loops run.
 fn bind(ctx: &Context, host: &str, port: u16) -> std::io::Result<(Listener, SocketAddr)> {
     let endpoint = Endpoint::Tcp {
-        host: host.to_owned(),
+        host: resolve(host)?,
         port,
     };
     let (tx, rx) = std::sync::mpsc::channel();
