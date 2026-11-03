@@ -1,0 +1,18 @@
+[package]
+name = "naq"
+description = "Core NATS server"
+keywords = ["nats", "messaging", "pubsub", "server"]
+categories = ["network-programming"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+naq-proto.workspace = true
+
+[lints]
+workspace = true

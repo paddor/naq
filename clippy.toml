@@ -1,0 +1,19 @@
+# Identifiers clippy::doc_markdown should NOT flag inside doc comments.
+doc-valid-idents = [
+    "..",
+    "NATS",
+    "JetStream",
+    "NKey",
+    "NKeys",
+    "MQTT",
+    "QoS",
+    "ZeroMQ",
+    "WebSocket",
+]
+
+too-many-lines-threshold = 60
+too-many-arguments-threshold = 5
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
