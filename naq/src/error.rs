@@ -18,9 +18,6 @@ pub enum Error {
     /// The IO lanes could not start.
     #[error("cannot start the IO lanes")]
     Lanes(#[source] io::Error),
-    /// The options ask for something this server cannot do yet.
-    #[error("not supported: {0}")]
-    Unsupported(&'static str),
 }
 
 /// An engine error as an I/O error, so engine types stay private.

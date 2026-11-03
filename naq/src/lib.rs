@@ -35,6 +35,7 @@ mod conn;
 mod error;
 mod index;
 mod lane;
+mod mailbox;
 mod options;
 mod server;
 

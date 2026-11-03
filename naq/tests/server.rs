@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use naq::{Error, Options, Server};
+use naq::{Options, Server};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -205,11 +205,6 @@ fn what_the_skeleton_cannot_do_is_refused() {
     c.expect("-ERR 'Queue Groups Not Supported'");
     c.expect("-ERR 'UNSUB Maximum Not Supported'");
     c.expect("PONG");
-    let more = Server::start(&Options {
-        lanes: 2,
-        ..Options::default()
-    });
-    assert!(matches!(more, Err(Error::Unsupported(_))), "{more:?}");
 }
 
 #[test]
@@ -263,4 +258,109 @@ fn a_dropped_server_closes_its_clients() {
     let mut c = Client::quiet(&s);
     drop(s);
     assert_eq!(c.rest(), "");
+}
+
+/// A server with `n` lanes. Clients go to the lanes in turn, in the order
+/// they connect.
+fn lanes(n: usize) -> Server {
+    server_with(Options {
+        lanes: n,
+        ..Options::default()
+    })
+}
+
+#[test]
+fn publishes_reach_subscribers_on_every_lane_in_order() {
+    let s = lanes(3);
+    let mut a = Client::quiet(&s);
+    let mut b = Client::quiet(&s);
+    let mut p = Client::quiet(&s);
+    a.send("SUB t 1\r\nPING\r\n");
+    a.expect("PONG");
+    b.send("SUB t 2\r\nPING\r\n");
+    b.expect("PONG");
+    for i in 0..200 {
+        p.send(&format!("PUB t {}\r\n{i}\r\n", i.to_string().len()));
+    }
+    p.flush();
+    for (c, sid) in [(&mut a, 1), (&mut b, 2)] {
+        for i in 0..200 {
+            assert_eq!(c.line(), format!("MSG t {sid} {}", i.to_string().len()));
+            assert_eq!(c.line(), i.to_string());
+        }
+    }
+}
+
+#[test]
+fn the_pong_after_a_sub_means_every_lane_routes_to_it() {
+    let s = lanes(2);
+    let mut p = Client::quiet(&s);
+    let mut sub = Client::quiet(&s);
+    for i in 0..50 {
+        sub.send(&format!("SUB f{i} {i}\r\nPING\r\n"));
+        sub.expect("PONG");
+        p.send(&format!("PUB f{i} 1\r\nx\r\n"));
+        assert_eq!(
+            sub.line(),
+            format!("MSG f{i} {i} 1"),
+            "lost after the fence"
+        );
+        assert_eq!(sub.line(), "x");
+    }
+}
+
+#[test]
+fn interest_from_other_lanes_ends_with_unsub_and_disconnect() {
+    let s = lanes(2);
+    let mut p = Client::quiet(&s);
+    let mut sub = Client::quiet(&s);
+    let mut gone = Client::quiet(&s);
+    sub.send("SUB g 1\r\nSUB h 2\r\nPING\r\n");
+    sub.expect("PONG");
+    gone.send("SUB g 3\r\nPING\r\n");
+    gone.expect("PONG");
+    drop(gone);
+    sub.send("UNSUB 1\r\nPING\r\n");
+    sub.expect("PONG");
+    p.send("PUB g 1\r\nx\r\nPUB h 1\r\ny\r\n");
+    p.flush();
+    assert_eq!(sub.line(), "MSG h 2 1");
+    assert_eq!(sub.line(), "y");
+}
+
+#[test]
+fn a_slow_subscriber_on_another_lane_is_closed_and_its_publisher_goes_on() {
+    let s = server_with(Options {
+        lanes: 2,
+        max_pending: 64 << 10,
+        ..Options::default()
+    });
+    let mut p = Client::quiet(&s);
+    let mut slow = Client::quiet(&s);
+    slow.send("SUB s 1\r\n");
+    slow.flush();
+    let payload = "x".repeat(1000);
+    for _ in 0..4096 {
+        p.send(&format!("PUB s 1000\r\n{payload}\r\n"));
+    }
+    p.flush();
+    let rest = slow.rest();
+    assert!(rest.len() < 4096 * 1000, "{} bytes", rest.len());
+}
+
+#[test]
+fn replies_and_headers_cross_lanes() {
+    let s = lanes(2);
+    let mut p = Client::new(&s, r#"{"verbose":false,"headers":true}"#);
+    let mut sub = Client::new(&s, r#"{"verbose":false,"headers":true}"#);
+    sub.send("SUB r 1\r\nPING\r\n");
+    sub.expect("PONG");
+    p.send("PUB r inbox.1 2\r\nhi\r\nHPUB r inbox.2 12 13\r\nNATS/1.0\r\n\r\nx\r\n");
+    p.flush();
+    sub.expect("MSG r 1 inbox.1 2");
+    sub.expect("hi");
+    sub.expect("HMSG r 1 inbox.2 12 13");
+    sub.expect("NATS/1.0");
+    sub.expect("");
+    sub.expect("x");
 }

@@ -7,13 +7,16 @@ Notable changes to naq. The format follows
 
 ### Added
 
-- `naq`: a server skeleton on one zzq IO lane, and the `naq` binary
-  (`-a`, `-p`, `--name`). `INFO`, `CONNECT` (`verbose`, `echo`, `headers`),
+- `naq`: a server skeleton on zzq IO lanes, and the `naq` binary (`-a`,
+  `-p`, `--lanes`, `--name`). `INFO`, `CONNECT` (`verbose`, `echo`, `headers`),
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` on literal subjects;
   `MSG` and `HMSG` encoded into the subscriber's output and written in
   batches. Publishers wait for a subscriber past three quarters of
   `max_pending`; past it, the subscriber is closed. Wildcards, queue
-  groups, `UNSUB` maximums and more than one lane are refused.
+  groups and `UNSUB` maximums are refused.
+- `naq`: several lanes. Every lane holds the server's interest; a
+  publish is forwarded once per lane with interest, in batches that slice
+  the read buffer. The `PONG` after a `SUB` waits until every lane has it.
 - `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
   `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
   splitting arguments as `nats-server` does and enforcing

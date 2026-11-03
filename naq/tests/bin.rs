@@ -76,7 +76,7 @@ fn fails_when_it_cannot_start() {
     let port = held.local_addr().unwrap().port().to_string();
     for args in [
         &["-a", "127.0.0.1", "-p", &port][..],
-        &["-a", "127.0.0.1", "-p", "0", "--lanes", "2"],
+        &["-a", "no.such.host.invalid", "-p", "0"],
     ] {
         let mut child = Command::new(NAQ)
             .args(args)

@@ -5,11 +5,12 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use naq_proto::client::{self, ClientOp, Limits, ParseError, Parsed, Pub, Sub, Unsub};
-use naq_proto::encode::{self, Msg};
+use naq_proto::encode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Client, Close, Conn};
 use crate::index::Entry;
+use crate::lane::{Batch, Fwd};
 
 /// Bytes a read may fill at least. With less room, the buffer grows by
 /// [`READ_CHUNK`] or takes back what was parsed already.
@@ -19,6 +20,22 @@ const READ_CHUNK: usize = 256 << 10;
 /// Longest a publisher waits at a time for a subscriber past the stall
 /// mark, as in `nats-server`.
 const STALL_MAX: Duration = Duration::from_millis(5);
+
+/// Where parsing a buffer stopped.
+enum Stop {
+    /// At the end of what was read; `Some` is the length of the operation
+    /// that starts there.
+    More(Option<usize>),
+    /// At a `PING` that must wait until every lane has this client's
+    /// subscriptions.
+    Fence,
+}
+
+/// What to do after an operation.
+enum Step {
+    Next,
+    Fence,
+}
 
 impl Conn {
     pub(super) async fn read_loop<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Close {
@@ -30,23 +47,18 @@ impl Conn {
         let stall_mark = opts.max_pending / 4 * 3;
         let mut buf = BytesMut::with_capacity(READ_CHUNK);
         loop {
-            let mut at = 0;
-            let parsed = loop {
-                match client::parse(&buf[at..], &limits) {
-                    Ok(Parsed::Op(op, used)) => {
-                        if let Err(close) = self.handle(op) {
-                            break Err(close);
-                        }
-                        at += used;
-                    }
-                    Ok(Parsed::Partial(need)) => break Ok(need),
-                    Err(e) => break Err(Close::Parse(e)),
-                }
-            };
-            buf.advance(at);
+            let (at, stop) = self.parse(&buf, &limits);
             self.lane.flush();
-            let need = match parsed {
-                Ok(need) => need,
+            self.ship(&mut buf, at).await;
+            let need = match stop {
+                Ok(Stop::More(need)) => need,
+                Ok(Stop::Fence) => {
+                    self.lane.fence().await;
+                    self.unfenced = false;
+                    self.reply(encode::PONG);
+                    self.lane.flush();
+                    continue;
+                }
                 Err(close) => return close,
             };
             if let Some(sub) = self.stalled.take() {
@@ -72,16 +84,59 @@ impl Conn {
         }
     }
 
-    fn handle(&mut self, op: ClientOp<'_>) -> Result<(), Close> {
+    /// Acts on the operations at the start of `buf`. Returns the bytes they
+    /// took and why it stopped.
+    fn parse(&mut self, buf: &[u8], limits: &Limits) -> (usize, Result<Stop, Close>) {
+        let mut at = 0;
+        loop {
+            match client::parse(&buf[at..], limits) {
+                Ok(Parsed::Op(op, used)) => {
+                    let step = self.handle(op, buf);
+                    at += used;
+                    match step {
+                        Ok(Step::Next) => {}
+                        Ok(Step::Fence) => return (at, Ok(Stop::Fence)),
+                        Err(close) => return (at, Err(close)),
+                    }
+                }
+                Ok(Parsed::Partial(need)) => return (at, Ok(Stop::More(need))),
+                Err(e) => return (at, Err(Close::Parse(e))),
+            }
+        }
+    }
+
+    /// Drops the `at` bytes parsed from `buf`, handing those that publishes
+    /// for other lanes refer to over to those lanes.
+    async fn ship(&mut self, buf: &mut BytesMut, at: usize) {
+        if self.fwd.iter().all(Vec::is_empty) {
+            buf.advance(at);
+            return;
+        }
+        let chunk = buf.split_to(at).freeze();
+        for to in 0..self.fwd.len() {
+            if self.fwd[to].is_empty() {
+                continue;
+            }
+            let msgs = std::mem::take(&mut self.fwd[to]);
+            let batch = Batch {
+                chunk: chunk.clone(),
+                msgs,
+            };
+            self.lane.ship(to, batch).await;
+        }
+    }
+
+    fn handle(&mut self, op: ClientOp<'_>, buf: &[u8]) -> Result<Step, Close> {
         match op {
-            ClientOp::Pub(p) => self.publish(&p),
+            ClientOp::Pub(p) => self.publish(&p, buf),
             ClientOp::Sub(s) => self.subscribe(&s),
             ClientOp::Unsub(u) => self.unsubscribe(&u),
+            ClientOp::Ping if self.unfenced => return Ok(Step::Fence),
             ClientOp::Ping => {
                 self.reply(encode::PONG);
-                return Ok(());
+                return Ok(Step::Next);
             }
-            ClientOp::Pong => return Ok(()),
+            ClientOp::Pong => return Ok(Step::Next),
             ClientOp::Connect(json) => {
                 self.opts.apply(json).map_err(|_| Close::Connect)?;
                 self.client.headers.set(self.opts.headers);
@@ -91,40 +146,24 @@ impl Conn {
         if self.opts.verbose {
             self.reply(encode::OK);
         }
-        Ok(())
+        Ok(Step::Next)
     }
 
-    /// Encodes the message for every subscription it reaches.
+    /// Encodes the message for every subscription on this lane, and queues
+    /// it once for each other lane with interest. `p` lies in `buf`.
     #[inline]
-    fn publish(&mut self, p: &Pub<'_>) {
+    fn publish(&mut self, p: &Pub<'_>, buf: &[u8]) {
         let lane = &*self.lane;
-        let opts = &lane.shared.opts;
-        let stall_at = opts.max_pending / 4 * 3;
         let index = lane.index.borrow();
-        for e in index.matches(p.subject) {
-            let c = &e.client;
-            if c.is_closed() || (!self.opts.echo && c.id == self.client.id) {
-                continue;
-            }
-            let len = {
-                let mut out = c.out.borrow_mut();
-                Msg {
-                    subject: p.subject,
-                    sid: &e.sid,
-                    reply: p.reply,
-                    headers: p.headers.filter(|_| c.headers.get()),
-                    payload: p.payload,
-                }
-                .encode(&mut *out);
-                out.len()
-            };
-            lane.mark(c);
-            if len > opts.max_pending {
-                // A slow consumer.
-                c.close();
-            } else if len > stall_at {
-                self.stalled = Some(c.clone());
-            }
+        let Some(interest) = index.matches(p.subject) else {
+            return;
+        };
+        let skip = if self.opts.echo { 0 } else { self.client.id };
+        if let Some(c) = lane.deliver(&interest.local, p, skip) {
+            self.stalled = Some(c);
+        }
+        for &(to, _) in &interest.lanes {
+            self.fwd[to].push(Fwd::of(buf, p));
         }
     }
 
@@ -147,6 +186,8 @@ impl Conn {
             sid: s.sid.into(),
         };
         self.lane.index.borrow_mut().insert(s.subject, entry);
+        self.lane.announce(s.subject, true);
+        self.unfenced = self.lane.lanes() > 1;
     }
 
     fn unsubscribe(&mut self, u: &Unsub<'_>) {
@@ -156,6 +197,7 @@ impl Conn {
         if let Some(subject) = self.subs.remove(u.sid) {
             let id = self.client.id;
             self.lane.index.borrow_mut().remove(&subject, id, u.sid);
+            self.lane.announce(&subject, false);
         }
     }
 }
@@ -175,7 +217,7 @@ fn make_room(buf: &mut BytesMut, need: Option<usize>) {
 
 /// Waits up to [`STALL_MAX`] while `sub` has more than `mark` bytes queued,
 /// so its publisher slows to its pace.
-async fn stall(sub: &Rc<Client>, mark: usize) {
+pub(crate) async fn stall(sub: &Rc<Client>, mark: usize) {
     let drained = sub.drained.notified();
     tokio::pin!(drained);
     // Registered before the check, so a drain after it is not missed.

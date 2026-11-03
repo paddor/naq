@@ -4,6 +4,8 @@ mod handshake;
 mod read;
 mod write;
 
+pub(crate) use read::stall;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -16,7 +18,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use zzq_tokio::transport::{Driver, Stream};
 
-use crate::lane::{self, Lane};
+use crate::lane::{self, Fwd, Lane};
 use crate::server::Shared;
 
 /// How long a closed connection's writer may take to write what is left,
@@ -97,6 +99,11 @@ struct Conn {
     opts: handshake::ClientOpts,
     /// A subscriber this connection fed is past the stall mark.
     stalled: Option<Rc<Client>>,
+    /// Publishes for other lanes from the current read, by lane.
+    fwd: Vec<Vec<Fwd>>,
+    /// Subscriptions changed since the last `PING`: the next waits until
+    /// every lane applied them.
+    unfenced: bool,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -132,12 +139,15 @@ where
     handshake::info(&lane.shared, client.id, &mut client.out.borrow_mut());
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w));
     client.wake_writer();
+    let fwd = (0..lane.lanes()).map(|_| Vec::new()).collect();
     let mut conn = Conn {
         lane,
         client,
         subs: HashMap::new(),
         opts: handshake::ClientOpts::default(),
         stalled: None,
+        fwd,
+        unfenced: false,
     };
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
@@ -165,6 +175,7 @@ impl Conn {
             let mut index = self.lane.index.borrow_mut();
             for (sid, subject) in self.subs.drain() {
                 index.remove(&subject, self.client.id, &sid);
+                self.lane.announce(&subject, false);
             }
         }
         self.lane.flush();

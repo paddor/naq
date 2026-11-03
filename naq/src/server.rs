@@ -27,11 +27,13 @@ pub(crate) struct Shared {
     pub(crate) addr: SocketAddr,
     /// Random part of the server ID in `INFO`.
     pub(crate) server_id: String,
+    /// The way into each lane.
+    pub(crate) lanes: Box<[lane::LaneTx]>,
     next_client: AtomicU64,
 }
 
 impl Shared {
-    /// A new client ID, unique in this server.
+    /// A new client ID, unique in this server. IDs start at 1.
     pub(crate) fn next_client(&self) -> u64 {
         // Relaxed: IDs only need to be distinct.
         self.next_client.fetch_add(1, Ordering::Relaxed)
@@ -53,13 +55,8 @@ impl Server {
     /// # Errors
     ///
     /// [`Error::Lanes`] if the lane threads cannot start,
-    /// [`Error::Listen`] if the client port cannot be bound,
-    /// [`Error::Unsupported`] for more than one lane: messages do not cross
-    /// lanes yet.
+    /// [`Error::Listen`] if the client port cannot be bound.
     pub fn start(opts: &Options) -> Result<Server, Error> {
-        if opts.lanes > 1 {
-            return Err(Error::Unsupported("more than one lane"));
-        }
         let ctx = Context::with_config(&Config {
             io_threads: opts.lanes,
             name: "naq".into(),
@@ -71,17 +68,19 @@ impl Server {
             source,
         };
         let (listener, addr) = bind(&ctx, opts).map_err(listen)?;
+        let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
         let shared = Arc::new(Shared {
             id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
             opts: opts.clone(),
             addr,
             server_id: server_id(),
+            lanes: txs.into_boxed_slice(),
             next_client: AtomicU64::new(1),
         });
         let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
-        for l in &lanes {
+        for (l, rx) in lanes.iter().zip(rxs) {
             let (s, index) = (shared.clone(), l.index());
-            l.run(move || lane::install(s, index))
+            l.run(move || lane::install(s, index, rx))
                 .map_err(|e| Error::Lanes(io(e)))?;
         }
         ctx.lane(0)

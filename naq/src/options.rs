@@ -7,8 +7,7 @@ pub struct Options {
     pub host: String,
     /// Port to listen on for clients. 0 picks a free one.
     pub port: u16,
-    /// IO lanes, each on a thread of its own. 0 counts as 1; more than one
-    /// is not supported yet.
+    /// IO lanes, each on a thread of its own. 0 counts as 1.
     pub lanes: usize,
     /// Name in `INFO`.
     pub server_name: String,
