@@ -58,10 +58,7 @@ impl Conn {
             if self.client.is_closed() {
                 return Close::Kicked;
             }
-            let room = need.map_or(READ_ROOM, |n| n.saturating_sub(buf.len()).max(READ_ROOM));
-            if buf.capacity() - buf.len() < room {
-                buf.reserve(room.max(READ_CHUNK));
-            }
+            make_room(&mut buf, need);
             // Cancel-safe: a dropped read took no bytes, and a dropped
             // `notified` passes its wake on.
             tokio::select! {
@@ -163,6 +160,19 @@ impl Conn {
     }
 }
 
+/// Gives `buf`, which holds at most the start of one operation, room for
+/// the next read: [`READ_ROOM`] at least, the rest of an operation of
+/// `need` bytes. Takes back the space parsed already where it can, so a
+/// busy connection reuses one buffer.
+fn make_room(buf: &mut BytesMut, need: Option<usize>) {
+    let room = need.map_or(READ_ROOM, |n| n.saturating_sub(buf.len()).max(READ_ROOM));
+    if buf.capacity() - buf.len() < room {
+        // Asks for no more than a buffer of READ_CHUNK holds besides what is
+        // left, so a buffer of that size takes its parsed space back.
+        buf.reserve(room.max(READ_CHUNK - buf.len().min(READ_CHUNK)));
+    }
+}
+
 /// Waits up to [`STALL_MAX`] while `sub` has more than `mark` bytes queued,
 /// so its publisher slows to its pace.
 async fn stall(sub: &Rc<Client>, mark: usize) {
@@ -174,4 +184,30 @@ async fn stall(sub: &Rc<Client>, mark: usize) {
         return;
     }
     let _ = tokio::time::timeout(STALL_MAX, drained).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_busy_connection_reuses_its_read_buffer() {
+        let mut buf = BytesMut::with_capacity(READ_CHUNK);
+        for partial in [0, 5, 1000] {
+            buf.resize(READ_CHUNK, b'x');
+            buf.advance(READ_CHUNK - partial);
+            make_room(&mut buf, None);
+            assert_eq!(buf.len(), partial);
+            assert!(buf.capacity() >= READ_ROOM);
+            assert!(buf.capacity() <= READ_CHUNK, "grew: {}", buf.capacity());
+        }
+    }
+
+    #[test]
+    fn a_large_operation_gets_room_for_all_of_it() {
+        let mut buf = BytesMut::with_capacity(READ_CHUNK);
+        buf.extend_from_slice(b"PUB a 1000000");
+        make_room(&mut buf, Some(1_000_020));
+        assert!(buf.capacity() >= 1_000_020);
+    }
 }
