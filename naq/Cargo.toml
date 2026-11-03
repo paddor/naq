@@ -11,6 +11,10 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 
+[features]
+# Entry points for the fuzz targets in `fuzz/afl`.
+fuzzing = []
+
 [dependencies]
 bytes = { workspace = true, features = ["std"] }
 bcrypt.workspace = true

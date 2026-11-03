@@ -1,5 +1,6 @@
 [workspace]
 members = ["naq-proto", "naq", "naq-bench"]
+exclude = ["fuzz"]
 default-members = ["naq-proto", "naq"]
 resolver = "2"
 

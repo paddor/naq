@@ -266,7 +266,7 @@ fn go_duration(s: &str) -> Option<Duration> {
         total += n * scale;
         rest = next;
     }
-    Some(Duration::from_secs_f64(total))
+    Duration::try_from_secs_f64(total).ok()
 }
 
 #[cfg(test)]
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(go_duration("250ms"), Some(Duration::from_millis(250)));
         assert_eq!(go_duration("10us"), Some(Duration::from_micros(10)));
         assert_eq!(go_duration("0"), Some(Duration::ZERO));
-        for bad in ["", "5", "1x", "m", "1.2.3s"] {
+        for bad in ["", "5", "1x", "m", "1.2.3s", "99999999999999999999h"] {
             assert_eq!(go_duration(bad), None, "{bad}");
         }
     }

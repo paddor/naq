@@ -34,6 +34,9 @@ mod auth;
 mod config;
 mod conn;
 mod error;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod index;
 mod lane;
 mod mailbox;

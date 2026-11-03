@@ -263,6 +263,9 @@ impl Parser<'_> {
         while self.peek().is_some_and(|b| !ends_bare(b)) {
             self.bump();
         }
+        if self.at == start {
+            return self.fail("expected a value");
+        }
         let word = self.text(start, self.at)?;
         if let Some(n) = number(&word) {
             return Ok(n);
@@ -343,6 +346,9 @@ fn number(word: &str) -> Option<Value> {
     }
     let (num, suffix) = word.split_at(digits);
     let n: i64 = num.parse().ok()?;
+    if !suffix.is_ascii() {
+        return None;
+    }
     let suffix = suffix.to_ascii_lowercase();
     if suffix.starts_with('.') {
         return word.parse().ok().map(Value::Float);
@@ -406,6 +412,7 @@ mod tests {
         assert_eq!(number("-"), None);
         assert_eq!(number("9e"), Some(Value::Int(9_000_000_000_000_000_000)));
         assert_eq!(number("99e"), None, "overflow");
+        assert_eq!(number("2\u{280}"), None, "not a suffix");
     }
 
     #[test]
@@ -449,6 +456,8 @@ mod tests {
             ("a:\n", 1),
             ("a: \"\\q\"\n", 1),
             ("{", 1),
+            ("a: [}", 1),
+            ("a: [1, ;]", 1),
         ] {
             let e = parse(text, None).unwrap_err();
             assert_eq!(e.line, line, "{text:?}: {e:?}");
