@@ -86,13 +86,13 @@ fn options(args: &[String]) -> Result<(naq::Options, Files), String> {
         let val = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         let bad = || format!("bad value {val:?} for {flag}");
         match flag.as_str() {
-            "-c" | "--config" => {}
+            // Read before, or not used: naq has no store.
+            "-c" | "--config" | "--store_dir" => {}
             "-a" | "--addr" => o.host.clone_from(val),
             "-p" | "--port" if val == "-1" => o.port = 0,
             "-p" | "--port" => o.port = val.parse().map_err(|_| bad())?,
             "-l" | "--log" => files.log = Some(val.into()),
             "-P" | "--pid" => files.pid = Some(val.into()),
-            "--store_dir" => {}
             "--lanes" => o.lanes = val.parse().map_err(|_| bad())?,
             "-m" | "--http_port" => o.http_port = Some(val.parse().map_err(|_| bad())?),
             "--name" => o.server_name.clone_from(val),
