@@ -13,6 +13,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+naq-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

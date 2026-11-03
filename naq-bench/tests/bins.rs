@@ -1,4 +1,4 @@
-//! `naq_load` and `naq_sink` as processes.
+//! `naq_load`, `naq_sink` and `naq_codec` as processes.
 
 #![expect(clippy::unwrap_used, clippy::panic, reason = "tests fail loudly")]
 
@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 
 const LOAD: &str = env!("CARGO_BIN_EXE_naq_load");
 const SINK: &str = env!("CARGO_BIN_EXE_naq_sink");
+const CODEC: &str = env!("CARGO_BIN_EXE_naq_codec");
 
 /// A sink process, killed on drop.
 struct SinkProc(Child, String);
@@ -102,7 +103,7 @@ fn source_feeds_a_subscribe_only_load() {
 
 #[test]
 fn bins_print_usage_and_reject_bad_arguments() {
-    for bin in [LOAD, SINK] {
+    for bin in [LOAD, SINK, CODEC] {
         let help = Command::new(bin).arg("--help").output().unwrap();
         assert!(help.status.success());
         assert!(String::from_utf8_lossy(&help.stdout).starts_with("usage:"));
@@ -156,4 +157,53 @@ fn load_does_not_record_a_run_with_corrupt_deliveries() {
     ]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("not clean"));
+}
+
+#[test]
+fn codec_records_each_kernel_and_fails_on_rejected_frames() {
+    let dir = std::env::temp_dir().join(format!("naq-codec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let record = dir.join("codec.jsonl");
+    let out = Command::new(CODEC)
+        .args([
+            "--duration",
+            "0.02",
+            "--kernel",
+            "parse",
+            "--kernel",
+            "relay",
+        ])
+        .args(["--payload", "64", "--record"])
+        .arg(&record)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let lines = std::fs::read_to_string(&record).unwrap();
+    let kernels: Vec<String> = lines
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["kernel"].to_string())
+        .collect();
+    assert_eq!(kernels, ["\"parse\"", "\"relay\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 2);
+
+    let long = "s".repeat(5000);
+    let out = Command::new(CODEC)
+        .args(["--duration", "0.01", "--subject", &long])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+
+    let out = Command::new(CODEC)
+        .args([
+            "--duration",
+            "0.01",
+            "--kernel",
+            "encode",
+            "--record",
+            "/nonexistent/x",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

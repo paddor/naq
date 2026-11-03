@@ -7,6 +7,13 @@ Notable changes to naq. The format follows
 
 ### Added
 
+- `naq-proto`: the client wire codec. `client::parse` reads `CONNECT`,
+  `PUB`, `HPUB`, `SUB`, `UNSUB`, `PING` and `PONG` as slices of the input,
+  splitting arguments as `nats-server` does and enforcing
+  `max_control_line` and `max_payload`. `encode` writes `MSG`, `HMSG`,
+  `INFO`, `-ERR`, `+OK`, `PING` and `PONG`.
+- `naq-bench`: `naq_codec`, the codec's cost on one core: parsing `PUB`,
+  encoding `MSG`, and both.
 - `naq-bench`: `naq_load`, a raw-wire NATS load generator. Batched
   publishers stamp each payload; subscribers count and check order. A
   shared window bounds messages in flight, so every message is delivered.

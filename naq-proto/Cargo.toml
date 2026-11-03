@@ -13,3 +13,8 @@ readme.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+bytes.workspace = true
+memchr.workspace = true
+thiserror.workspace = true

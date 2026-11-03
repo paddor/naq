@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
+use crate::codec;
 use crate::load::{Config, Report};
 use crate::sink::Mode;
 
@@ -36,6 +37,68 @@ pub const SINK_USAGE: &str = "\
 usage: naq_sink [--addr HOST:PORT] [--source BYTES]
   Relays PUB to SUB on the same subject; a sink without subscribers.
   --source streams MSGs of that payload size to every subscriber.";
+
+/// Usage of `naq_codec`.
+pub const CODEC_USAGE: &str = "\
+usage: naq_codec [options]
+  --kernel K           parse, encode or relay; repeatable (all)
+  --payload BYTES      payload size (16)
+  --subject S          subject (bench)
+  --duration SECS      per kernel (3)
+  --tag KEY=VALUE      extra label, repeatable
+  --record FILE        append the JSON lines
+BYTES take k and m suffixes (KiB, MiB).";
+
+/// Parsed `naq_codec` arguments.
+#[derive(Debug, Clone, Default)]
+pub struct CodecArgs {
+    /// The runs.
+    pub cfg: codec::Config,
+    /// Kernels to run, in order. Empty runs all.
+    pub kernels: Vec<codec::Kernel>,
+    /// Extra labels.
+    pub tags: BTreeMap<String, String>,
+    /// File to append the records to.
+    pub record: Option<PathBuf>,
+}
+
+/// Parses `naq_codec` arguments.
+///
+/// # Errors
+///
+/// A message naming the bad argument.
+pub fn codec_args(args: &[String]) -> Result<CodecArgs, String> {
+    let mut a = CodecArgs::default();
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let val = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--kernel" => a.kernels.push(val.parse()?),
+            "--payload" => a.cfg.payload = size(flag, val)?,
+            "--subject" => a.cfg.subject.clone_from(val),
+            "--duration" => a.cfg.duration = secs(flag, val)?,
+            "--tag" => tag(&mut a.tags, val)?,
+            "--record" => a.record = Some(val.into()),
+            _ => return Err(format!("unknown argument {flag:?}")),
+        }
+    }
+    if a.kernels.is_empty() {
+        a.kernels = codec::Kernel::ALL.to_vec();
+    }
+    Ok(a)
+}
+
+/// The JSON record of a codec run.
+pub fn codec_record(args: &CodecArgs, report: &codec::Report) -> Value {
+    let mut m = Map::new();
+    stamp(&mut m, &args.tags);
+    m.insert("bench".into(), "codec".into());
+    m.insert("subject".into(), args.cfg.subject.clone().into());
+    if let Ok(Value::Object(r)) = serde_json::to_value(report) {
+        m.extend(r);
+    }
+    Value::Object(m)
+}
 
 /// Parsed `naq_load` arguments.
 #[derive(Debug, Clone, Default)]
@@ -78,13 +141,7 @@ pub fn load_args(args: &[String]) -> Result<LoadArgs, String> {
             "--server-pid" => c.server_pid = Some(parse(flag, val()?)?),
             "--server" => a.server = Some(val()?.clone()),
             "--workload" => a.workload = Some(val()?.clone()),
-            "--tag" => {
-                let v = val()?;
-                let (k, v) = v
-                    .split_once('=')
-                    .ok_or_else(|| format!("--tag wants KEY=VALUE, got {v:?}"))?;
-                a.tags.insert(k.into(), v.into());
-            }
+            "--tag" => tag(&mut a.tags, val()?)?,
             "--record" => a.record = Some(val()?.into()),
             _ => return Err(format!("unknown argument {flag:?}")),
         }
@@ -116,6 +173,15 @@ fn parse<T: std::str::FromStr>(flag: &str, v: &str) -> Result<T, String> {
     v.parse().map_err(|_| format!("bad value {v:?} for {flag}"))
 }
 
+/// Adds a `KEY=VALUE` label.
+fn tag(tags: &mut BTreeMap<String, String>, v: &str) -> Result<(), String> {
+    let (k, v) = v
+        .split_once('=')
+        .ok_or_else(|| format!("--tag wants KEY=VALUE, got {v:?}"))?;
+    tags.insert(k.into(), v.into());
+    Ok(())
+}
+
 /// Bytes, with optional `k` or `m` suffix.
 fn size(flag: &str, v: &str) -> Result<usize, String> {
     let (num, mul) = match v.as_bytes().last() {
@@ -137,23 +203,27 @@ fn secs(flag: &str, v: &str) -> Result<Duration, String> {
 /// The JSON record of a run: labels, host and time, then the report.
 pub fn record(args: &LoadArgs, report: &Report) -> Value {
     let mut m = Map::new();
+    stamp(&mut m, &args.tags);
+    m.insert("server".into(), args.server.clone().into());
+    m.insert("workload".into(), args.workload.clone().into());
+    if let Ok(Value::Object(r)) = serde_json::to_value(report) {
+        m.extend(r);
+    }
+    Value::Object(m)
+}
+
+/// Time, host and labels of a record.
+fn stamp(m: &mut Map<String, Value>, tags: &BTreeMap<String, String>) {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     m.insert("ts".into(), ts.into());
     m.insert("host".into(), hostname().into());
-    m.insert("server".into(), args.server.clone().into());
-    m.insert("workload".into(), args.workload.clone().into());
-    let tags: Map<String, Value> = args
-        .tags
+    let tags: Map<String, Value> = tags
         .iter()
         .map(|(k, v)| (k.clone(), v.clone().into()))
         .collect();
     m.insert("tags".into(), tags.into());
-    if let Ok(Value::Object(r)) = serde_json::to_value(report) {
-        m.extend(r);
-    }
-    Value::Object(m)
 }
 
 /// One line for people: rates and CPU.
@@ -225,6 +295,40 @@ mod tests {
         ] {
             assert!(load_args(&strings(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn parses_codec_args() {
+        let a = codec_args(&strings(
+            "--kernel relay --kernel parse --payload 1k --subject a.b --duration 0.5 \
+             --tag rep=2 --record /tmp/c.jsonl",
+        ))
+        .unwrap();
+        assert_eq!(a.kernels, [codec::Kernel::Relay, codec::Kernel::Parse]);
+        assert_eq!((a.cfg.payload, a.cfg.subject.as_str()), (1024, "a.b"));
+        assert_eq!(a.cfg.duration, Duration::from_millis(500));
+        assert_eq!(a.record, Some("/tmp/c.jsonl".into()));
+        assert_eq!(codec_args(&[]).unwrap().kernels, codec::Kernel::ALL);
+        for bad in ["--kernel x", "--payload", "--tag x", "--nope 1"] {
+            assert!(codec_args(&strings(bad)).is_err(), "{bad}");
+        }
+        let r = codec::run(
+            codec::Kernel::Parse,
+            &codec::Config {
+                duration: Duration::from_millis(5),
+                ..a.cfg.clone()
+            },
+        )
+        .unwrap();
+        let v = codec_record(&a, &r);
+        assert_eq!(
+            (v["bench"].as_str(), v["kernel"].as_str()),
+            (Some("codec"), Some("parse"))
+        );
+        assert_eq!(
+            (v["subject"].as_str(), v["tags"]["rep"].as_str()),
+            (Some("a.b"), Some("2"))
+        );
     }
 
     #[test]

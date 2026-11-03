@@ -4,7 +4,8 @@ A Core NATS server in Rust, on the [zzq](https://github.com/paddor/zzq)
 engine: shared-nothing IO lanes, no locks on the message path, batched
 wakes and writes.
 
-Nothing runs yet. The workspace has the crate layout only:
+The server does not run yet. `naq-proto` parses what clients send and
+encodes deliveries.
 
 | Crate | Role |
 | --- | --- |
