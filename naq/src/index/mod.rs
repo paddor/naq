@@ -45,6 +45,18 @@ impl Entry {
     }
 }
 
+/// A leaf node link with interest: subscriptions at its hub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Peer {
+    /// The lane the link is on.
+    pub(crate) lane: usize,
+    /// The link's client ID.
+    pub(crate) link: u64,
+    /// Members of a queue group at the hub; 1 for plain interest; 0 for
+    /// none, to remove it.
+    pub(crate) weight: u32,
+}
+
 /// Subscribers of one filter, or of one queue group on it.
 #[derive(Debug, Default)]
 pub(crate) struct Group {
@@ -52,11 +64,31 @@ pub(crate) struct Group {
     pub(crate) local: Vec<Entry>,
     /// Other lanes with subscriptions, and how many each has.
     pub(crate) lanes: Vec<(usize, u32)>,
+    /// Links whose hubs have subscriptions. A queue group's message goes
+    /// to one only when no client here or on another lane takes it.
+    pub(crate) peers: Vec<Peer>,
 }
 
 impl Group {
     const fn is_empty(&self) -> bool {
-        self.local.is_empty() && self.lanes.is_empty()
+        self.local.is_empty() && self.lanes.is_empty() && self.peers.is_empty()
+    }
+
+    /// Adds `peer`, or its new weight; with weight 0, removes it.
+    fn set_peer(&mut self, peer: Peer) {
+        let add = peer.weight > 0;
+        let at = self
+            .peers
+            .iter()
+            .position(|p| p.lane == peer.lane && p.link == peer.link);
+        match (at, add) {
+            (Some(at), true) => self.peers[at] = peer,
+            (None, true) => self.peers.push(peer),
+            (Some(at), false) => {
+                self.peers.swap_remove(at);
+            }
+            (None, false) => {}
+        }
     }
 
     /// Members across all lanes.
@@ -218,6 +250,16 @@ impl Index {
         }
     }
 
+    /// Adds `peer`'s interest in `filter`, in `queue` if given, or its new
+    /// weight; with weight 0, removes it.
+    pub(crate) fn peer(&mut self, filter: &[u8], queue: Option<&[u8]>, peer: Peer) {
+        if peer.weight > 0 {
+            self.interest(filter).group(queue).set_peer(peer);
+        } else {
+            self.change(filter, queue, |g| g.set_peer(peer));
+        }
+    }
+
     /// Subscription `sid` of client `id`.
     pub(crate) fn find(
         &self,
@@ -355,6 +397,42 @@ mod tests {
         assert_eq!(hit(b"a..b"), Vec::<usize>::new());
         assert_eq!(hit(b"a.b."), Vec::<usize>::new());
         assert_eq!(hit(b"a.*"), [1, 2, 4], "a wildcard published is a token");
+    }
+
+    #[test]
+    fn links_are_peers_apart_from_client_members() {
+        let mut idx = Index::default();
+        let p = Peer {
+            lane: 1,
+            link: 7,
+            weight: 3,
+        };
+        idx.peer(b"a.*", Some(b"q"), p);
+        idx.peer(b"a.*", Some(b"q"), Peer { weight: 5, ..p });
+        idx.peer(b"a.b", None, Peer { weight: 1, ..p });
+        let groups = match idx.matches(b"a.b") {
+            Some(Found::Many(f)) => f
+                .iter()
+                .map(|i| (i.plain.peers.clone(), i.queues.len()))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            idx.count(b"a.*", Some(b"q")),
+            0,
+            "peers are no client members"
+        );
+        let Some(Found::Many(f)) = idx.matches(b"a.c") else {
+            panic!("a.* matches")
+        };
+        let g = f.iter().next().unwrap();
+        assert_eq!(g.queues[0].1.peers, [Peer { weight: 5, ..p }]);
+        idx.peer(b"a.*", Some(b"q"), Peer { weight: 0, ..p });
+        idx.peer(b"a.b", None, Peer { weight: 0, ..p });
+        idx.peer(b"a.b", None, Peer { weight: 0, ..p });
+        assert!(idx.matches(b"a.b").is_none(), "forgotten");
+        assert!(idx.wild.is_empty() && idx.literal.is_empty());
     }
 
     #[test]

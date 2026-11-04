@@ -7,6 +7,7 @@
 //! each other lane with interest.
 
 mod data;
+mod peer;
 mod route;
 
 use std::cell::{Cell, RefCell};
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(crate) use data::{Batch, Out};
-pub(crate) use route::Queued;
+pub(crate) use route::{Queue, Queued};
 
 use crate::conn::{Client, SpentReads};
 use crate::index::Index;
@@ -46,6 +47,14 @@ pub(crate) enum Control {
         subject: Box<[u8]>,
         queue: Option<Box<[u8]>>,
         add: bool,
+    },
+    /// Link `peer` gained, changed or lost interest in `subject` of
+    /// `account`, in `queue` if given: lost with weight 0.
+    Peer {
+        account: u32,
+        subject: Box<[u8]>,
+        queue: Option<Box<[u8]>>,
+        peer: crate::index::Peer,
     },
     /// Answered once the controls before it are applied.
     Fence(oneshot::Sender<()>),
@@ -113,6 +122,8 @@ pub(crate) struct Lane {
     pub(crate) reads: SpentReads,
     /// Leaf node links on this lane.
     pub(crate) links: RefCell<Vec<Rc<crate::leaf::LinkSide>>>,
+    /// Links the message being routed reaches.
+    hits: peer::Hits,
 }
 
 impl Lane {
@@ -217,6 +228,16 @@ impl Lane {
                     .remote(&subject, queue.as_deref(), lane, add);
                 self.changed(account, &subject, queue.as_deref());
             }
+            Control::Peer {
+                account,
+                subject,
+                queue,
+                peer,
+            } => {
+                self.index(account)
+                    .borrow_mut()
+                    .peer(&subject, queue.as_deref(), peer);
+            }
             Control::Fence(done) => {
                 let _ = done.send(());
             }
@@ -244,6 +265,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         clients: RefCell::default(),
         reads: SpentReads::default(),
         links: RefCell::default(),
+        hits: peer::Hits::default(),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;

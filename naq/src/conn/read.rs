@@ -14,8 +14,8 @@ use tokio::time::Instant;
 use super::ping::Tick;
 use super::{Client, Close, Conn, Stage};
 use crate::auth::{Check, Creds, Grant, Pending};
-use crate::index::{Entry, Few, Found, Index, Interest};
-use crate::lane::{Batch, Lane, Out, Queued};
+use crate::index::{Entry, Few, Found, Index, Interest, Peer};
+use crate::lane::{Batch, Lane, Out, Queue, Queued};
 use crate::perms::{Held, quoted};
 
 /// Bytes a read may fill at least. With less room, the buffer takes back
@@ -251,6 +251,9 @@ impl Conn {
                 }
             }
             Found::Many(all) => r.many(&found, all),
+        }
+        if self.lane.has_hits() {
+            self.lane.send_hits(p, &mut r.stalled);
         }
         if let Some(s) = r.stalled {
             self.stalled = Some(s);
@@ -526,6 +529,23 @@ impl Routing<'_, '_> {
             self.fwd[to].plain(self.buf, self.p, once);
             self.delivered = true;
         }
+        if !i.plain.peers.is_empty() {
+            self.peers(&i.plain.peers);
+        }
+    }
+
+    /// Hands the message to links with plain interest: here, or forwarded
+    /// to their lanes.
+    #[inline(never)]
+    fn peers(&mut self, peers: &[Peer]) {
+        for p in peers {
+            if p.lane == self.lane.id {
+                self.lane.hit_link(p.link, None);
+            } else {
+                self.fwd[p.lane].plain(self.buf, self.p, true);
+            }
+        }
+        self.delivered = true;
     }
 
     /// Routes to the filters in `all`, wildcard ones among them: each
@@ -547,10 +567,13 @@ impl Routing<'_, '_> {
     /// Delivers to one member of queue group `name`, from the `k`th match
     /// on, here or on the lane of the member picked.
     fn queue(&mut self, found: &Found<'_>, k: usize, name: &[u8]) {
-        let groups = found.queue_groups(k, name);
+        let q = Queue {
+            name,
+            groups: found.queue_groups(k, name),
+        };
         match self
             .lane
-            .deliver_queue(&groups, self.p, self.skip, &mut self.stalled)
+            .deliver_queue(&q, self.p, self.skip, &mut self.stalled)
         {
             Queued::Here => self.delivered = true,
             Queued::Lane(to) => {

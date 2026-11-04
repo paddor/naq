@@ -155,6 +155,11 @@ Notable changes to naq. The format follows
   `LS-` as interest comes and goes. Literal JetStream subjects, which
   `nats-server` refuses across links, are left out. Its own `$LDS.` coming
   back from the hub ends the link for 30 s.
+- `naq`: messages reach hubs over leaf node links. The hub's `LS+` and
+  `LS-` become interest on every lane, and a message reaches each link
+  once, as `LMSG` or `HMSG`, with the queue groups picked for it after `|`
+  or `+ reply`. A hub's queue group gets a message only when no client of
+  the server takes it.
 
 ### Changed
 

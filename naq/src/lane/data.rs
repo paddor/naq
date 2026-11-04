@@ -137,8 +137,14 @@ pub(super) async fn run(lane: Rc<Lane>, rx: Receiver<Batch>) {
     while rx.recv_all(&mut batches).await {
         let mut stalled = None;
         for b in batches.drain(..) {
-            for f in &b.out.msgs {
+            let msgs = &b.out.msgs;
+            for (k, f) in msgs.iter().enumerate() {
                 lane.deliver_fwd(&b, f, &mut stalled);
+                // The forwards of one message come in a row: links get it
+                // once, after the last.
+                if lane.has_hits() && msgs.get(k + 1).is_none_or(|n| n.payload != f.payload) {
+                    lane.send_hits(&pub_of(&b, f), &mut stalled);
+                }
             }
         }
         lane.flush();
@@ -152,16 +158,29 @@ pub(super) async fn run(lane: Rc<Lane>, rx: Receiver<Batch>) {
     }
 }
 
+/// Forward `f` of batch `b` as a publish.
+fn pub_of<'b>(b: &'b Batch, f: &Fwd) -> Pub<'b> {
+    Pub {
+        subject: f.subject.get(&b.chunk),
+        reply: f.reply.get_some(&b.chunk),
+        headers: f.headers.get_some(&b.chunk),
+        payload: f.payload.get(&b.chunk),
+    }
+}
+
 impl Lane {
+    /// Notes the links on this lane among `peers`.
+    #[inline]
+    fn peers_here(&self, peers: &[crate::index::Peer]) {
+        for p in peers.iter().filter(|p| p.lane == self.id) {
+            self.hit_link(p.link, None);
+        }
+    }
+
     /// Delivers forward `f` of batch `b` to the subscriptions on this lane.
     #[inline]
     fn deliver_fwd(&self, b: &Batch, f: &Fwd, stalled: &mut Option<Rc<crate::conn::Client>>) {
-        let p = Pub {
-            subject: f.subject.get(&b.chunk),
-            reply: f.reply.get_some(&b.chunk),
-            headers: f.headers.get_some(&b.chunk),
-            payload: f.payload.get(&b.chunk),
-        };
+        let p = pub_of(b, f);
         let index = self.index(b.account).borrow();
         let Some(found) = index.matches(p.subject) else {
             return;
@@ -170,15 +189,20 @@ impl Lane {
         match (&found, f.queue.get_some(&b.out.names)) {
             (Found::One(i), None) => {
                 self.deliver(&i.plain.local, &p, 0, stalled);
+                self.peers_here(&i.plain.peers);
             }
             (Found::Many(all), None) => {
                 for i in all.iter() {
                     self.deliver(&i.plain.local, &p, 0, stalled);
+                    self.peers_here(&i.plain.peers);
                 }
             }
             (_, Some(name)) => {
-                let groups = found.queue_groups(0, name);
-                self.deliver_any(&groups, &p, stalled);
+                let q = super::Queue {
+                    name,
+                    groups: found.queue_groups(0, name),
+                };
+                self.deliver_any(&q, &p, true, stalled);
             }
         }
     }

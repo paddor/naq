@@ -428,6 +428,155 @@ fn a_go_hub_learns_the_interest_of_naq_clients() {
     assert_eq!(subs, ["jobs", "orders.*"]);
 }
 
+/// Waits until a client of `leaf` publishing to `subject` reaches the hub
+/// at `p`: hub interest reaches the lanes in its own time.
+fn wait_for_interest(leaf: &Server, p: &mut Peer, subject: &str) {
+    let mut c = client(leaf, "");
+    let deadline = Instant::now() + WAIT;
+    p.w.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        c.send(&format!("PUB {subject} 4\r\nwait\r\n"));
+        let mut l = String::new();
+        if p.r.read_line(&mut l).is_ok() && l.starts_with("LMSG") {
+            p.line();
+            break;
+        }
+        assert!(Instant::now() < deadline, "no interest in {subject}");
+    }
+    p.w.set_read_timeout(Some(WAIT)).unwrap();
+}
+
+#[test]
+fn messages_reach_the_hub_once_with_the_queue_groups_picked_for_it() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    p.send("LS+ s\r\nLS+ q.s q 3\r\nLS+ c\r\nLS+ c g 1\r\n");
+    wait_for_interest(&leaf, &mut p, "s");
+    // Two publishers, so one is on the link's lane and one is not.
+    let mut a = client(&leaf, "");
+    let mut b = client(&leaf, "");
+    for c in [&mut a, &mut b] {
+        c.send("PUB s 2\r\nhi\r\n");
+        assert_eq!((p.line(), p.line()), ("LMSG s 2".into(), "hi".into()));
+        // No naq member: the hub's gets it.
+        c.send("PUB q.s 2\r\nhi\r\n");
+        assert_eq!((p.line(), p.line()), ("LMSG q.s | q 2".into(), "hi".into()));
+        // Plain interest and a group of the hub: one message.
+        c.send("PUB c r 2\r\nhi\r\n");
+        assert_eq!((p.line(), p.line()), ("LMSG c + r g 2".into(), "hi".into()));
+    }
+    // A naq member comes first; the hub gets the plain message only.
+    let mut m = client(&leaf, "SUB q.s q 1\r\nSUB c g 2\r\n");
+    let mut told = lines(&mut p, 2);
+    told.sort();
+    assert_eq!(told, ["LS+ c g 1", "LS+ q.s q 1"]);
+    a.send("PUB q.s 2\r\nhi\r\nPUB c 2\r\nhi\r\nPUB s 2\r\nhi\r\n");
+    assert_eq!((m.line(), m.line()), ("MSG q.s 1 2".into(), "hi".into()));
+    assert_eq!((m.line(), m.line()), ("MSG c 2 2".into(), "hi".into()));
+    assert_eq!((p.line(), p.line()), ("LMSG c 2".into(), "hi".into()));
+    assert_eq!((p.line(), p.line()), ("LMSG s 2".into(), "hi".into()));
+}
+
+#[test]
+fn headers_cross_the_link_where_the_hub_takes_them() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    p.send("LS+ h\r\n");
+    wait_for_interest(&leaf, &mut p, "h");
+    let mut c = client(&leaf, "");
+    c.send("CONNECT {\"headers\":true}\r\nHPUB h 12 14\r\nNATS/1.0\r\n\r\nhi\r\n");
+    assert_eq!(lines(&mut p, 4), ["HMSG h 12 14", "NATS/1.0", "", "hi"]);
+}
+
+#[test]
+fn interest_the_hub_drops_or_had_on_an_old_link_gets_nothing() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    p.send("LS+ x\r\nLS+ y\r\n");
+    wait_for_interest(&leaf, &mut p, "x");
+    p.send("LS- y\r\nLS- nothing\r\n");
+    let mut c = client(&leaf, "");
+    // Each lane hears of the LS- in its own time: until then y comes too.
+    // A message on x after it shows when y goes nowhere.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        c.send("PUB y 2\r\nhi\r\nPUB x 2\r\nhi\r\n");
+        let first = lines(&mut p, 2);
+        if first == ["LMSG x 2", "hi"] {
+            break;
+        }
+        assert_eq!(first, ["LMSG y 2", "hi"]);
+        assert_eq!(lines(&mut p, 2), ["LMSG x 2", "hi"]);
+        assert!(Instant::now() < deadline, "y still goes to the hub");
+    }
+    drop(p);
+    let mut again = linked(&hub);
+    c.send("PUB x 2\r\nhi\r\n");
+    again.send("LS+ z\r\n");
+    wait_for_interest(&leaf, &mut again, "z");
+}
+
+/// The next `n` lines from `p`.
+fn lines(p: &mut Peer, n: usize) -> Vec<String> {
+    (0..n).map(|_| p.line()).collect()
+}
+
+#[test]
+fn a_go_hub_gets_what_naq_clients_publish() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!("port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n");
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let mut sub = go_client(port, "SUB orders.* 1\r\nSUB jobs q 2\r\n");
+    let leaf = leaf(&format!("nats-leaf://127.0.0.1:{leafport}"));
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    let mut c = client(&leaf, "");
+    // Until the hub's interest reaches the leaf.
+    let deadline = Instant::now() + WAIT;
+    sub.w
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        c.send("PUB orders.1 2\r\nhi\r\n");
+        let mut l = String::new();
+        if sub.r.read_line(&mut l).is_ok() && l.starts_with("MSG orders.1 1 2") {
+            sub.line();
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing came");
+    }
+    sub.w.set_read_timeout(Some(WAIT)).unwrap();
+    c.send("PUB jobs 3\r\njob\r\n");
+    assert_eq!(lines(&mut sub, 2), ["MSG jobs 2 3", "job"]);
+}
+
+/// A client of the Go server on `port`, subscribed as `subs` say.
+fn go_client(port: u16, subs: &str) -> Peer {
+    let deadline = Instant::now() + WAIT;
+    let s = loop {
+        if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "no Go server on {port}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    s.set_read_timeout(Some(WAIT)).unwrap();
+    let mut c = Peer {
+        r: BufReader::new(s.try_clone().unwrap()),
+        w: s,
+    };
+    c.line();
+    c.send(&format!("CONNECT {{\"verbose\":false}}\r\n{subs}PING\r\n"));
+    assert_eq!(c.line(), "PONG");
+    c
+}
+
 /// `nats-server` from `NAQ_GO`, with `conf`; `None` without `NAQ_GO`.
 fn go(conf: &str) -> Option<GoServer> {
     let bin = PathBuf::from(std::env::var_os("NAQ_GO")?);

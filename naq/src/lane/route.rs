@@ -8,7 +8,7 @@ use naq_proto::encode::Msg;
 
 use super::Lane;
 use crate::conn::Client;
-use crate::index::{Entry, Few, Group};
+use crate::index::{Entry, Few, Group, Peer};
 
 /// Where a queue group's message went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,14 @@ pub(crate) enum Queued {
     Lane(usize),
     /// No member took it.
     Nowhere,
+}
+
+/// A queue group to deliver to: its name, and its groups in the filters a
+/// subject matches.
+#[derive(Debug)]
+pub(crate) struct Queue<'a> {
+    pub(crate) name: &'a [u8],
+    pub(crate) groups: Few<'a, Group>,
 }
 
 /// Where a queue group's pick went.
@@ -154,17 +162,20 @@ impl Lane {
         None
     }
 
-    /// Delivers `m` to one member of the queue group made of `groups`, each
-    /// member on any lane as likely as the others.
+    /// Delivers `m` to one member of queue group `q`:
+    /// each client member on any lane as likely as the others. Without one,
+    /// a link with `peers`, as the hub of the link gets it only as a last
+    /// resort.
     pub(crate) fn deliver_queue(
         &self,
-        groups: &Few<'_, Group>,
+        q: &Queue<'_>,
         m: &Pub<'_>,
         skip: u64,
         stalled: &mut Option<Rc<Client>>,
     ) -> Queued {
+        let groups = &q.groups;
         let lane = match self.pick(groups) {
-            None => return Queued::Nowhere,
+            None => None,
             Some(Pick::Lane(l)) => Some(l),
             Some(Pick::Local(n)) => {
                 if first_taker(groups, n, |e| self.deliver_to(e, m, skip, stalled)) {
@@ -174,22 +185,66 @@ impl Lane {
                 groups.iter().find_map(|g| g.lanes.first().map(|&(l, _)| l))
             }
         };
-        lane.map_or(Queued::Nowhere, Queued::Lane)
+        match lane {
+            Some(l) => Queued::Lane(l),
+            None => self.to_peer(groups, q.name),
+        }
     }
 
-    /// Delivers `m`, from another lane, to one member on this lane of the
-    /// queue group made of `groups`, chosen at random.
+    /// Sends a message for queue group `name` to one of the links of
+    /// `groups`, each as likely as its weight says, if there is one.
+    fn to_peer(&self, groups: &Few<'_, Group>, name: &[u8]) -> Queued {
+        let peers = || groups.iter().flat_map(|g| &g.peers);
+        let total: u64 = peers().map(|p| u64::from(p.weight)).sum();
+        if total == 0 {
+            return Queued::Nowhere;
+        }
+        let mut n = self.below(total);
+        let Some(&p) = peers().find(|p| {
+            let hit = n < u64::from(p.weight);
+            n = n.saturating_sub(u64::from(p.weight));
+            hit
+        }) else {
+            return Queued::Nowhere;
+        };
+        self.to_link(p, name)
+    }
+
+    /// Hands a message for queue group `name` to link `p`: here, or on its
+    /// lane.
+    fn to_link(&self, p: Peer, name: &[u8]) -> Queued {
+        if p.lane == self.id {
+            self.hit_link(p.link, Some(name));
+            Queued::Here
+        } else {
+            Queued::Lane(p.lane)
+        }
+    }
+
+    /// Delivers `m`, from another lane, to one member on this lane of queue
+    /// group `q`, chosen at random; without one, to a link here if `peers`.
     pub(crate) fn deliver_any(
         &self,
-        groups: &Few<'_, Group>,
+        q: &Queue<'_>,
         m: &Pub<'_>,
+        peers: bool,
         stalled: &mut Option<Rc<Client>>,
     ) {
+        let groups = &q.groups;
         let len = local_len(groups) as u64;
         if len > 0 {
             let start = self.below(len) as usize;
             // The publisher is on another lane: nothing to skip.
-            first_taker(groups, start, |e| self.deliver_to(e, m, 0, stalled));
+            if first_taker(groups, start, |e| self.deliver_to(e, m, 0, stalled)) {
+                return;
+            }
+        }
+        let here = groups
+            .iter()
+            .flat_map(|g| &g.peers)
+            .find(|p| p.lane == self.id);
+        if let Some(&p) = here.filter(|_| peers) {
+            self.hit_link(p.link, Some(q.name));
         }
     }
 

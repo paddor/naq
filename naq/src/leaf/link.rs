@@ -105,7 +105,7 @@ pub(super) async fn session(lane: &Rc<Lane>, remote: usize, url: &HubUrl) -> End
         },
     };
     let delay = match link.handshake(remote, url, &mut w).await {
-        Ok(()) => link.serve(remote, w).await,
+        Ok(headers) => link.serve(remote, w, headers).await,
         Err(delay) => delay,
     };
     Ended::Closed { delay }
@@ -113,12 +113,13 @@ pub(super) async fn session(lane: &Rc<Lane>, remote: usize, url: &HubUrl) -> End
 
 impl Link<'_> {
     /// The hub's `INFO`, the `CONNECT`, and the `INFO` that answers it.
+    /// Returns whether the link carries header blocks.
     async fn handshake(
         &mut self,
         remote: usize,
         url: &HubUrl,
         w: &mut OwnedWriteHalf,
-    ) -> Result<(), End> {
+    ) -> Result<bool, End> {
         let info = timeout(FIRST_INFO, self.info(w))
             .await
             .map_err(|_| End::ZERO)??;
@@ -159,7 +160,7 @@ impl Link<'_> {
         if !answer.connect_info {
             return Err(End::ZERO);
         }
-        Ok(())
+        Ok(info.headers)
     }
 
     /// Reads up to the next `INFO`, answering `PING`s on the way.
@@ -204,7 +205,7 @@ impl Link<'_> {
     /// Serves the established link of remote `remote` until it ends: tells
     /// the hub of local interest, answers and sends `PING`s, and notes what
     /// the hub says.
-    async fn serve(&mut self, remote: usize, w: OwnedWriteHalf) -> End {
+    async fn serve(&mut self, remote: usize, w: OwnedWriteHalf, headers: bool) -> End {
         let shared = &self.lane.shared;
         let name = shared.opts.remotes[remote]
             .account
@@ -220,13 +221,14 @@ impl Link<'_> {
             shared.opts.write_deadline,
             || (),
         ));
-        let side = Rc::new(LinkSide::new(account, client.clone()));
+        let side = Rc::new(LinkSide::new(account, client.clone(), headers));
         let lds = shared.lds[account as usize].as_bytes();
         side.snapshot(&self.lane.index(account).borrow(), lds);
         self.lane.links.borrow_mut().push(side.clone());
         self.lane.mark(&client);
-        let end = self.read_loop(&client, lds).await;
+        let end = self.read_loop(&side, lds).await;
         self.lane.links.borrow_mut().retain(|l| l.id != side.id);
+        side.forget_hub(self.lane);
         client.close();
         if timeout(LINGER, &mut writer).await.is_err() {
             writer.abort();
@@ -234,7 +236,8 @@ impl Link<'_> {
         end
     }
 
-    async fn read_loop(&mut self, client: &Rc<Client>, lds: &[u8]) -> End {
+    async fn read_loop(&mut self, side: &LinkSide, lds: &[u8]) -> End {
+        let client = &side.client;
         let opts = &self.lane.shared.opts;
         let interval = opts.ping_interval;
         let mut st = State::default();
@@ -244,7 +247,7 @@ impl Link<'_> {
             loop {
                 match leaf::parse(&self.buf, &self.limits) {
                     Ok(Parsed::Op(op, used)) => {
-                        if let Err(end) = self.handle(op, client, lds, &mut st) {
+                        if let Err(end) = self.handle(op, side, lds, &mut st) {
                             return end;
                         }
                         self.buf.advance(used);
@@ -286,10 +289,11 @@ impl Link<'_> {
     fn handle(
         &self,
         op: LeafOp<'_>,
-        client: &Rc<Client>,
+        side: &LinkSide,
         lds: &[u8],
         st: &mut State,
     ) -> Result<(), End> {
+        let client = &side.client;
         match op {
             LeafOp::Ping => self.send(client, encode::PONG),
             LeafOp::Pong => st.pings_out = 0,
@@ -309,7 +313,9 @@ impl Link<'_> {
             );
                 return Err(LOOP_DELAY);
             }
-            // Interest and messages come with the routing across the link.
+            LeafOp::Sub(i) => side.hub_interest(self.lane, &i, true),
+            LeafOp::Unsub(i) => side.hub_interest(self.lane, &i, false),
+            // Messages from the hub come with the routing of them.
             _ => {}
         }
         Ok(())
