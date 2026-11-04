@@ -543,3 +543,88 @@ fn websocket_settings_naq_cannot_use_are_an_error() {
         );
     }
 }
+
+#[test]
+fn remotes_come_from_the_leafnodes_block() {
+    let o: Options = "accounts [A]\nleafnodes {\n  reconnect: 2\n  remotes [\n    \
+                      { url: \"nats-leaf://h:1\", account: A, no_randomize: true }\n    \
+                      { urls: [\"a\", \"b:2\"] }\n  ]\n}\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.leaf_reconnect, Duration::from_secs(2));
+    assert_eq!(
+        o.remotes,
+        [
+            naq::Remote {
+                urls: vec!["nats-leaf://h:1".into()],
+                account: Some("A".into()),
+                no_randomize: true,
+            },
+            naq::Remote {
+                urls: vec!["a".into(), "b:2".into()],
+                ..naq::Remote::default()
+            },
+        ]
+    );
+}
+
+#[test]
+fn leafnodes_naq_cannot_use_are_an_error() {
+    for (text, reason) in [
+        ("leafnodes: 1", "leafnodes: expected a map"),
+        ("leafnodes { port: 7422 }", "leafnodes: port: not supported"),
+        (
+            "leafnodes { remotes: 1 }",
+            "leafnodes: remotes: expected a list",
+        ),
+        (
+            "leafnodes { remotes: [1] }",
+            "leafnodes: remotes: expected a map",
+        ),
+        (
+            "leafnodes { remotes: [{bogus: 1}] }",
+            "leafnodes: remotes: bogus: not supported",
+        ),
+        (
+            "leafnodes { remotes: [{url: 1}] }",
+            "leafnodes: remotes: url: expected a string or a list",
+        ),
+        (
+            "leafnodes { remotes: [{urls: [1]}] }",
+            "leafnodes: remotes: urls: expected strings",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, account: 1}] }",
+            "leafnodes: remotes: account: expected a string",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, no_randomize: 1}] }",
+            "leafnodes: remotes: no_randomize: expected true or false",
+        ),
+        (
+            "leafnodes { reconnect: x }",
+            "leafnodes: reconnect: bad duration \"x\"",
+        ),
+        (
+            "leafnodes { remotes: [{}] }",
+            "leafnode remote without a url",
+        ),
+        (
+            "leafnodes { remotes: [{url: \"ws://h\"}] }",
+            "leafnode url \"ws://h\": scheme not supported",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, account: B}] }",
+            "leafnode remote: no account \"B\"",
+        ),
+        (
+            "leafnodes { remotes: [{url: h}, {url: \"nats://h:7422\"}] }",
+            "leafnode remotes: the same account and urls twice",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}

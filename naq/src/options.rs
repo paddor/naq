@@ -65,6 +65,11 @@ pub struct Options {
     /// Permissions of users that have none of their own
     /// (`authorization { default_permissions }`).
     pub default_permissions: Option<Permissions>,
+    /// Hubs this server dials as a leaf node (`leafnodes { remotes }`).
+    pub remotes: Vec<Remote>,
+    /// How long a leaf node link waits, once it ended, before it dials
+    /// again (`leafnodes { reconnect }`).
+    pub leaf_reconnect: Duration,
 }
 
 /// A user that may connect.
@@ -158,6 +163,8 @@ impl Default for Options {
             no_auth_user: None,
             auth_timeout: Duration::from_secs(2),
             default_permissions: None,
+            remotes: Vec::new(),
+            leaf_reconnect: Duration::from_secs(1),
             http_port: None,
             http_host: None,
             tls: None,
@@ -280,4 +287,19 @@ pub struct WebsocketAuth {
     /// How long a WebSocket client has to authenticate, in place of
     /// [`Options::auth_timeout`] (`authorization { timeout }`).
     pub timeout: Option<Duration>,
+}
+
+/// A hub this server dials as a leaf node (`leafnodes { remotes }`): a
+/// link that binds a local account to the hub account its credentials
+/// give, and carries interest and messages both ways.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Remote {
+    /// The hub's URLs, tried in turn (`url`, `urls`): `nats-leaf://` or
+    /// `nats://` with `user:password@` or a token as `token@` if it takes
+    /// them, or a bare `host:port`. The port defaults to 7422.
+    pub urls: Vec<String>,
+    /// The local account the link binds (`account`); `None` for `$G`.
+    pub account: Option<String>,
+    /// URLs are tried in the order given (`no_randomize`); else shuffled.
+    pub no_randomize: bool,
 }

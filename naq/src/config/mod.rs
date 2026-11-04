@@ -1,6 +1,7 @@
 //! `nats-server` configuration files, the part of them naq serves.
 
 mod auth;
+mod leaf;
 mod parse;
 mod ws;
 
@@ -82,6 +83,10 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
             reason,
         })?;
     }
+    crate::leaf::validate(&opts).map_err(|reason| Error::Config {
+        at: whole(),
+        reason,
+    })?;
     Ok(opts)
 }
 
@@ -133,6 +138,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 o.http_port = Some(int(item).ok_or_else(|| bad("expected a port"))?);
             }
             "accounts" => auth::accounts(o, item)?,
+            "leafnodes" | "leaf" => leaf::leafnodes(o, item)?,
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }

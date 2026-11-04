@@ -181,6 +181,7 @@ impl Server {
 /// and for the WebSocket port.
 fn check(opts: &Options) -> Result<(Option<Acceptor>, Option<Acceptor>), Error> {
     auth::validate(opts).map_err(Error::Options)?;
+    crate::leaf::validate(opts).map_err(Error::Options)?;
     if let Some(w) = &opts.websocket {
         crate::ws::validate(w).map_err(Error::Options)?;
     }
@@ -225,6 +226,12 @@ fn run(
         let (l, s) = (lanes.clone(), shared.clone());
         first
             .spawn(move || accept(w, l, s, Door::Websocket))
+            .map_err(|e| Error::Lanes(io(e)))?;
+    }
+    for index in 0..shared.opts.remotes.len() {
+        let lane = &lanes[index % lanes.len()];
+        let (s, at) = (shared.clone(), lane.index());
+        lane.spawn(move || crate::leaf::run(s, at, index))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     let (c, s) = (ports.client, shared.clone());

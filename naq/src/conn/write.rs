@@ -11,7 +11,7 @@ use super::Client;
 /// is queued at once and writes it in one go, so the output of a batch of
 /// messages costs one write. A write that takes longer than `deadline`
 /// closes the client as a slow consumer, after a call to `slow`.
-pub(super) async fn writer<W: AsyncWrite + Unpin>(
+pub(crate) async fn writer<W: AsyncWrite + Unpin>(
     client: Rc<Client>,
     mut w: W,
     deadline: Duration,

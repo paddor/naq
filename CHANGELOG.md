@@ -142,6 +142,14 @@ Notable changes to naq. The format follows
   from either side of a link, as slices of the input, splitting arguments
   as `nats-server` does. `leaf::sub`, `leaf::unsub`, `leaf::connect` and
   `leaf::Msg::encode` write what a leaf sends.
+- `naq`: leaf node links to hubs (`Options::remotes`, `Remote`,
+  `Options::leaf_reconnect`; `leafnodes { remotes, reconnect }`). Each
+  remote dials its hub's URLs in turn, shuffled unless `no_randomize`:
+  `nats-leaf://`, `nats://` or `host:port`, with credentials in the URL. It
+  sends the `CONNECT` of a `nats-server` leaf, without compression, answers
+  and sends `PING`s, and dials again after the interval, or 30 s after a
+  loop or cluster name error and 5 s after a version refusal. The link
+  carries no interest or messages yet.
 
 ### Changed
 

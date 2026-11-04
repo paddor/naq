@@ -1,0 +1,140 @@
+//! The URLs of a hub.
+
+/// The port of a hub URL without one, as in `nats-server`.
+const PORT: u16 = 7422;
+
+/// A hub to dial, and the credentials its URL holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HubUrl {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    /// The user, or the token if there is no password.
+    pub(crate) user: Option<String>,
+    pub(crate) pass: Option<String>,
+}
+
+impl HubUrl {
+    /// Reads `nats-leaf://`, `nats://` or a bare `host:port`, with
+    /// `user:password@` or `token@` before the host. A path is ignored.
+    pub(crate) fn parse(s: &str) -> Result<HubUrl, String> {
+        let s = s.trim();
+        let bad = |why: &str| format!("leafnode url {s:?}: {why}");
+        let rest = match s.split_once("://") {
+            Some((scheme, rest)) => {
+                if !["nats-leaf", "nats"].contains(&scheme.to_ascii_lowercase().as_str()) {
+                    return Err(bad("scheme not supported"));
+                }
+                rest
+            }
+            None => s,
+        };
+        let rest = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let (userinfo, hostport) = match rest.rsplit_once('@') {
+            Some((u, h)) => (Some(u), h),
+            None => (None, rest),
+        };
+        let (host, port) = host_port(hostport).ok_or_else(|| bad("expected host:port"))?;
+        let (user, pass) = match userinfo.map(|u| u.split_once(':').unwrap_or((u, ""))) {
+            Some((u, p)) => {
+                let user = decode(u).ok_or_else(|| bad("bad user"))?;
+                let pass = decode(p).ok_or_else(|| bad("bad password"))?;
+                (Some(user), (!p.is_empty()).then_some(pass))
+            }
+            None => (None, None),
+        };
+        Ok(HubUrl {
+            host,
+            port,
+            user: user.filter(|u| !u.is_empty()),
+            pass,
+        })
+    }
+}
+
+/// `host`, `host:port`, `[v6]` or `[v6]:port`.
+fn host_port(s: &str) -> Option<(String, u16)> {
+    let (host, port) = if let Some(v6) = s.strip_prefix('[') {
+        let (host, after) = v6.split_once(']')?;
+        match after {
+            "" => (host, None),
+            p => (host, Some(p.strip_prefix(':')?)),
+        }
+    } else {
+        match s.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (s, None),
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port {
+        Some(p) => p.parse().ok()?,
+        None => PORT,
+    };
+    Some((host.to_owned(), port))
+}
+
+/// `s` with `%XX` escapes decoded, as UTF-8.
+fn decode(s: &str) -> Option<String> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hex = [bytes.next()?, bytes.next()?];
+            out.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+        } else {
+            out.push(b);
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(host: &str, port: u16, user: Option<&str>, pass: Option<&str>) -> HubUrl {
+        HubUrl {
+            host: host.into(),
+            port,
+            user: user.map(Into::into),
+            pass: pass.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn hub_urls_give_where_and_who() {
+        for (s, want) in [
+            ("nats-leaf://hub:7000", url("hub", 7000, None, None)),
+            (
+                "nats://u:p%40ss@hub",
+                url("hub", 7422, Some("u"), Some("p@ss")),
+            ),
+            ("tok@10.0.0.1:1/x", url("10.0.0.1", 1, Some("tok"), None)),
+            ("NATS-LEAF://[::1]:9", url("::1", 9, None, None)),
+            ("[::1]", url("::1", 7422, None, None)),
+            (" hub ", url("hub", 7422, None, None)),
+        ] {
+            assert_eq!(HubUrl::parse(s), Ok(want), "{s}");
+        }
+    }
+
+    #[test]
+    fn urls_naq_cannot_dial_are_an_error() {
+        for (s, why) in [
+            ("ws://hub", "scheme not supported"),
+            ("nats://", "expected host:port"),
+            ("hub:x", "expected host:port"),
+            ("hub:70000", "expected host:port"),
+            ("[::1", "expected host:port"),
+            ("[::1]9", "expected host:port"),
+            ("u%zz@hub", "bad user"),
+            ("u:%@hub", "bad password"),
+            ("u:%ff@hub", "bad password"),
+        ] {
+            let e = HubUrl::parse(s).unwrap_err();
+            assert_eq!(e, format!("leafnode url {:?}: {why}", s.trim()), "{s}");
+        }
+    }
+}

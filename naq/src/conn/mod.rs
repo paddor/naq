@@ -6,6 +6,7 @@ mod read;
 mod write;
 
 pub(crate) use read::{SpentReads, stall};
+pub(crate) use write::writer;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -133,6 +134,11 @@ impl Client {
             h.got_request(reply, tokio::time::Instant::now());
         }
         true
+    }
+
+    /// Waits until the server closes the connection.
+    pub(crate) async fn stopped(&self) {
+        self.stop.notified().await;
     }
 
     /// Closes the connection once the writer wrote what is queued.
