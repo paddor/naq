@@ -76,8 +76,14 @@ pub(crate) fn lds() -> String {
     s
 }
 
-/// Why `opts.remotes` cannot run as given.
+/// Why `opts.remotes` and `opts.leafnodes` cannot run as given.
 pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
+    if let Some(a) = opts.leafnodes.as_ref().and_then(|l| l.account.as_deref())
+        && a != "$G"
+        && !opts.accounts.iter().any(|x| x == a)
+    {
+        return Err(format!("leafnodes: no account {a:?}"));
+    }
     let mut seen = Vec::new();
     for r in &opts.remotes {
         if r.urls.is_empty() {
@@ -90,6 +96,9 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
             .collect::<Result<Vec<_>, _>>()?;
         if urls.iter().any(|u| u.ws.is_some()) && urls.iter().any(|u| u.ws.is_none()) {
             return Err("leafnode remote: websocket and other urls mixed".into());
+        }
+        if urls.iter().any(|u| u.naq) {
+            naq_remote(r, &urls)?;
         }
         if let Some(a) = r.account.as_deref()
             && a != "$G"
@@ -127,6 +136,33 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
         seen.push(key);
     }
     Ok(())
+}
+
+/// Why remote `r` of a naq hub at `urls` cannot run as given: it has one
+/// URL, and none of what a Go hub takes.
+fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
+    if urls.len() != 1 {
+        return Err("leafnode remote: one naq url, alone".into());
+    }
+    let more = r.credentials.is_some()
+        || r.nkey.is_some()
+        || r.tls.is_some()
+        || !r.deny_imports.is_empty()
+        || !r.deny_exports.is_empty()
+        || r.request_isolation
+        || urls[0].user.is_some();
+    if more {
+        return Err("leafnode remote: naq url with options it takes no part of".into());
+    }
+    Ok(())
+}
+
+/// Whether remote `r` dials a naq hub, over OMQ. Of a valid remote.
+pub(crate) fn is_naq(r: &crate::Remote) -> bool {
+    r.urls
+        .first()
+        .and_then(|u| HubUrl::parse(u).ok())
+        .is_some_and(|u| u.naq)
 }
 
 /// Serves remote `index` on lane `lane`: dials its hub, serves the link,

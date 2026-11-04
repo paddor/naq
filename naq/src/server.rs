@@ -96,7 +96,7 @@ pub struct Server {
     addr: SocketAddr,
     monitor: Option<SocketAddr>,
     websocket: Option<SocketAddr>,
-    cluster: Option<SocketAddr>,
+    mesh: crate::mesh::Bound,
 }
 
 impl Server {
@@ -155,13 +155,13 @@ impl Server {
             monitor: monitor.map(|(l, _)| l),
             ws: ws.map(|(l, _)| l),
         };
-        let cluster = run(&ctx, &shared, rxs, ports)?;
+        let mesh = run(&ctx, &shared, rxs, ports)?;
         Ok(Server {
             _ctx: ctx,
             addr,
             monitor: monitor_addr,
             websocket: ws_addr,
-            cluster,
+            mesh,
         })
     }
 
@@ -182,7 +182,13 @@ impl Server {
 
     /// Where the other servers of its cluster connect, if it has one.
     pub const fn cluster_addr(&self) -> Option<SocketAddr> {
-        self.cluster
+        self.mesh.cluster
+    }
+
+    /// Where naq leaf nodes connect, if it takes them
+    /// ([`Options::leafnodes`]).
+    pub const fn leafnode_addr(&self) -> Option<SocketAddr> {
+        self.mesh.leafnodes
     }
 }
 
@@ -245,13 +251,14 @@ struct Ports {
     ws: Option<Listener>,
 }
 
-/// Starts the lanes, then the accept loops of `ports` on lane 0.
+/// Starts the lanes, then the accept loops of `ports` on lane 0. Returns
+/// where lane 0 bound the ports of the servers reached over OMQ.
 fn run(
     ctx: &Context,
     shared: &Arc<Shared>,
     rxs: Vec<lane::LaneRx>,
     ports: Ports,
-) -> Result<Option<SocketAddr>, Error> {
+) -> Result<crate::mesh::Bound, Error> {
     let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
     for (l, rx) in lanes.iter().zip(rxs) {
         let (s, index) = (shared.clone(), l.index());
@@ -271,38 +278,48 @@ fn run(
             .spawn(move || accept(w, l, s, Door::Websocket))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
-    for index in 0..shared.opts.remotes.len() {
+    // A naq hub is dialed with the cluster, over OMQ.
+    let go =
+        (0..shared.opts.remotes.len()).filter(|&i| !crate::leaf::is_naq(&shared.opts.remotes[i]));
+    for index in go {
         let lane = &lanes[index % lanes.len()];
         let (s, at) = (shared.clone(), lane.index());
         lane.spawn(move || crate::leaf::run(s, at, index))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
-    let cluster = if shared.opts.cluster.is_some() {
+    let mesh = if crate::mesh::wanted(&shared.opts) {
         let (ready, bound) = std::sync::mpsc::sync_channel(1);
         let (l, s) = (lanes.clone(), shared.clone());
         first
             .spawn(move || crate::mesh::run(s, l, ready))
             .map_err(|e| Error::Lanes(io(e)))?;
-        Some(cluster_bound(&bound, shared)?)
+        mesh_bound(&bound, shared)?
     } else {
-        None
+        crate::mesh::Bound::default()
     };
     let (c, s) = (ports.client, shared.clone());
     first
         .spawn(move || accept(c, lanes, s, Door::Client))
         .map_err(|e| Error::Lanes(io(e)))?;
-    Ok(cluster)
+    Ok(mesh)
 }
 
-/// Where the cluster port was bound, once lane 0 tells it.
-fn cluster_bound(
-    bound: &std::sync::mpsc::Receiver<Result<SocketAddr, String>>,
+/// Where the cluster port and the port of naq leafs were bound, once lane
+/// 0 tells it.
+fn mesh_bound(
+    bound: &std::sync::mpsc::Receiver<Result<crate::mesh::Bound, String>>,
     shared: &Shared,
-) -> Result<SocketAddr, Error> {
-    let c = shared.opts.cluster.as_ref();
-    let addr = c
-        .map(|c| format!("{}:{}", c.host, c.port))
-        .unwrap_or_default();
+) -> Result<crate::mesh::Bound, Error> {
+    let opts = &shared.opts;
+    let ports = [
+        opts.cluster
+            .as_ref()
+            .map(|c| format!("{}:{}", c.host, c.port)),
+        opts.leafnodes
+            .as_ref()
+            .map(|l| format!("{}:{}", l.host, l.port)),
+    ];
+    let addr = ports.into_iter().flatten().collect::<Vec<_>>().join(", ");
     let failed = |why: String| Error::Listen {
         addr: addr.clone(),
         source: std::io::Error::other(why),

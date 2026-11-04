@@ -115,15 +115,23 @@ impl Group {
         self.local.len() as u64 + self.lanes.iter().map(|&(_, n)| u64::from(n)).sum::<u64>()
     }
 
-    /// Members as link `link` tells its hub of them: the clients', and
-    /// for the loop detection subject `filter`, those at the hubs of other
-    /// links, as `nats-server` tells them.
-    pub(crate) fn told(&self, filter: &[u8], link: u64) -> u64 {
+    /// Members as link `link` tells its hub of them: the clients', those
+    /// of the naq leafs in `leafs`, as bits by slot, and for the loop
+    /// detection subject `filter`, those at the hubs of other links, as
+    /// `nats-server` tells them.
+    pub(crate) fn told(&self, filter: &[u8], link: u64, leafs: u64) -> u64 {
+        let of_leafs = self
+            .servers
+            .iter()
+            .filter(|&&(s, _)| leafs & crate::lane::bit(s) != 0)
+            .map(|&(_, w)| u64::from(w))
+            .sum::<u64>();
+        let mine = self.weight() + of_leafs;
         if !filter.starts_with(b"$LDS.") {
-            return self.weight();
+            return mine;
         }
         let others = self.peers.iter().filter(|p| p.link != link);
-        self.weight() + others.map(|p| u64::from(p.weight)).sum::<u64>()
+        mine + others.map(|p| u64::from(p.weight)).sum::<u64>()
     }
 
     fn count(&mut self, lane: usize, add: bool) {
@@ -302,20 +310,30 @@ impl Index {
         }
     }
 
-    /// Client members of the plain subscriptions of `filter`, or of its
-    /// queue group `queue`, on any lane: as the other servers of the
-    /// cluster hear of them.
-    pub(crate) fn clients(&self, filter: &[u8], queue: Option<&[u8]>) -> u32 {
+    /// The subscribers of the plain subscriptions of `filter`, or of its
+    /// queue group `queue`, if any.
+    pub(crate) fn group(&self, filter: &[u8], queue: Option<&[u8]>) -> Option<&Group> {
         let interest = if subject::is_literal(filter) {
             self.literal.get(filter)
         } else {
             self.wild.get(filter)
-        };
-        let group = interest.and_then(|i| match queue {
-            None => Some(&i.plain),
-            Some(q) => i.queues.iter().find(|(n, _)| **n == *q).map(|(_, g)| g),
-        });
-        group.map_or(0, |g| u32::try_from(g.weight()).unwrap_or(u32::MAX))
+        }?;
+        match queue {
+            None => Some(&interest.plain),
+            Some(q) => interest
+                .queues
+                .iter()
+                .find(|(n, _)| **n == *q)
+                .map(|(_, g)| g),
+        }
+    }
+
+    /// Client members of the plain subscriptions of `filter`, or of its
+    /// queue group `queue`, on any lane.
+    #[cfg(test)]
+    pub(crate) fn clients(&self, filter: &[u8], queue: Option<&[u8]>) -> u32 {
+        self.group(filter, queue)
+            .map_or(0, |g| u32::try_from(g.weight()).unwrap_or(u32::MAX))
     }
 
     /// Subscription `sid` of client `id`.
@@ -326,36 +344,18 @@ impl Index {
         id: u64,
         sid: &[u8],
     ) -> Option<&Entry> {
-        let interest = if subject::is_literal(filter) {
-            self.literal.get(filter)
-        } else {
-            self.wild.get(filter)
-        }?;
-        let group = match queue {
-            None => &interest.plain,
-            Some(q) => &interest.queues.iter().find(|(n, _)| **n == *q)?.1,
-        };
-        group
+        self.group(filter, queue)?
             .local
             .iter()
             .find(|e| e.client.id == id && *e.sid == *sid)
     }
 
     /// Members of the plain subscriptions of `filter`, or of its queue
-    /// group `queue`, as link `link` tells its hub of them: see
-    /// [`Group::told`].
-    pub(crate) fn count(&self, filter: &[u8], queue: Option<&[u8]>, link: u64) -> u32 {
-        let interest = if subject::is_literal(filter) {
-            self.literal.get(filter)
-        } else {
-            self.wild.get(filter)
-        };
-        let group = interest.and_then(|i| match queue {
-            None => Some(&i.plain),
-            Some(q) => i.queues.iter().find(|(n, _)| **n == *q).map(|(_, g)| g),
-        });
-        group.map_or(0, |g| {
-            u32::try_from(g.told(filter, link)).unwrap_or(u32::MAX)
+    /// group `queue`, as link `link` tells its hub of them, with the naq
+    /// leafs in `leafs`: see [`Group::told`].
+    pub(crate) fn count(&self, filter: &[u8], queue: Option<&[u8]>, link: u64, leafs: u64) -> u32 {
+        self.group(filter, queue).map_or(0, |g| {
+            u32::try_from(g.told(filter, link, leafs)).unwrap_or(u32::MAX)
         })
     }
 
@@ -480,13 +480,13 @@ mod tests {
         };
         assert_eq!(groups.len(), 2);
         assert_eq!(
-            idx.count(b"a.*", Some(b"q"), 8),
+            idx.count(b"a.*", Some(b"q"), 8, 0),
             0,
             "links are told of client members"
         );
         idx.peer(b"$LDS.x", None, Peer { weight: 1, ..p });
-        assert_eq!(idx.count(b"$LDS.x", None, 8), 1, "and of loop detection");
-        assert_eq!(idx.count(b"$LDS.x", None, 7), 0, "of other links only");
+        assert_eq!(idx.count(b"$LDS.x", None, 8, 0), 1, "and of loop detection");
+        assert_eq!(idx.count(b"$LDS.x", None, 7, 0), 0, "of other links only");
         idx.peer(b"$LDS.x", None, Peer { weight: 0, ..p });
         let Some(Found::Many(f)) = idx.matches(b"a.c") else {
             panic!("a.* matches")
@@ -543,11 +543,11 @@ mod tests {
             ("b", 0),
         ];
         assert_eq!(seen, want.map(|(f, q)| (f.to_owned(), q)));
-        assert_eq!(idx.count(b"a.*", Some(b"q"), 0), 2);
-        assert_eq!(idx.count(b"a.*", None, 0), 1);
-        assert_eq!(idx.count(b"a.b", None, 0), 1);
-        assert_eq!(idx.count(b"a.b", Some(b"q"), 0), 0);
-        assert_eq!(idx.count(b"x", None, 0), 0);
+        assert_eq!(idx.count(b"a.*", Some(b"q"), 0, 0), 2);
+        assert_eq!(idx.count(b"a.*", None, 0, 0), 1);
+        assert_eq!(idx.count(b"a.b", None, 0, 0), 1);
+        assert_eq!(idx.count(b"a.b", Some(b"q"), 0, 0), 0);
+        assert_eq!(idx.count(b"x", None, 0, 0), 0);
     }
 
     #[test]

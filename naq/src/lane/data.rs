@@ -5,7 +5,6 @@ use std::rc::Rc;
 use bytes::{Buf, Bytes, BytesMut};
 use naq_proto::client::Pub;
 use naq_proto::peer;
-use omq_tokio::Message;
 
 use super::Lane;
 use crate::index::Found;
@@ -101,27 +100,43 @@ pub(crate) enum Source {
     /// messages: the hub has a link of its own to that server, as in
     /// `nats-server`.
     Server,
+    /// A naq leaf, over OMQ.
+    Leaf,
 }
 
 /// What one read leaves for others: publishes for each other lane, and
-/// records for each other server of the cluster.
+/// records for each server reached over OMQ.
 #[derive(Debug)]
 pub(crate) struct Outs {
     pub(crate) lanes: Box<[Out]>,
-    /// A batch for each server, by route, empty if none.
-    servers: Box<[Vec<u8>]>,
+    /// A batch for each server, by slot, empty if none. It grows to the
+    /// slots sent to.
+    servers: Vec<Vec<u8>>,
     /// The publisher's account, which the batches are of.
     pub(crate) account: u32,
+    /// The leaf cluster the publishes come from, with `from_leaf`.
+    origin: Vec<u8>,
+    from_leaf: bool,
 }
 
 impl Outs {
-    /// Room for every other lane and server of `lane`'s server.
+    /// Room for every other lane and route of `lane`'s server.
     pub(crate) fn new(lane: &Lane) -> Outs {
         Outs {
             lanes: (0..lane.lanes()).map(|_| Out::default()).collect(),
             servers: (0..lane.servers()).map(|_| Vec::new()).collect(),
             account: 0,
+            origin: Vec::new(),
+            from_leaf: false,
         }
+    }
+
+    /// The publishes come from a leaf of cluster `origin`, if one: the
+    /// batches say so.
+    pub(crate) fn set_origin(&mut self, origin: Option<&[u8]>) {
+        self.from_leaf = origin.is_some();
+        self.origin.clear();
+        self.origin.extend_from_slice(origin.unwrap_or_default());
     }
 
     /// Appends `p` to the batch for server `s`, for its plain
@@ -133,15 +148,20 @@ impl Outs {
         p: &Pub<'_>,
         queue: Option<&[u8]>,
     ) {
-        let Some(batch) = self.servers.get_mut(usize::from(s)) else {
+        let at = usize::from(s);
+        if at >= super::SLOTS {
             return;
-        };
+        }
+        if self.servers.len() <= at {
+            self.servers.resize_with(at + 1, Vec::new);
+        }
+        let batch = &mut self.servers[at];
         if batch.is_empty() {
             let name = accounts
                 .get(self.account as usize)
                 .map_or("$G", String::as_str);
-            // A route needs no token: its batches go to no other server.
-            peer::batch(batch, 0, None, name.as_bytes());
+            let origin = self.from_leaf.then_some(&self.origin[..]);
+            peer::batch(batch, origin, name.as_bytes());
         }
         peer::Record {
             subject: p.subject,
@@ -283,15 +303,15 @@ impl Lane {
 
     /// Sends the batch for each server that has one, on this lane's link
     /// to it; without a link, it is dropped, as Core may drop.
-    async fn ship_servers(&self, out: &mut Outs) {
+    pub(crate) async fn ship_servers(&self, out: &mut Outs) {
         for (s, batch) in out.servers.iter_mut().enumerate() {
             if batch.is_empty() {
                 continue;
             }
             let batch = std::mem::take(batch);
-            let push = self.pushes.borrow().get(s).cloned().flatten();
-            if let Some(push) = push {
-                let _ = push.send(Message::single(Bytes::from(batch))).await;
+            let link = self.sends.borrow().get(s).cloned().flatten();
+            if let Some(link) = link {
+                link.send(Bytes::from(batch)).await;
             }
         }
     }
@@ -322,7 +342,8 @@ impl Lane {
         let q = super::Queue {
             name,
             groups: found.queue_groups(0, name),
-            servers: false,
+            // Other lanes leave servers to the lane the message came in on.
+            skips: u64::MAX,
         };
         self.deliver_any(&q, m, true, stalled);
     }

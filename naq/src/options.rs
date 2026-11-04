@@ -67,6 +67,9 @@ pub struct Options {
     pub default_permissions: Option<Permissions>,
     /// Hubs this server dials as a leaf node (`leafnodes { remotes }`).
     pub remotes: Vec<Remote>,
+    /// naq leaf nodes this server takes as their hub, over OMQ
+    /// (`leafnodes { listen }`), if any.
+    pub leafnodes: Option<Leafnodes>,
     /// How long a leaf node link waits, once it ended, before it dials
     /// again (`leafnodes { reconnect }`).
     pub leaf_reconnect: Duration,
@@ -88,6 +91,29 @@ pub struct Cluster {
     /// The other servers (`routes`): `nats-route://host:port`, or
     /// `nats://` or a bare `host:port`.
     pub routes: Vec<String>,
+}
+
+/// The port naq leaf nodes dial (`leafnodes { listen }`), over OMQ, with
+/// the remote URL `naq://host:port`. Go leaf nodes cannot dial it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leafnodes {
+    /// Host to listen on (`host`, `listen`).
+    pub host: String,
+    /// Port to listen on (`port`, `listen`); 0 picks a free one.
+    pub port: u16,
+    /// The account every naq leaf binds (`authorization { account }`);
+    /// `None` for `$G`.
+    pub account: Option<String>,
+}
+
+impl Default for Leafnodes {
+    fn default() -> Leafnodes {
+        Leafnodes {
+            host: "0.0.0.0".into(),
+            port: 7422,
+            account: None,
+        }
+    }
 }
 
 impl Default for Cluster {
@@ -193,6 +219,7 @@ impl Default for Options {
             auth_timeout: Duration::from_secs(2),
             default_permissions: None,
             remotes: Vec::new(),
+            leafnodes: None,
             leaf_reconnect: Duration::from_secs(1),
             cluster: None,
             http_port: None,
@@ -326,7 +353,9 @@ pub struct WebsocketAuth {
 pub struct Remote {
     /// The hub's URLs, tried in turn (`url`, `urls`): `nats-leaf://` or
     /// `nats://` with `user:password@` or a token as `token@` if it takes
-    /// them, or a bare `host:port`. The port defaults to 7422.
+    /// them, or a bare `host:port`. The port defaults to 7422. A naq hub
+    /// is dialed over OMQ at one `naq://host:port`, with none of the
+    /// other options but `account`.
     pub urls: Vec<String>,
     /// The local account the link binds (`account`); `None` for `$G`.
     pub account: Option<String>,

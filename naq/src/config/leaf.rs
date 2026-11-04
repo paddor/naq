@@ -1,11 +1,11 @@
 //! The `leafnodes` block: the hubs this server dials.
 
 use super::parse::{Item, Value};
-use super::{Bad, duration, seconds, string};
-use crate::{Options, Remote, RemoteTls};
+use super::{Bad, duration, int, listen, seconds, string};
+use crate::{Leafnodes, Options, Remote, RemoteTls};
 
-/// `leafnodes { remotes, reconnect }`. naq takes no leaf nodes of its own:
-/// the keys of a hub are not supported.
+/// `leafnodes { remotes, reconnect, listen, host, port, authorization }`.
+/// The port of a hub takes naq leaf nodes, over OMQ.
 pub(super) fn leafnodes(o: &mut Options, item: &Item) -> Result<(), Bad> {
     let Value::Map(m) = &item.value else {
         return Err((item.line, "leafnodes: expected a map".into()));
@@ -25,10 +25,46 @@ pub(super) fn leafnodes(o: &mut Options, item: &Item) -> Result<(), Bad> {
             "reconnect" | "reconnect_delay" | "reconnect_interval" => {
                 o.leaf_reconnect = duration(v).map_err(|e| bad(&e))?;
             }
+            "listen" => {
+                let (host, port) = listen(v).ok_or_else(|| bad("expected host:port"))?;
+                let l = o.leafnodes.get_or_insert_with(Leafnodes::default);
+                if let Some(h) = host {
+                    l.host = h;
+                }
+                l.port = port;
+            }
+            "host" | "net" => {
+                o.leafnodes.get_or_insert_with(Leafnodes::default).host =
+                    string(v).ok_or_else(|| bad("expected a string"))?;
+            }
+            "port" => {
+                o.leafnodes.get_or_insert_with(Leafnodes::default).port =
+                    int(v).ok_or_else(|| bad("expected a port"))?;
+            }
+            "authorization" => {
+                o.leafnodes.get_or_insert_with(Leafnodes::default).account = authorization(v)?;
+            }
             _ => return Err(bad("not supported")),
         }
     }
     Ok(())
+}
+
+/// The account of `authorization { account }`, which every naq leaf binds.
+/// Users of leafs are not supported yet.
+fn authorization(item: &Item) -> Result<Option<String>, Bad> {
+    let Value::Map(m) = &item.value else {
+        return Err((item.line, "leafnodes: authorization: expected a map".into()));
+    };
+    let mut account = None;
+    for (k, v) in m {
+        let bad = |reason: &str| (v.line, format!("leafnodes: authorization: {k}: {reason}"));
+        match k.to_ascii_lowercase().as_str() {
+            "account" => account = Some(string(v).ok_or_else(|| bad("expected a string"))?),
+            _ => return Err(bad("not supported")),
+        }
+    }
+    Ok(account)
 }
 
 /// One remote: `{ url, urls, account, no_randomize, credentials, nkey,

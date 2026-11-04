@@ -10,6 +10,7 @@ mod data;
 mod peer;
 mod publish;
 mod route;
+mod slots;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -21,6 +22,9 @@ use tokio::sync::oneshot;
 pub(crate) use data::{Batch, Outs, Source};
 pub(crate) use publish::Routing;
 pub(crate) use route::{Queue, Queued};
+#[cfg(test)]
+pub(crate) use slots::Linked;
+pub(crate) use slots::{SLOTS, Slots, bit};
 
 use crate::conn::{Client, SpentReads};
 use crate::index::Index;
@@ -73,9 +77,26 @@ pub(crate) enum Control {
     },
     /// Server `server` of the cluster takes this lane's data at `endpoint`.
     Push { server: u16, endpoint: String },
-    /// Server `server` of the cluster is gone: its data link closes, and
+    /// The server in slot `server` is gone: its data link closes, and
     /// sends waiting on it give up.
     Gone { server: u16 },
+    /// A naq hub or leaf, of control identity `id`, cluster `cluster`, is
+    /// in slot `slot`, bound to `account`. A leaf gets its data link here.
+    Link {
+        slot: u16,
+        id: Box<[u8]>,
+        cluster: Box<[u8]>,
+        account: u32,
+    },
+    /// Slot `slot` is free again: its data link closes.
+    Unlink { slot: u16 },
+    /// The naq hub in slot `slot` takes data at `endpoints`, one per lane,
+    /// from this server as leaf of control identity `id`.
+    HubData {
+        slot: u16,
+        id: Box<[u8]>,
+        endpoints: Vec<String>,
+    },
     /// Answered with the lane's leaf node links, for monitoring.
     Links(oneshot::Sender<Vec<crate::monitor::LeafInfo>>),
     /// Answered by lane 0 with the routes of the cluster, for monitoring.
@@ -149,9 +170,13 @@ pub(crate) struct Lane {
     hits: peer::Hits,
     /// The other servers of the cluster, on lane 0 with a cluster.
     pub(crate) mesh: RefCell<Option<Rc<crate::mesh::Mesh>>>,
-    /// This lane's data link to each other server of the cluster, by route,
+    /// This lane's data link to each server reached over OMQ, by slot,
     /// once it said where.
-    pub(crate) pushes: RefCell<Vec<Option<omq_tokio::Socket>>>,
+    pub(crate) sends: RefCell<Vec<Option<crate::mesh::DataLink>>>,
+    /// The servers reached over OMQ, by slot.
+    pub(crate) slots: Slots,
+    /// This lane's ROUTER for the data of naq leafs, on a hub.
+    pub(crate) leaf_router: RefCell<Option<omq_tokio::IdentitySocket>>,
 }
 
 impl Lane {
@@ -200,8 +225,7 @@ impl Lane {
     /// in `queue` if given, changed: of a client or of a link's hub.
     pub(crate) fn changed(&self, account: u32, filter: &[u8], queue: Option<&[u8]>) {
         if let Some(mesh) = self.mesh.borrow().as_ref() {
-            let index = self.index(account).borrow();
-            mesh.told.update(&index, account, filter, queue);
+            mesh.changed(self, account, filter, queue);
         }
         let links = self.links.borrow();
         if links.is_empty() {
@@ -209,7 +233,7 @@ impl Lane {
         }
         let index = self.index(account).borrow();
         for l in links.iter().filter(|l| l.account == account) {
-            l.update(&index, filter, queue);
+            l.update(&index, filter, queue, self.slots.leafs());
             self.mark(&l.client);
         }
     }
@@ -246,11 +270,29 @@ impl Lane {
         }
     }
 
+    /// Puts the naq hub or leaf of control identity `id`, cluster
+    /// `cluster`, in slot `slot`, bound to `account`; a leaf gets its data
+    /// link on this lane.
+    fn link(&self, slot: u16, id: &[u8], cluster: &[u8], account: u32) {
+        self.slots.link(
+            slot,
+            slots::Linked {
+                id: id.into(),
+                cluster: cluster.into(),
+                account,
+            },
+        );
+        if !self.slots.is_hub(slot) {
+            crate::mesh::leaf(self, slot, id);
+        }
+    }
+
     /// Hands `batch` to lane `to`, waiting while it has its fill.
     pub(crate) async fn ship(&self, to: usize, batch: Batch) {
         self.shared.lanes[to].data.send(batch).await;
     }
 
+    #[expect(clippy::too_many_lines, reason = "a flat match, one arm per control")]
     fn control(&self, c: Control) {
         match c {
             Control::Interest {
@@ -292,9 +334,30 @@ impl Lane {
                 self.index(account)
                     .borrow_mut()
                     .server(&subject, queue.as_deref(), server, weight);
+                // Links and servers hear of the interest of leafs.
+                self.changed(account, &subject, queue.as_deref());
             }
             Control::Push { server, endpoint } => crate::mesh::push(self, server, &endpoint),
             Control::Gone { server } => crate::mesh::gone(self, server),
+            Control::Link {
+                slot,
+                id,
+                cluster,
+                account,
+            } => self.link(slot, &id, &cluster, account),
+            Control::Unlink { slot } => {
+                self.slots.unlink(slot);
+                crate::mesh::gone(self, slot);
+            }
+            Control::HubData {
+                slot,
+                id,
+                endpoints,
+            } => {
+                if let Some(me) = get(self.shared.id, self.id) {
+                    crate::mesh::hub(&me, slot, &id, &endpoints);
+                }
+            }
             Control::Links(answer) => {
                 let _ = answer.send(crate::monitor::links(self));
             }
@@ -310,6 +373,7 @@ impl Lane {
 pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
     let key = (shared.id, id);
     let servers = routes(&shared);
+    let hubs = crate::mesh::hubs(&shared.opts);
     let lane = Rc::new(Lane {
         id,
         indexes: (0..shared.accounts.len())
@@ -325,7 +389,9 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         links: RefCell::default(),
         hits: peer::Hits::default(),
         mesh: RefCell::default(),
-        pushes: RefCell::new(vec![None; servers]),
+        sends: RefCell::new(vec![None; servers]),
+        slots: Slots::new(servers, hubs),
+        leaf_router: RefCell::default(),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;

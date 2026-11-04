@@ -27,11 +27,13 @@ pub(crate) struct Routing<'a, 'p> {
     /// The queue groups that get a pick, separated by blanks, as a link or
     /// another server named them; `None` for every group.
     listed: Option<&'a [u8]>,
-    /// It goes to other servers with interest: not when one sent it.
-    servers: bool,
+    /// The slots of servers it does not go to, as bits: see
+    /// [`super::Slots`].
+    skips: u64,
     /// It goes to links with plain interest: not when a server sent it.
     links: bool,
-    /// Servers it went to already, as bits by route.
+    /// The servers it went to already, and those it skips, as bits by
+    /// slot.
     sent: u64,
     /// A subscriber past the stall mark.
     pub(crate) stalled: Option<Rc<Client>>,
@@ -58,7 +60,7 @@ impl<'a, 'p> Routing<'a, 'p> {
             buf,
             skip,
             listed: None,
-            servers: true,
+            skips: 0,
             links: true,
             sent: 0,
             stalled: None,
@@ -67,25 +69,41 @@ impl<'a, 'p> Routing<'a, 'p> {
     }
 
     /// The message came from a link, listing `queues`, separated by blanks:
-    /// only those get a pick. Clients get it as `d`. Other servers do not:
-    /// they have links to the hub of their own, as in `nats-server`.
+    /// only those get a pick. Clients get it as `d`. Other servers of the
+    /// cluster do not: they have links to the hub of their own, as in
+    /// `nats-server`.
     pub(crate) const fn by_link(mut self, queues: &'a [u8], d: &'a Pub<'p>) -> Self {
         self.listed = Some(queues);
         self.d = d;
-        self.servers = false;
-        self
+        let skips = self.lane.slots.go_hub_skips();
+        self.skip_servers(skips)
     }
 
-    /// The message came from another server, for one member of `queue` if
-    /// given, else for plain subscriptions: it goes to no other server,
-    /// and to links only for a queue group.
-    pub(crate) const fn by_server(mut self, queue: Option<&'a [u8]>) -> Self {
+    /// The message came from the server in a slot, for one member of
+    /// `queue` if given, else for plain subscriptions. It goes to no server
+    /// in `skips`; from another server of the cluster, to links only for a
+    /// queue group.
+    pub(crate) const fn by_server(mut self, queue: Option<&'a [u8]>, skips: u64) -> Self {
         self.listed = Some(match queue {
             Some(q) => q,
             None => b"",
         });
-        self.servers = false;
         self.links = false;
+        self.skip_servers(skips)
+    }
+
+    /// The message came from a naq hub or leaf: [`Routing::by_server`], but
+    /// links with plain interest get it too.
+    pub(crate) const fn by_linked(self, queue: Option<&'a [u8]>, skips: u64) -> Self {
+        let mut r = self.by_server(queue, skips);
+        r.links = true;
+        r
+    }
+
+    /// It goes to no server in `skips`.
+    const fn skip_servers(mut self, skips: u64) -> Self {
+        self.skips = skips;
+        self.sent = skips;
         self
     }
 
@@ -134,16 +152,17 @@ impl<'a, 'p> Routing<'a, 'p> {
         if !i.plain.peers.is_empty() {
             self.peers(&i.plain.peers);
         }
-        if self.servers && !i.plain.servers.is_empty() {
+        if !i.plain.servers.is_empty() {
             self.send_servers(&i.plain.servers);
         }
     }
 
-    /// Sends the message once to each server with plain interest.
+    /// Sends the message once to each server with plain interest, but
+    /// those it skips.
     #[inline(never)]
     fn send_servers(&mut self, servers: &[(u16, u32)]) {
         for &(s, _) in servers {
-            let bit = 1u64 << (s % 64);
+            let bit = super::bit(s);
             if self.sent & bit == 0 {
                 self.sent |= bit;
                 self.out.server(&self.lane.shared.accounts, s, self.p, None);
@@ -193,7 +212,7 @@ impl<'a, 'p> Routing<'a, 'p> {
         let q = Queue {
             name,
             groups: found.queue_groups(k, name),
-            servers: self.servers,
+            skips: self.skips,
         };
         match self
             .lane

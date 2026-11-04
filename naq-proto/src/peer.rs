@@ -16,7 +16,7 @@
 //! use naq_proto::peer::{self, Batch, Record};
 //!
 //! let mut out = Vec::new();
-//! peer::batch(&mut out, 0, None, b"$G");
+//! peer::batch(&mut out, None, b"$G");
 //! Record {
 //!     subject: b"orders",
 //!     reply: None,
@@ -131,9 +131,6 @@ pub enum Role {
 pub struct Hello<'a> {
     /// What the sender is to the receiver.
     pub role: Role,
-    /// The token the receiver puts on its batches to the sender, so that
-    /// it knows where they come from; 0 on a route.
-    pub token: u16,
     /// The account the link binds at the sender, between a leaf and its
     /// hub; empty on a route.
     pub account: &'a [u8],
@@ -187,7 +184,6 @@ impl Control<'_> {
                     Role::Leaf => 1,
                     Role::Hub => 2,
                 });
-                out.put_u16_le(h.token);
                 out.put_u64_le(h.epoch);
                 for s in [
                     h.account,
@@ -270,7 +266,6 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
             };
             Control::Hello(Hello {
                 role,
-                token: r.u16()?,
                 epoch: r.u64()?,
                 account: r.short()?,
                 server_id: r.short()?,
@@ -305,9 +300,6 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
 /// Publishes of one account, as a data message holds them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Batch<'a> {
-    /// Where it comes from: the token the receiver gave the sender in its
-    /// [`Hello`]; 0 from a route.
-    pub token: u16,
     /// The leaf node cluster its publishes come from, if a leaf of the
     /// sender sent them: empty for a leaf of none.
     pub origin: Option<&'a [u8]>,
@@ -332,11 +324,10 @@ pub struct Record<'a> {
     pub queue: Option<&'a [u8]>,
 }
 
-/// Appends the head of a batch of `account`, with `token` and `origin`
-/// as [`Batch`] has them; [`Record::encode`] appends its publishes.
-pub fn batch(out: &mut impl BufMut, token: u16, origin: Option<&[u8]>, account: &[u8]) {
+/// Appends the head of a batch of `account`, from leaf cluster `origin`
+/// if one; [`Record::encode`] appends its publishes.
+pub fn batch(out: &mut impl BufMut, origin: Option<&[u8]>, account: &[u8]) {
     out.put_u8(BATCH);
-    out.put_u16_le(token);
     match origin {
         Some(o) => {
             out.put_u8(ORIGIN);
@@ -380,7 +371,6 @@ impl<'a> Batch<'a> {
             BATCH => {}
             k => return Err(Error::Kind(k)),
         }
-        let token = r.u16()?;
         let origin = match r.u8()? {
             0 => None,
             ORIGIN => Some(r.short()?),
@@ -388,7 +378,6 @@ impl<'a> Batch<'a> {
         };
         let account = r.short()?;
         Ok(Batch {
-            token,
             origin,
             account,
             records: r.0,

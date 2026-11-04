@@ -581,10 +581,68 @@ fn remotes_come_from_the_leafnodes_block() {
 }
 
 #[test]
+fn the_port_of_a_hub_comes_from_the_leafnodes_block() {
+    let o: Options =
+        "accounts [A]\nleafnodes { listen: \"127.0.0.1:7000\", authorization { account: A } }\n"
+            .parse()
+            .unwrap();
+    assert_eq!(
+        o.leafnodes,
+        Some(naq::Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 7000,
+            account: Some("A".into()),
+        })
+    );
+    let o: Options = "leafnodes { port: 7001, host: h }".parse().unwrap();
+    assert_eq!(
+        o.leafnodes,
+        Some(naq::Leafnodes {
+            host: "h".into(),
+            port: 7001,
+            account: None,
+        })
+    );
+    let o: Options = "leafnodes { remotes: [{url: \"naq://h:1\"}] }"
+        .parse()
+        .unwrap();
+    assert_eq!(o.leafnodes, None);
+    assert_eq!(o.remotes[0].urls, ["naq://h:1"]);
+}
+
+#[test]
+fn naq_leafs_and_hubs_that_cannot_work_are_an_error() {
+    for (text, reason) in [
+        ("leafnodes { port: x }", "leafnodes: port: expected a port"),
+        (
+            "leafnodes { authorization { user: u } }",
+            "leafnodes: authorization: user: not supported",
+        ),
+        (
+            "leafnodes { authorization { account: B } }",
+            "leafnodes: no account \"B\"",
+        ),
+        (
+            "leafnodes { remotes: [{urls: [\"naq://h\", \"naq://i\"]}] }",
+            "leafnode remote: one naq url, alone",
+        ),
+        (
+            "leafnodes { remotes: [{urls: [\"naq://h\", h]}] }",
+            "leafnode remote: one naq url, alone",
+        ),
+        (
+            "leafnodes { remotes: [{url: \"naq://h\", deny_imports: a}] }",
+            "leafnode remote: naq url with options it takes no part of",
+        ),
+    ] {
+        config_error(text, reason);
+    }
+}
+
+#[test]
 fn leafnodes_naq_cannot_use_are_an_error() {
     for (text, reason) in [
         ("leafnodes: 1", "leafnodes: expected a map"),
-        ("leafnodes { port: 7422 }", "leafnodes: port: not supported"),
         (
             "leafnodes { remotes: 1 }",
             "leafnodes: remotes: expected a list",

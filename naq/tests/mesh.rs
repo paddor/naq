@@ -1020,7 +1020,6 @@ fn a_server_that_asks_again_gets_a_snapshot_again() {
             .unwrap();
         let hello = Control::Hello(Hello {
             role: Role::Route,
-            token: 0,
             account: b"",
             epoch: 1,
             server_id: b"FAKE",

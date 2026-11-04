@@ -487,7 +487,11 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             terms.facts,
         ));
         let lds = shared.lds[account as usize].as_bytes();
-        side.snapshot(&self.lane.index(account).borrow(), lds);
+        side.snapshot(
+            &self.lane.index(account).borrow(),
+            lds,
+            self.lane.slots.leafs(),
+        );
         self.lane.links.borrow_mut().push(side.clone());
         self.lane.mark(&client);
         let end = self.read_loop(&side, lds).await;

@@ -102,8 +102,17 @@ pub(crate) struct LeafInfo {
 }
 
 /// The leaf node links of `lane`, with the subjects of their hubs'
-/// interest.
+/// interest; on lane 0, the naq leafs and naq hubs too.
 pub(crate) fn links(lane: &Lane) -> Vec<LeafInfo> {
+    let mut all = go_links(lane);
+    if let Some(mesh) = lane.mesh.borrow().as_ref() {
+        naq_links(lane, mesh, &mut all);
+    }
+    all
+}
+
+/// The links of `lane` to Go hubs.
+fn go_links(lane: &Lane) -> Vec<LeafInfo> {
     lane.links
         .borrow()
         .iter()
@@ -130,6 +139,42 @@ pub(crate) fn links(lane: &Lane) -> Vec<LeafInfo> {
             }
         })
         .collect()
+}
+
+/// Adds the naq leafs linked here and the naq hubs that are up, of
+/// `mesh` on `lane`, to `all`, with the subjects of their interest.
+fn naq_links(lane: &Lane, mesh: &crate::mesh::Mesh, all: &mut Vec<LeafInfo>) {
+    let accounts = &lane.shared.accounts;
+    let info = |id, name: &str, spoke, account: u32, heard: &crate::mesh::Heard| {
+        let mut subs: Vec<String> = heard.entries().map(|e| text(e.1)).collect();
+        subs.sort_unstable();
+        LeafInfo {
+            id,
+            name: name.to_owned(),
+            is_spoke: spoke,
+            is_isolated: false,
+            account: accounts[account as usize].clone(),
+            ip: String::new(),
+            port: 0,
+            in_msgs: 0,
+            out_msgs: 0,
+            in_bytes: 0,
+            out_bytes: 0,
+            subscriptions: subs.len(),
+            subscriptions_list: Some(subs),
+            compression: "off",
+            websocket: false,
+        }
+    };
+    for l in mesh.leafs.borrow().iter() {
+        all.push(info(l.link, &l.name, false, l.account, &l.heard));
+    }
+    for h in mesh.hubs.borrow().iter().filter(|h| h.up) {
+        let mut i = info(h.link, &h.name, true, h.account, &h.heard);
+        i.ip.clone_from(&h.host);
+        i.port = h.port;
+        all.push(i);
+    }
 }
 
 /// How much of each route's subscriptions `/routez` lists: `subs=1`

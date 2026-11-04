@@ -176,21 +176,22 @@ impl LinkSide {
         }
     }
 
-    /// Tells the hub of all interest in `index`, its account's, and of
-    /// `lds`, the loop detection subject.
-    pub(crate) fn snapshot(&self, index: &Index, lds: &[u8]) {
+    /// Tells the hub of all interest in `index`, its account's, with that
+    /// of the naq leafs in `leafs`, and of `lds`, the loop detection
+    /// subject.
+    pub(crate) fn snapshot(&self, index: &Index, lds: &[u8], leafs: u64) {
         let mut out = self.client.out.borrow_mut();
         let mut told = self.told.borrow_mut();
         index.each(|filter, i| {
             if denied(filter) || !self.tells(filter) {
                 return;
             }
-            if i.plain.told(filter, self.id) > 0 {
+            if i.plain.told(filter, self.id, leafs) > 0 {
                 leaf::sub(&mut *out, filter, None);
                 told.insert((filter.into(), None), 1);
             }
             for (q, g) in &i.queues {
-                let n = members(g.told(filter, self.id));
+                let n = members(g.told(filter, self.id, leafs));
                 if n > 0 {
                     leaf::sub(&mut *out, filter, Some((q, n)));
                     told.insert((filter.into(), Some(q.clone())), n);
@@ -201,12 +202,13 @@ impl LinkSide {
     }
 
     /// Tells the hub what changed of the interest in `filter`, in `queue`
-    /// if given, as `index` has it now.
-    pub(crate) fn update(&self, index: &Index, filter: &[u8], queue: Option<&[u8]>) {
+    /// if given, as `index` has it now, with that of the naq leafs in
+    /// `leafs`.
+    pub(crate) fn update(&self, index: &Index, filter: &[u8], queue: Option<&[u8]>, leafs: u64) {
         if denied(filter) || !self.tells(filter) {
             return;
         }
-        let n = index.count(filter, queue, self.id);
+        let n = index.count(filter, queue, self.id, leafs);
         let key = (Box::from(filter), queue.map(Box::from));
         let mut told = self.told.borrow_mut();
         let was = told.get(&key).copied().unwrap_or(0);
@@ -315,7 +317,7 @@ mod tests {
         idx.insert(b"a", None, Entry::new(c.clone(), b"1"));
         idx.insert(b"a.*", Some(b"q"), Entry::new(c.clone(), b"2"));
         idx.insert(b"$KV.b.k", None, Entry::new(c.clone(), b"3"));
-        side.snapshot(&idx, b"$LDS.x");
+        side.snapshot(&idx, b"$LDS.x", 0);
         let first = told(&side);
         assert!(
             first.contains("LS+ a\r\n") && first.contains("LS+ a.* q 1\r\n"),
@@ -327,26 +329,32 @@ mod tests {
         );
 
         idx.insert(b"a", None, Entry::new(c.clone(), b"4"));
-        side.update(&idx, b"a", None);
+        side.update(&idx, b"a", None, 0);
         idx.remote(b"a.*", Some(b"q"), 1, true);
-        side.update(&idx, b"a.*", Some(b"q"));
+        side.update(&idx, b"a.*", Some(b"q"), 0);
         idx.insert(b"$KV.b.k", None, Entry::new(c.clone(), b"5"));
-        side.update(&idx, b"$KV.b.k", None);
+        side.update(&idx, b"$KV.b.k", None, 0);
         assert_eq!(told(&side), "LS+ a.* q 2\r\n");
 
         idx.remove(b"a", None, 1, b"1");
-        side.update(&idx, b"a", None);
+        side.update(&idx, b"a", None, 0);
         assert_eq!(told(&side), "");
         idx.remove(b"a", None, 1, b"4");
-        side.update(&idx, b"a", None);
+        side.update(&idx, b"a", None, 0);
         idx.remote(b"a.*", Some(b"q"), 1, false);
-        side.update(&idx, b"a.*", Some(b"q"));
+        side.update(&idx, b"a.*", Some(b"q"), 0);
         idx.remove(b"a.*", Some(b"q"), 1, b"2");
-        side.update(&idx, b"a.*", Some(b"q"));
+        side.update(&idx, b"a.*", Some(b"q"), 0);
         assert_eq!(told(&side), "LS- a\r\nLS+ a.* q 1\r\nLS- a.* q\r\n");
         // A new subject after the snapshot.
         idx.insert(b"b", None, Entry::new(c, b"6"));
-        side.update(&idx, b"b", None);
+        side.update(&idx, b"b", None, 0);
         assert_eq!(told(&side), "LS+ b\r\n");
+        // The interest of a naq leaf here; not of a route.
+        idx.server(b"c", None, 3, 1);
+        idx.server(b"d", None, 0, 1);
+        side.update(&idx, b"c", None, crate::lane::bit(3));
+        side.update(&idx, b"d", None, crate::lane::bit(3));
+        assert_eq!(told(&side), "LS+ c\r\n");
     }
 }

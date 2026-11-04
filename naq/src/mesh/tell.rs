@@ -1,5 +1,5 @@
-//! Telling the servers that dial this one of its interest: a sender for
-//! each, so one that falls behind holds up no other.
+//! Telling other servers of this one's interest: a sender for each, so
+//! one that falls behind holds up no other.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -12,9 +12,10 @@ use omq_tokio::{IdentitySocket, Message, Socket};
 use tokio::sync::Notify;
 
 use super::Mesh;
+use super::told::Told;
 
 /// How often the deltas sent so far are told.
-const BEAT: Duration = Duration::from_secs(1);
+pub(super) const BEAT: Duration = Duration::from_secs(1);
 
 /// Servers told at once, at most: as many as there may be routes.
 const OTHERS: usize = 64;
@@ -25,29 +26,49 @@ const QUEUE: usize = 1 << 16;
 
 /// What waits to be sent to a server.
 #[derive(Debug)]
-enum Item {
+pub(super) enum Item {
     Msg(Bytes),
     /// All of this server's interest, as of when it is sent.
     Snapshot,
 }
 
-/// A server that dialed this one, and what waits to be sent to it.
+/// Where a server is told.
+#[derive(Debug, Clone)]
+pub(super) enum Sink {
+    /// A ROUTER, to the routing identity of the server.
+    Router(IdentitySocket, Bytes),
+    /// A DEALER, to the one server it dialed.
+    Dealer(Socket),
+}
+
+impl Sink {
+    async fn send(&self, m: Bytes) -> omq_tokio::Result<()> {
+        match self {
+            Sink::Router(ids, to) => ids.send_to(to, Message::single(m)).await,
+            Sink::Dealer(s) => s.send(Message::single(m)).await,
+        }
+    }
+}
+
+/// A server told of this one's interest, and what waits to be sent to it.
 #[derive(Debug)]
-struct Other {
-    /// Its routing identity.
-    id: Bytes,
+pub(super) struct Other {
+    sink: Sink,
+    /// What it is told, and its snapshots come from.
+    told: Rc<Told>,
     queue: RefCell<VecDeque<Item>>,
     /// Counts its `Hello`s.
     greeted: Cell<u64>,
-    /// Set when this server stops telling.
+    /// Set when this server stops telling it.
     closed: Cell<bool>,
     wake: Notify,
 }
 
 impl Other {
-    fn new(id: Bytes) -> Other {
+    pub(super) fn new(sink: Sink, told: Rc<Told>) -> Other {
         Other {
-            id,
+            sink,
+            told,
             queue: RefCell::default(),
             greeted: Cell::new(0),
             closed: Cell::new(false),
@@ -57,7 +78,7 @@ impl Other {
 
     /// Queues `item`. One too many drops all queued: a snapshot goes
     /// next instead.
-    fn push(&self, item: Item) {
+    pub(super) fn push(&self, item: Item) {
         let mut q = self.queue.borrow_mut();
         if q.len() < QUEUE {
             q.push_back(item);
@@ -69,15 +90,38 @@ impl Other {
         self.wake.notify_one();
     }
 
-    /// Starts over for a `Hello` from it: `hello` back, then a snapshot.
-    fn greet(&self, hello: Bytes) {
+    /// Starts over for a `Hello` from it: `hello` back if given, then a
+    /// snapshot.
+    pub(super) fn greet(&self, hello: Option<Bytes>) {
         self.greeted.set(self.greeted.get() + 1);
         {
             let mut q = self.queue.borrow_mut();
             q.clear();
-            q.extend([Item::Msg(hello), Item::Snapshot]);
+            q.extend(hello.map(Item::Msg));
+            q.push_back(Item::Snapshot);
         }
         self.wake.notify_one();
+    }
+
+    /// Queues the deltas of what it is told, then a beat if `beat`.
+    pub(super) fn tell(&self, beat: bool) {
+        for d in self.told.take() {
+            self.push(Item::Msg(d));
+        }
+        if beat {
+            self.push(Item::Msg(self.told.beat()));
+        }
+    }
+
+    /// Stops its sender.
+    pub(super) fn close(&self) {
+        self.closed.set(true);
+        self.wake.notify_one();
+    }
+
+    /// Whether it is told at routing identity `who`.
+    fn is(&self, who: &[u8]) -> bool {
+        matches!(&self.sink, Sink::Router(_, to) if **to == *who)
     }
 }
 
@@ -90,8 +134,7 @@ struct Close(Others);
 impl Drop for Close {
     fn drop(&mut self) {
         for o in self.0.borrow().iter() {
-            o.closed.set(true);
-            o.wake.notify_one();
+            o.close();
         }
     }
 }
@@ -116,11 +159,11 @@ pub(super) async fn answer(router: Socket, cluster: &str, hello: &Bytes, mesh: &
                 match peer::decode(&bytes) {
                     Ok(Control::Hello(h)) if h.role == Role::Route && h.cluster == cluster.as_bytes() => {
                         if let Some(o) = other(&ids, &others.0, who, mesh) {
-                            o.greet(hello.clone());
+                            o.greet(Some(hello.clone()));
                         }
                     }
                     Ok(Control::Resync) => {
-                        if let Some(o) = others.0.borrow().iter().find(|o| o.id == who) {
+                        if let Some(o) = others.0.borrow().iter().find(|o| o.is(&who)) {
                             o.push(Item::Snapshot);
                         }
                     }
@@ -148,22 +191,28 @@ pub(super) async fn answer(router: Socket, cluster: &str, hello: &Bytes, mesh: &
 /// The server of routing identity `who` among `others`, with a sender
 /// of its own; `None` if there are as many as can be.
 fn other(ids: &IdentitySocket, others: &Others, who: Bytes, mesh: &Rc<Mesh>) -> Option<Rc<Other>> {
-    if let Some(o) = others.borrow().iter().find(|o| o.id == who) {
+    if let Some(o) = others.borrow().iter().find(|o| o.is(&who)) {
         return Some(o.clone());
     }
     if others.borrow().len() >= OTHERS {
         return None;
     }
-    let o = Rc::new(Other::new(who));
+    let o = Rc::new(Other::new(
+        Sink::Router(ids.clone(), who),
+        mesh.told.clone(),
+    ));
     others.borrow_mut().push(o.clone());
-    tokio::task::spawn_local(send(ids.clone(), o.clone(), mesh.clone(), others.clone()));
+    let (all, me) = (others.clone(), o.clone());
+    tokio::task::spawn_local(send(o.clone(), move || {
+        all.borrow_mut().retain(|o| !Rc::ptr_eq(o, &me));
+    }));
     Some(o)
 }
 
-/// Sends `other` what waits for it, in order. Ends when this server stops
-/// telling, or when a send finds `other` gone and it said no `Hello`
-/// since: then it leaves `others`.
-async fn send(ids: IdentitySocket, other: Rc<Other>, mesh: Rc<Mesh>, others: Others) {
+/// Sends `other` what waits for it, in order, until this server stops
+/// telling it. A send that finds it gone, with no `Hello` since, ends it:
+/// then `gone` runs.
+pub(super) async fn send(other: Rc<Other>, gone: impl FnOnce()) {
     while !other.closed.get() {
         let greeted = other.greeted.get();
         let item = other.queue.borrow_mut().pop_front();
@@ -172,20 +221,20 @@ async fn send(ids: IdentitySocket, other: Rc<Other>, mesh: Rc<Mesh>, others: Oth
                 other.wake.notified().await;
                 continue;
             }
-            Some(Item::Msg(m)) => ids.send_to(&other.id, Message::single(m)).await,
-            Some(Item::Snapshot) => snapshot(&ids, &other.id, &mesh).await,
+            Some(Item::Msg(m)) => other.sink.send(m).await,
+            Some(Item::Snapshot) => snapshot(&other).await,
         };
         if sent.is_err() && other.greeted.get() == greeted {
-            others.borrow_mut().retain(|o| !Rc::ptr_eq(o, &other));
+            gone();
             return;
         }
     }
 }
 
-/// Sends `who` a snapshot of this server's interest.
-async fn snapshot(ids: &IdentitySocket, who: &Bytes, mesh: &Mesh) -> omq_tokio::Result<()> {
-    for part in mesh.told.snapshot() {
-        ids.send_to(who, Message::single(part)).await?;
+/// Sends `other` a snapshot of what it is told.
+async fn snapshot(other: &Other) -> omq_tokio::Result<()> {
+    for part in other.told.snapshot() {
+        other.sink.send(part).await?;
     }
     Ok(())
 }
@@ -205,9 +254,16 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn a_server_too_far_behind_gets_a_snapshot_instead() {
-        let o = Other::new(Bytes::new());
+    fn other() -> Other {
+        let ctx = omq_tokio::Context::current();
+        let s = ctx.socket(omq_tokio::SocketType::Dealer, omq_tokio::Options::default());
+        let told = Told::new(1, Box::default(), Rc::default());
+        Other::new(Sink::Dealer(s), Rc::new(told))
+    }
+
+    #[tokio::test]
+    async fn a_server_too_far_behind_gets_a_snapshot_instead() {
+        let o = other();
         for _ in 0..QUEUE {
             o.push(Item::Msg(Bytes::new()));
         }
@@ -218,12 +274,17 @@ mod tests {
         assert_eq!(kinds(&o), ["snapshot", "msg"]);
     }
 
-    #[test]
-    fn a_hello_starts_a_server_over() {
-        let o = Other::new(Bytes::new());
+    #[tokio::test]
+    async fn a_hello_starts_a_server_over() {
+        let o = other();
         o.push(Item::Msg(Bytes::new()));
-        o.greet(Bytes::from_static(b"hello"));
+        o.greet(Some(Bytes::from_static(b"hello")));
         assert_eq!(kinds(&o), ["msg", "snapshot"]);
         assert_eq!(o.greeted.get(), 1);
+        o.greet(None);
+        assert_eq!(kinds(&o), ["snapshot"]);
+        o.told.set(0, b"a", None, vec![(None, 1)]);
+        o.tell(true);
+        assert_eq!(kinds(&o), ["snapshot", "msg", "msg"], "a delta and a beat");
     }
 }

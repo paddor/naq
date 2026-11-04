@@ -76,7 +76,6 @@ fn peer_frames() -> Vec<Vec<u8>> {
     let controls = [
         Control::Hello(Hello {
             role: Role::Leaf,
-            token: 1,
             account: b"A",
             epoch: 1,
             server_id: b"N1",
@@ -105,7 +104,7 @@ fn peer_frames() -> Vec<Vec<u8>> {
         })
         .collect();
     let mut batch = Vec::new();
-    peer::batch(&mut batch, 1, Some(b"o"), b"$G");
+    peer::batch(&mut batch, Some(b"o"), b"$G");
     Record {
         subject: b"a.b",
         reply: Some(b"r"),

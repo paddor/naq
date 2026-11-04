@@ -15,12 +15,14 @@ pub(crate) struct HubUrl {
     pub(crate) ws: Option<String>,
     /// TLS from the start (`wss://`).
     pub(crate) wss: bool,
+    /// A naq hub, over OMQ (`naq://`).
+    pub(crate) naq: bool,
 }
 
 impl HubUrl {
-    /// Reads `nats-leaf://`, `nats://`, `ws://`, `wss://` or a bare
-    /// `host:port`, with `user:password@` or `token@` before the host. A
-    /// path is kept for WebSocket only.
+    /// Reads `nats-leaf://`, `nats://`, `ws://`, `wss://`, `naq://` or a
+    /// bare `host:port`, with `user:password@` or `token@` before the host.
+    /// A path is kept for WebSocket only.
     pub(crate) fn parse(s: &str) -> Result<HubUrl, String> {
         let s = s.trim();
         let bad = |why: &str| format!("leafnode url {s:?}: {why}");
@@ -28,7 +30,7 @@ impl HubUrl {
             Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
             None => (String::new(), s),
         };
-        if !["", "nats-leaf", "nats", "ws", "wss"].contains(&scheme.as_str()) {
+        if !["", "nats-leaf", "nats", "ws", "wss", "naq"].contains(&scheme.as_str()) {
             return Err(bad("scheme not supported"));
         }
         let (rest, path) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
@@ -53,6 +55,7 @@ impl HubUrl {
             pass,
             ws: scheme.starts_with("ws").then(|| path.to_owned()),
             wss: scheme == "wss",
+            naq: scheme == "naq",
         })
     }
 }
@@ -139,6 +142,7 @@ mod tests {
             pass: pass.map(Into::into),
             ws: None,
             wss: false,
+            naq: false,
         }
     }
 
@@ -166,6 +170,8 @@ mod tests {
         assert_eq!(ws.user.as_deref(), Some("u"));
         let wss = HubUrl::parse("WSS://hub").unwrap();
         assert_eq!((wss.ws.as_deref(), wss.wss), (Some(""), true));
+        let naq = HubUrl::parse("naq://hub:9").unwrap();
+        assert_eq!((naq.naq, naq.port, naq.ws.as_deref()), (true, 9, None));
     }
 
     #[test]

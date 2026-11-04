@@ -53,7 +53,7 @@ mod ws;
 
 pub use error::Error;
 pub use options::{
-    Cluster, Cookies, Login, Options, Permissions, Remote, RemoteTls, Responses, Rules, Tls, User,
-    Websocket, WebsocketAuth,
+    Cluster, Cookies, Leafnodes, Login, Options, Permissions, Remote, RemoteTls, Responses, Rules,
+    Tls, User, Websocket, WebsocketAuth,
 };
 pub use server::Server;

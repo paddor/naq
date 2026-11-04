@@ -29,8 +29,8 @@ pub(crate) enum Queued {
 pub(crate) struct Queue<'a> {
     pub(crate) name: &'a [u8],
     pub(crate) groups: Few<'a, Group>,
-    /// Members at other servers may get it: not when one sent it.
-    pub(crate) servers: bool,
+    /// The slots of servers whose members do not get it, as bits.
+    pub(crate) skips: u64,
 }
 
 /// Where a queue group's pick went.
@@ -147,20 +147,26 @@ impl Lane {
     }
 
     /// Picks the member of the queue group made of `groups` that gets the
-    /// next message: each member on any lane as likely as the others.
-    /// With `servers`, the members at other servers count too, each as many
-    /// as its weight, as in `nats-server`.
-    fn pick(&self, groups: &Few<'_, Group>, servers: bool) -> Option<Pick> {
-        let remote = |g: &Group| -> u64 {
-            if servers {
-                g.servers.iter().map(|&(_, w)| u64::from(w)).sum()
-            } else {
-                0
-            }
+    /// next message: each member on any lane as likely as the others, and
+    /// those at the routes not in `skips`, each as many as its weight, as
+    /// in `nats-server`. Without one, a member at a naq hub or leaf not in
+    /// `skips`, by weight.
+    fn pick(&self, groups: &Few<'_, Group>, skips: u64) -> Option<Pick> {
+        let fallback = self.slots.fallback();
+        let open = |s: u16, last: bool| {
+            let b = super::bit(s);
+            skips & b == 0 && (fallback & b != 0) == last
         };
-        let total: u64 = groups.iter().map(|g| g.weight() + remote(g)).sum();
+        let remote = |g: &Group, last: bool| -> u64 {
+            g.servers
+                .iter()
+                .filter(|&&(s, _)| open(s, last))
+                .map(|&(_, w)| u64::from(w))
+                .sum()
+        };
+        let total: u64 = groups.iter().map(|g| g.weight() + remote(g, false)).sum();
         if total == 0 {
-            return None;
+            return self.pick_last(groups, open);
         }
         let mut n = self.below(total);
         let local = local_len(groups) as u64;
@@ -174,7 +180,36 @@ impl Lane {
             }
             n -= u64::from(count);
         }
-        for &(s, w) in groups.iter().flat_map(|g| &g.servers) {
+        let open = groups
+            .iter()
+            .flat_map(|g| &g.servers)
+            .filter(|&&(s, _)| open(s, false));
+        for &(s, w) in open {
+            if n < u64::from(w) {
+                return Some(Pick::Server(s));
+            }
+            n -= u64::from(w);
+        }
+        None
+    }
+
+    /// Picks a member at a naq hub or leaf that `open` lets through, each
+    /// as likely as its weight. Out of line: queue groups have members
+    /// here or at routes, mostly.
+    #[inline(never)]
+    fn pick_last(&self, groups: &Few<'_, Group>, open: impl Fn(u16, bool) -> bool) -> Option<Pick> {
+        let last = || {
+            groups
+                .iter()
+                .flat_map(|g| &g.servers)
+                .filter(|&&(s, _)| open(s, true))
+        };
+        let total: u64 = last().map(|&(_, w)| u64::from(w)).sum();
+        if total == 0 {
+            return None;
+        }
+        let mut n = self.below(total);
+        for &(s, w) in last() {
             if n < u64::from(w) {
                 return Some(Pick::Server(s));
             }
@@ -195,7 +230,7 @@ impl Lane {
         stalled: &mut Option<Rc<Client>>,
     ) -> Queued {
         let groups = &q.groups;
-        let lane = match self.pick(groups, q.servers) {
+        let lane = match self.pick(groups, q.skips) {
             None => None,
             Some(Pick::Server(s)) => return Queued::Server(s),
             Some(Pick::Lane(l)) => Some(l),

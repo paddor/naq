@@ -1,143 +1,17 @@
-//! Interest across the mesh: what this server tells the others of its
-//! clients' interest, and what each of the others told it.
+//! Interest across the mesh: what each of the others told this server.
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
-
-use bytes::Bytes;
 use naq_proto::peer::{Control, Interest};
 use rustc_hash::FxHashMap;
-use tokio::sync::Notify;
-
-use crate::index::Index;
-
-/// Deltas waiting for the others, at most. Past it, a delta is dropped:
-/// the others see the gap and ask for a snapshot.
-const OUTBOX: usize = 1 << 16;
 
 /// Interest by account, filter and queue group.
-type Key<A> = (A, Box<[u8]>, Option<Box<[u8]>>);
+type Key = (Box<[u8]>, Box<[u8]>, Option<Box<[u8]>>);
 
-/// What this server told the others, by account ID, and the deltas not
-/// sent yet. Lane 0 keeps it.
-#[derive(Debug)]
-pub(crate) struct Told {
-    epoch: u64,
-    /// Account names, by ID.
-    accounts: Box<[String]>,
-    /// The last delta made.
-    seq: Cell<u64>,
-    weights: RefCell<FxHashMap<Key<u32>, u32>>,
-    outbox: RefCell<VecDeque<Bytes>>,
-    /// Woken when the outbox gets a delta.
-    pub(super) wake: Notify,
-}
-
-impl Told {
-    pub(super) fn new(epoch: u64, accounts: Box<[String]>) -> Told {
-        Told {
-            epoch,
-            accounts,
-            seq: Cell::new(0),
-            weights: RefCell::default(),
-            outbox: RefCell::default(),
-            wake: Notify::new(),
-        }
-    }
-
-    /// Notes the client interest in `filter` of account `account`, in
-    /// `queue` if given, as `index` has it now, and makes
-    /// a delta if the others were told otherwise. Plain interest is there
-    /// or not; a queue group tells its member count.
-    pub(crate) fn update(&self, index: &Index, account: u32, filter: &[u8], queue: Option<&[u8]>) {
-        let n = index.clients(filter, queue);
-        let n = if queue.is_none() { u32::from(n > 0) } else { n };
-        let key = (account, Box::from(filter), queue.map(Box::from));
-        let mut weights = self.weights.borrow_mut();
-        if weights.get(&key).copied().unwrap_or(0) == n {
-            return;
-        }
-        if n == 0 {
-            weights.remove(&key);
-        } else {
-            weights.insert(key, n);
-        }
-        let seq = self.seq.get() + 1;
-        self.seq.set(seq);
-        let mut out = Vec::new();
-        Control::Delta {
-            epoch: self.epoch,
-            seq,
-            interest: Interest {
-                account: name(&self.accounts, account),
-                subject: filter,
-                queue,
-                weight: n,
-                origin: None,
-            },
-        }
-        .encode(&mut out);
-        let mut outbox = self.outbox.borrow_mut();
-        if outbox.len() < OUTBOX {
-            outbox.push_back(out.into());
-        }
-        drop(outbox);
-        self.wake.notify_one();
-    }
-
-    /// A snapshot of all of it, as of the last delta: its messages, in
-    /// order.
-    pub(super) fn snapshot(&self) -> Vec<Bytes> {
-        let weights = self.weights.borrow();
-        let mut all = Vec::with_capacity(weights.len() + 2);
-        let mut one = |c: Control<'_>| {
-            let mut out = Vec::new();
-            c.encode(&mut out);
-            all.push(Bytes::from(out));
-        };
-        one(Control::SnapshotStart {
-            epoch: self.epoch,
-            seq: self.seq.get(),
-        });
-        for ((account, subject, queue), &weight) in weights.iter() {
-            one(Control::Entry(Interest {
-                account: name(&self.accounts, *account),
-                subject,
-                queue: queue.as_deref(),
-                weight,
-                origin: None,
-            }));
-        }
-        one(Control::SnapshotEnd { epoch: self.epoch });
-        all
-    }
-
-    /// A beat: how far the deltas got.
-    pub(super) fn beat(&self) -> Bytes {
-        let mut out = Vec::new();
-        Control::Beat {
-            epoch: self.epoch,
-            seq: self.seq.get(),
-        }
-        .encode(&mut out);
-        out.into()
-    }
-
-    /// The deltas to send, oldest first.
-    pub(super) fn take(&self) -> VecDeque<Bytes> {
-        std::mem::take(&mut *self.outbox.borrow_mut())
-    }
-}
-
-/// The name of account `id` among `accounts`.
-fn name(accounts: &[String], id: u32) -> &[u8] {
-    accounts
-        .get(id as usize)
-        .map_or(&b"$G"[..], |a| a.as_bytes())
-}
+/// Interest by account, filter, queue group and origin: `None` for the
+/// other server's clients, a leaf cluster for its leafs of it.
+type Keyed = (Key, Option<Box<[u8]>>);
 
 /// A snapshot's entries, or a view of interest, by account name.
-type Entries = FxHashMap<Key<Box<[u8]>>, u32>;
+type Entries = FxHashMap<Keyed, u32>;
 
 /// What one other server told this one, by account name, as applied.
 #[derive(Debug, Clone, Default)]
@@ -149,6 +23,8 @@ pub(crate) struct Heard {
     coming: Option<(u64, Entries)>,
     /// The other server's interest, as applied.
     view: Entries,
+    /// The view summed over origins: what the lanes have.
+    sums: FxHashMap<Key, u32>,
 }
 
 /// A change of a server's interest: account name, filter, queue group and
@@ -230,58 +106,88 @@ impl Heard {
 
     /// Entries of the other server's interest, as applied.
     pub(crate) fn len(&self) -> usize {
-        self.view.len()
+        self.sums.len()
     }
 
     /// The other server's interest, as applied, in no order.
     pub(crate) fn entries(&self) -> impl Iterator<Item = Change<'_>> {
-        self.view
+        self.sums
             .iter()
             .map(|(k, &w)| (&*k.0, &*k.1, k.2.as_deref(), w))
     }
 
-    /// Makes `entries` the view, applying what differs.
+    /// The members the other server told of in `subject` of `account`, in
+    /// `queue` if given, for its leafs of cluster `origin`.
+    pub(crate) fn of_origin(
+        &self,
+        account: &[u8],
+        subject: &[u8],
+        queue: Option<&[u8]>,
+        origin: &[u8],
+    ) -> u32 {
+        let k = (
+            (account.into(), subject.into(), queue.map(Into::into)),
+            Some(origin.into()),
+        );
+        self.view.get(&k).copied().unwrap_or(0)
+    }
+
+    /// Makes `entries` the view, applying what differs of the sums.
     fn replace(&mut self, entries: Entries, apply: &mut impl FnMut(Change<'_>)) {
-        for k in self.view.keys().filter(|k| !entries.contains_key(*k)) {
+        let mut sums: FxHashMap<Key, u32> = FxHashMap::default();
+        for ((k, _), &w) in &entries {
+            let sum = sums.entry(k.clone()).or_default();
+            *sum = sum.saturating_add(w);
+        }
+        for k in self.sums.keys().filter(|k| !sums.contains_key(*k)) {
             apply((&k.0, &k.1, k.2.as_deref(), 0));
         }
-        for (k, &w) in entries
-            .iter()
-            .filter(|(k, w)| self.view.get(*k) != Some(*w))
-        {
+        for (k, &w) in sums.iter().filter(|(k, w)| self.sums.get(*k) != Some(*w)) {
             apply((&k.0, &k.1, k.2.as_deref(), w));
         }
         self.view = entries;
+        self.sums = sums;
     }
 
-    fn set(&mut self, k: Key<Box<[u8]>>, weight: u32, apply: &mut impl FnMut(Change<'_>)) {
-        apply((&k.0, &k.1, k.2.as_deref(), weight));
-        if weight == 0 {
-            self.view.remove(&k);
+    /// Sets the members of `k` to `weight`, and applies their new sum.
+    fn set(&mut self, k: Keyed, weight: u32, apply: &mut impl FnMut(Change<'_>)) {
+        let was = if weight == 0 {
+            self.view.remove(&k)
         } else {
-            self.view.insert(k, weight);
+            self.view.insert(k.clone(), weight)
+        };
+        let was = was.unwrap_or(0);
+        if was == weight {
+            return;
+        }
+        let (k, _) = k;
+        let sum = self.sums.get(&k).copied().unwrap_or(0);
+        let sum = sum.saturating_sub(was).saturating_add(weight);
+        apply((&k.0, &k.1, k.2.as_deref(), sum));
+        if sum == 0 {
+            self.sums.remove(&k);
+        } else {
+            self.sums.insert(k, sum);
         }
     }
 }
 
-fn key(i: &Interest<'_>) -> Key<Box<[u8]>> {
-    (i.account.into(), i.subject.into(), i.queue.map(Into::into))
+fn key(i: &Interest<'_>) -> Keyed {
+    (
+        (i.account.into(), i.subject.into(), i.queue.map(Into::into)),
+        i.origin.map(Into::into),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-
-    use naq_proto::peer::{self, Hello, Role};
+    use naq_proto::peer::{Hello, Role};
 
     use super::*;
-    use crate::conn::Client;
-    use crate::index::Entry;
 
     fn hello(epoch: u64) -> Control<'static> {
         Control::Hello(Hello {
             role: Role::Route,
-            token: 0,
             account: b"",
             epoch,
             server_id: b"N",
@@ -443,32 +349,44 @@ mod tests {
     }
 
     #[test]
-    fn the_others_are_told_of_plain_interest_once_and_of_queue_counts() {
-        let told = Told::new(9, vec!["$G".to_owned()].into());
-        let mut idx = Index::default();
-        let c = Rc::new(Client::new(1));
-        idx.insert(b"a", None, Entry::new(c.clone(), b"1"));
-        told.update(&idx, 0, b"a", None);
-        idx.insert(b"a", None, Entry::new(c.clone(), b"2"));
-        told.update(&idx, 0, b"a", None);
-        idx.insert(b"a", Some(b"q"), Entry::new(c.clone(), b"3"));
-        told.update(&idx, 0, b"a", Some(b"q"));
-        idx.insert(b"a", Some(b"q"), Entry::new(c, b"4"));
-        told.update(&idx, 0, b"a", Some(b"q"));
-        let deltas: Vec<_> = told.take().into_iter().collect();
-        let weights: Vec<u32> = deltas
-            .iter()
-            .map(|d| match peer::decode(d) {
-                Ok(Control::Delta { interest, .. }) => interest.weight,
-                other => panic!("{other:?}"),
-            })
-            .collect();
-        assert_eq!(weights, [1, 1, 2], "plain once, the queue at 1 then 2");
-        let snap = told.snapshot();
-        assert_eq!(snap.len(), 4, "start, two entries, end");
-        assert_eq!(
-            peer::decode(&told.beat()),
-            Ok(Control::Beat { epoch: 9, seq: 3 })
+    fn interest_of_each_origin_adds_up() {
+        let mut h = Heard::default();
+        let of = |origin: Option<&'static [u8]>, weight| Interest {
+            queue: Some(b"q"),
+            origin,
+            ..interest(b"a", weight)
+        };
+        let (changes, _) = feed(
+            &mut h,
+            &[
+                hello(1),
+                Control::SnapshotStart { epoch: 1, seq: 0 },
+                Control::Entry(of(None, 2)),
+                Control::Entry(of(Some(b"x"), 3)),
+                Control::SnapshotEnd { epoch: 1 },
+                Control::Delta {
+                    epoch: 1,
+                    seq: 1,
+                    interest: of(Some(b"y"), 1),
+                },
+                Control::Delta {
+                    epoch: 1,
+                    seq: 2,
+                    interest: of(None, 0),
+                },
+                Control::Delta {
+                    epoch: 1,
+                    seq: 3,
+                    interest: of(Some(b"y"), 1),
+                },
+            ],
         );
+        assert_eq!(changes, [("a".into(), 5), ("a".into(), 6), ("a".into(), 4)]);
+        assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), b"x"), 3);
+        assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), b"z"), 0);
+        assert_eq!(h.len(), 1, "one entry, summed");
+        let mut gone = Vec::new();
+        h.forget(&mut |(_, _, _, w): Change<'_>| gone.push(w));
+        assert_eq!(gone, [0]);
     }
 }

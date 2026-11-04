@@ -33,7 +33,6 @@ impl Me {
         let mut hello = Vec::new();
         Control::Hello(Hello {
             role: Role::Route,
-            token: 0,
             account: b"",
             epoch,
             server_id: shared.server_id.as_bytes(),
@@ -219,7 +218,7 @@ fn reachable_url(url: &str, host: &str) -> String {
 
 /// Data endpoint `at` of a server dialed at `host`: on that host, where it
 /// listens on every address.
-fn reachable(at: &str, host: &str) -> String {
+pub(super) fn reachable(at: &str, host: &str) -> String {
     let any = at
         .strip_prefix("tcp://")
         .and_then(|rest| rest.rsplit_once(':'))

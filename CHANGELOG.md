@@ -214,8 +214,7 @@ Notable changes to naq. The format follows
   and of naq leafs and their naq hubs. Control messages (`peer::Control`:
   `Hello` with the sender's `peer::Role`, snapshot and numbered deltas of
   interest, beats, resync) and data batches (`peer::Batch` of
-  `peer::Record`s, with the token of their sender and the leaf cluster
-  they come from), encoded into the caller's buffer and decoded as
+  `peer::Record`s, with the leaf cluster they come from), encoded into the caller's buffer and decoded as
   slices, with a fuzz target, `peer_frames`.
 - `naq`: clusters of naq servers (`Options::cluster`, `Cluster`; `cluster {
   name, listen, routes }`). Lane 0 binds the cluster port, which
@@ -251,6 +250,18 @@ Notable changes to naq. The format follows
 - `naq`: `/routez?subs=1` and `subs=detail` list each route's
   subscriptions, as `nats-server` does. A detail of a queue group adds its
   members at that server as `queue_weight`.
+- `naq`: naq leaf nodes of naq hubs, over OMQ. A hub takes them on
+  `leafnodes { listen }` (`Options::leafnodes`, `Leafnodes`;
+  `Server::leafnode_addr`), each bound to `authorization { account }` or
+  `$G`; a leaf dials a remote of one `naq://host:port` URL. Each side
+  tells the other of its interest, as routes do, by Go's leaf rules: a
+  leaf hears of all interest but its own and its cluster's, a hub of the
+  leaf's clients and leafs, the routes of a hub of its leafs' interest by
+  cluster. Messages go one way per link and never back to their leaf
+  cluster; a queue group takes a member across a link only without one
+  nearer. Only the leaf dials: its data goes over DEALERs to a ROUTER on
+  every lane of the hub. Up to 64 routes, hubs and leafs. A leaf gone
+  takes its interest; `/leafz` shows naq links.
 
 ### Changed
 

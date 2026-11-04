@@ -1,30 +1,39 @@
-//! The mesh: the other naq servers of a fixed cluster, over OMQ.
+//! The mesh: the naq servers this one reaches over OMQ. The other
+//! servers of a fixed cluster, the naq leafs that dial it as their hub,
+//! and the naq hubs it dials as a leaf.
 //!
 //! Lane 0 holds the control sockets: a ROUTER on the cluster port, which
 //! answers each server that dials it, and a DEALER to each route, which
-//! learns that server's interest. Every lane binds a PULL for data from
-//! the others. See `tmp/nats/MESH.md`.
+//! learns that server's interest; a ROUTER for naq leafs, and a DEALER to
+//! each naq hub. Every lane binds a PULL for data from routes and a ROUTER
+//! for data from leafs. See `tmp/nats/MESH.md`.
 
 mod control;
 mod data;
+mod hub;
 mod interest;
+mod spoke;
 mod tell;
+mod told;
+mod view;
 
-pub(crate) use data::{gone, push};
-use interest::Heard;
-pub(crate) use interest::Told;
+pub(crate) use data::{DataLink, gone, hub, leaf, push};
+pub(crate) use interest::Heard;
+use told::Told;
 
 use std::cell::RefCell;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use naq_proto::peer::Control;
 use omq_tokio::{Options, SocketType};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use zzq_tokio::LaneHandle;
 
+use crate::Options as ServerOptions;
 use crate::server::Shared;
-use crate::{Cluster, Options as ServerOptions};
 
 /// The port of a route URL without one, as in `nats-server`.
 const PORT: u16 = 6222;
@@ -94,19 +103,83 @@ fn endpoint(host: &str, port: u16) -> String {
     }
 }
 
-/// What lane 0 knows of the other servers, by route, and what it told
-/// them.
+/// What lane 0 knows of the servers reached over OMQ, and what it told
+/// them: routes, naq leafs here, and naq hubs dialed.
 #[derive(Debug)]
 pub(crate) struct Mesh {
+    /// Random for each start of this server.
+    epoch: u64,
+    /// Account names, by ID.
+    accounts: Box<[String]>,
+    /// The other servers of the cluster, by route.
     pub(crate) peers: RefCell<Vec<Peer>>,
-    pub(crate) told: Told,
+    /// What the routes are told.
+    pub(crate) told: Rc<Told>,
+    /// The naq leafs linked here.
+    pub(crate) leafs: RefCell<Vec<hub::Leaf>>,
+    /// Woken when what a leaf is told has deltas.
+    leaf_wake: Rc<Notify>,
+    /// The naq hubs dialed, in the order of their remotes.
+    pub(crate) hubs: RefCell<Vec<spoke::Hub>>,
 }
 
 impl Mesh {
-    fn new(epoch: u64, accounts: Box<[String]>) -> Mesh {
+    /// The mesh of `shared`'s server, of start `epoch`.
+    fn new(shared: &Shared, epoch: u64) -> Mesh {
+        let first = routes(&shared.opts);
+        let hubs = (0..shared.opts.remotes.len())
+            .filter(|&r| crate::leaf::is_naq(&shared.opts.remotes[r]))
+            .enumerate()
+            // Slots are below 64: they fit.
+            .map(|(k, r)| spoke::Hub::new(shared, r, (first + k) as u16, epoch))
+            .collect();
         Mesh {
+            epoch,
+            accounts: shared.accounts.clone(),
             peers: RefCell::default(),
-            told: Told::new(epoch, accounts),
+            told: Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default())),
+            leafs: RefCell::default(),
+            leaf_wake: Rc::default(),
+            hubs: RefCell::new(hubs),
+        }
+    }
+
+    /// Tells the others what changed of the interest in `filter` of
+    /// `account`, in `queue` if given, as `lane`, lane 0, has it now: the
+    /// routes, the naq leafs and the naq hubs of that account.
+    pub(crate) fn changed(
+        &self,
+        lane: &crate::lane::Lane,
+        account: u32,
+        filter: &[u8],
+        queue: Option<&[u8]>,
+    ) {
+        let index = &*lane.index(account).borrow();
+        let slots = &lane.slots;
+        let routes = view::routes(index, slots, filter, queue);
+        self.told.set(account, filter, queue, routes);
+        let name = self
+            .accounts
+            .get(account as usize)
+            .map_or("$G", String::as_str);
+        let peers = self.peers.borrow();
+        for l in self.leafs.borrow().iter().filter(|l| l.account == account) {
+            let leaf = view::ForLeaf {
+                slot: l.slot,
+                cluster: &l.cluster,
+                account: name.as_bytes(),
+                routes: &peers,
+            };
+            let v = view::leaf(index, slots, leaf, filter, queue);
+            l.told.set(account, filter, queue, v);
+        }
+        for h in self.hubs.borrow().iter().filter(|h| h.account == account) {
+            h.told.set(
+                account,
+                filter,
+                queue,
+                view::hub(index, slots, filter, queue),
+            );
         }
     }
 }
@@ -143,29 +216,60 @@ fn socket_options(identity: Bytes) -> Options {
     }
 }
 
-/// Runs the mesh of `shared`'s cluster from lane 0: binds the control
-/// port and tells `ready` where, binds a data socket on each of `lanes`,
-/// and dials every route.
-pub(crate) async fn run(
-    shared: Arc<Shared>,
-    lanes: Box<[LaneHandle]>,
-    ready: std::sync::mpsc::SyncSender<Result<SocketAddr, String>>,
-) {
-    let Some(c) = shared.opts.cluster.clone() else {
-        return;
-    };
-    let Some(lane) = crate::lane::get(shared.id, 0) else {
-        return;
-    };
-    let mut epoch = [0u8; 8];
-    // An epoch of 0 on failure still tells a start apart from none.
-    let _ = getrandom::getrandom(&mut epoch);
-    let epoch = u64::from_le_bytes(epoch);
-    // In place before the server serves clients: none of their interest
-    // goes untold.
-    let mesh = std::rc::Rc::new(Mesh::new(epoch, shared.accounts.clone()));
-    *lane.mesh.borrow_mut() = Some(mesh.clone());
-    let ctx = omq_tokio::Context::current();
+/// A `Resync`, encoded.
+fn resync() -> Bytes {
+    let mut out = Vec::new();
+    Control::Resync.encode(&mut out);
+    out.into()
+}
+
+/// Routes of the cluster of `opts`.
+fn routes(opts: &ServerOptions) -> usize {
+    opts.cluster.as_ref().map_or(0, |c| c.routes.len())
+}
+
+/// The naq hubs `opts` dial.
+pub(crate) fn hubs(opts: &ServerOptions) -> usize {
+    opts.remotes
+        .iter()
+        .filter(|r| crate::leaf::is_naq(r))
+        .count()
+}
+
+/// The account every naq leaf binds on `shared`'s server.
+fn leafnodes_account(shared: &Shared) -> u32 {
+    let name = shared
+        .opts
+        .leafnodes
+        .as_ref()
+        .and_then(|l| l.account.as_deref())
+        .unwrap_or("$G");
+    // Known to exist: the options were checked. Accounts are few.
+    shared.accounts.iter().position(|a| a == name).unwrap_or(0) as u32
+}
+
+/// Where lane 0 bound the ports of the mesh.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Bound {
+    /// The cluster port, if there is a cluster.
+    pub(crate) cluster: Option<SocketAddr>,
+    /// The port naq leafs dial, if any.
+    pub(crate) leafnodes: Option<SocketAddr>,
+}
+
+/// Whether `opts` reach any server over OMQ: a cluster, naq leafs or naq
+/// hubs.
+pub(crate) fn wanted(opts: &ServerOptions) -> bool {
+    opts.cluster.is_some() || opts.leafnodes.is_some() || hubs(opts) > 0
+}
+
+/// Binds a ROUTER at `host:port` of `ctx`, for `role`. Returns it, its
+/// monitor, made before it binds, and where it is bound.
+async fn router(
+    ctx: &omq_tokio::Context,
+    host: &str,
+    port: u16,
+) -> Result<(omq_tokio::Socket, omq_tokio::MonitorStream, SocketAddr), String> {
     // Mandatory: a peer's full queue holds the sender up instead of losing
     // part of a snapshot.
     let router = ctx.socket(
@@ -175,39 +279,131 @@ pub(crate) async fn run(
             ..socket_options(Bytes::new())
         },
     );
-    let bound = match router.bind(endpoint(&c.host, c.port)).await {
-        Ok(at) => at.to_string(),
-        Err(e) => {
-            let _ = ready.send(Err(e.to_string()));
-            return;
-        }
-    };
-    let Some(addr) = socket_addr(&bound) else {
-        let _ = ready.send(Err(format!("bound {bound}")));
-        return;
-    };
-    let _ = ready.send(Ok(addr));
-    let data = bind_data(shared.id, &lanes, &c).await;
-    let me = control::Me::new(&shared, &c, &data, epoch);
-    control::serve(&shared, &mesh, me, &c, router).await;
+    let events = router.monitor();
+    let bound = router
+        .bind(endpoint(host, port))
+        .await
+        .map_err(|e| e.to_string())?
+        .to_string();
+    let addr = socket_addr(&bound).ok_or_else(|| format!("bound {bound}"))?;
+    Ok((router, events, addr))
 }
 
-/// Binds a data socket on each of `lanes`, and returns their endpoints in
-/// lane order. One that cannot bind gives an empty endpoint.
-async fn bind_data(server: u64, lanes: &[LaneHandle], c: &Cluster) -> Vec<String> {
+/// Runs what `shared`'s server reaches over OMQ from lane 0: binds the
+/// cluster port and the port of naq leafs and tells `ready` where, binds
+/// data sockets on each of `lanes`, dials every route and every naq hub,
+/// and answers what dials it.
+pub(crate) async fn run(
+    shared: Arc<Shared>,
+    lanes: Box<[LaneHandle]>,
+    ready: std::sync::mpsc::SyncSender<Result<Bound, String>>,
+) {
+    let Some(lane) = crate::lane::get(shared.id, 0) else {
+        return;
+    };
+    let mut epoch = [0u8; 8];
+    // An epoch of 0 on failure still tells a start apart from none.
+    let _ = getrandom::getrandom(&mut epoch);
+    let epoch = u64::from_le_bytes(epoch);
+    // In place before the server serves clients: none of their interest
+    // goes untold.
+    let mesh = Rc::new(Mesh::new(&shared, epoch));
+    *lane.mesh.borrow_mut() = Some(mesh.clone());
+    let ctx = omq_tokio::Context::current();
+    let mut bound = Bound::default();
+    let cluster = match &shared.opts.cluster {
+        Some(c) => match router(&ctx, &c.host, c.port).await {
+            Ok((r, _, at)) => {
+                bound.cluster = Some(at);
+                Some((c.clone(), r))
+            }
+            Err(e) => {
+                let _ = ready.send(Err(e));
+                return;
+            }
+        },
+        None => None,
+    };
+    let leafs = match &shared.opts.leafnodes {
+        Some(l) => match router(&ctx, &l.host, l.port).await {
+            Ok((r, events, at)) => {
+                bound.leafnodes = Some(at);
+                Some((l.host.clone(), r, events))
+            }
+            Err(e) => {
+                let _ = ready.send(Err(e));
+                return;
+            }
+        },
+        None => None,
+    };
+    let _ = ready.send(Ok(bound));
+    if let Some((host, r, events)) = leafs {
+        let data = bind_data(shared.id, &lanes, &host, Data::Leafs).await;
+        let me = hub::Me::new(&shared, &data, epoch);
+        tokio::task::spawn_local(hub::serve(lane.clone(), mesh.clone(), (r, events), me));
+    }
+    for at in 0..mesh.hubs.borrow().len() {
+        tokio::task::spawn_local(spoke::dial(shared.clone(), mesh.clone(), at));
+    }
+    if let Some((c, r)) = cluster {
+        let data = bind_data(shared.id, &lanes, &c.host, Data::Routes).await;
+        let me = control::Me::new(&shared, &c, &data, epoch);
+        control::serve(&shared, &mesh, me, &c, r).await;
+    }
+}
+
+/// What the data socket of a lane takes.
+#[derive(Debug, Clone, Copy)]
+enum Data {
+    /// The batches of routes, on a PULL.
+    Routes,
+    /// The batches of naq leafs, on a ROUTER their channels dial.
+    Leafs,
+}
+
+/// Binds a data socket for `kind` on host `host` on each of `lanes`, and
+/// returns their endpoints in lane order. One that cannot bind gives an
+/// empty endpoint.
+async fn bind_data(server: u64, lanes: &[LaneHandle], host: &str, kind: Data) -> Vec<String> {
     let mut waits = Vec::with_capacity(lanes.len());
     for l in lanes {
         let (tx, rx) = oneshot::channel();
-        let host = c.host.clone();
+        let host = host.to_owned();
         let index = l.index();
         let spawned = l.spawn(move || async move {
+            let Some(lane) = crate::lane::get(server, index) else {
+                return;
+            };
             let ctx = omq_tokio::Context::current();
-            let pull = ctx.socket(SocketType::Pull, socket_options(Bytes::new()));
-            let at = pull.bind(endpoint(&host, 0)).await.map(|e| e.to_string());
+            let (socket_type, opts) = match kind {
+                Data::Routes => (SocketType::Pull, socket_options(Bytes::new())),
+                // Mandatory: a leaf's full channel holds the lane up, as a
+                // full PUSH does.
+                Data::Leafs => (
+                    SocketType::Router,
+                    Options {
+                        router_mandatory: true,
+                        ..socket_options(Bytes::new())
+                    },
+                ),
+            };
+            let s = ctx.socket(socket_type, opts);
+            let at = s.bind(endpoint(&host, 0)).await.map(|e| e.to_string());
             let ok = at.is_ok();
             let _ = tx.send(at.unwrap_or_default());
-            if ok && let Some(lane) = crate::lane::get(server, index) {
-                data::receive(lane, pull).await;
+            if !ok {
+                return;
+            }
+            match kind {
+                Data::Routes => data::receive(lane, s).await,
+                Data::Leafs => {
+                    let Ok(ids) = s.identity_routing() else {
+                        return;
+                    };
+                    *lane.leaf_router.borrow_mut() = Some(ids.clone());
+                    data::receive_leafs(lane, ids).await;
+                }
             }
         });
         if spawned.is_ok() {
