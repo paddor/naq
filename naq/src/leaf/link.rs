@@ -1,6 +1,7 @@
 //! One leaf node link: the handshake with the hub, then the link until it
 //! ends.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use super::{Ended, HubUrl, LinkSide, creds, side};
+use super::{Ended, HubUrl, LinkSide, Told, creds, side};
 use crate::conn::{self, Client};
 use crate::lane::{Lane, Out, Routing};
 use crate::ws;
@@ -42,6 +43,7 @@ struct HubInfo {
     headers: bool,
     tls_required: bool,
     leafnode_urls: Vec<String>,
+    ws_connect_urls: Vec<String>,
     info_on_connect: bool,
     connect_info: bool,
     nonce: String,
@@ -93,6 +95,8 @@ struct Link<'l, R> {
     stalled: Option<Rc<Client>>,
     /// The link as a client of the lane: its output to the hub.
     client: Rc<Client>,
+    /// The URLs of the hub's cluster it told of last.
+    told: &'l RefCell<Option<Told>>,
 }
 
 /// Dials the hub at `url`, one of `urls`, for remote `remote`, serves the
@@ -102,6 +106,7 @@ pub(super) async fn session(
     remote: usize,
     url: &HubUrl,
     urls: &[HubUrl],
+    told: &RefCell<Option<Told>>,
 ) -> Ended {
     let dial = timeout(DIAL, TcpStream::connect((url.host.as_str(), url.port)));
     let Ok(Ok(tcp)) = dial.await else {
@@ -113,6 +118,7 @@ pub(super) async fn session(
         remote,
         url,
         urls,
+        told,
     };
     let delay = if url.ws.is_some() {
         d.websocket(tcp).await
@@ -129,6 +135,7 @@ struct Dial<'a> {
     url: &'a HubUrl,
     /// All of the remote's URLs.
     urls: &'a [HubUrl],
+    told: &'a RefCell<Option<Told>>,
 }
 
 impl Dial<'_> {
@@ -140,7 +147,7 @@ impl Dial<'_> {
         let mut buf = lane.reads.take(conn::READ_CHUNK);
         if tls.first() {
             return match tls.connect(tcp, url, self.urls).await {
-                Some(s) => Link::new(lane, s, buf).run(remote, url, None).await,
+                Some(s) => Link::new(self, s, buf).run(remote, url, None).await,
                 None => End::ZERO,
             };
         }
@@ -148,12 +155,12 @@ impl Dial<'_> {
         match timeout(FIRST_INFO, info(&mut tcp, &mut buf, &limits, lane)).await {
             Ok(Ok(first)) if tls.after_info(first.tls_required) => {
                 match tls.connect(tcp, url, self.urls).await {
-                    Some(s) => Link::new(lane, s, buf).run(remote, url, Some(first)).await,
+                    Some(s) => Link::new(self, s, buf).run(remote, url, Some(first)).await,
                     None => End::ZERO,
                 }
             }
             Ok(Ok(first)) => {
-                Link::new(lane, tcp, buf)
+                Link::new(self, tcp, buf)
                     .run(remote, url, Some(first))
                     .await
             }
@@ -171,11 +178,11 @@ impl Dial<'_> {
         let buf = lane.reads.take(conn::READ_CHUNK);
         if url.wss || tls.after_info(false) {
             match tls.connect(tcp, url, self.urls).await {
-                Some(s) => Link::new(lane, s, buf).over_ws(remote, url).await,
+                Some(s) => Link::new(self, s, buf).over_ws(remote, url).await,
                 None => End::ZERO,
             }
         } else {
-            Link::new(lane, tcp, buf).over_ws(remote, url).await
+            Link::new(self, tcp, buf).over_ws(remote, url).await
         }
     }
 }
@@ -238,9 +245,22 @@ where
     }
 }
 
+impl<R> Link<'_, R> {
+    /// Notes the URLs of the hub's cluster `info` tells of, if any.
+    fn learn(&self, info: &HubInfo) {
+        if !info.leafnode_urls.is_empty() || !info.ws_connect_urls.is_empty() {
+            *self.told.borrow_mut() = Some(Told {
+                nats: info.leafnode_urls.clone(),
+                ws: info.ws_connect_urls.clone(),
+            });
+        }
+    }
+}
+
 impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
     /// A link of `lane` over `io`, with what was read of it in `buf`.
-    fn new(lane: &'l Rc<Lane>, io: S, buf: BytesMut) -> Self {
+    fn new(d: &Dial<'l>, io: S, buf: BytesMut) -> Self {
+        let lane = d.lane;
         Link {
             lane,
             io,
@@ -249,6 +269,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             fwd: (0..lane.lanes()).map(|_| Out::default()).collect(),
             stalled: None,
             client: Rc::new(Client::new(lane.shared.next_client())),
+            told: d.told,
         }
     }
 
@@ -269,6 +290,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             fwd,
             stalled,
             client,
+            told,
         } = self;
         let io = ws::client::stream(io, pre, client.clone(), max);
         let link = Link {
@@ -279,6 +301,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             fwd,
             stalled,
             client,
+            told,
         };
         link.run(remote, url, None).await
     }
@@ -349,6 +372,8 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         if !answer.connect_info {
             return Err(End::ZERO);
         }
+        self.learn(&info);
+        self.learn(&answer);
         Ok(info.headers)
     }
 
@@ -368,6 +393,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             fwd: self.fwd,
             stalled: self.stalled,
             client: self.client,
+            told: self.told,
         };
         (link, w)
     }
@@ -509,6 +535,12 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
                 }
             }
             LeafOp::Connect(_) => return Err(st.delay),
+            // News of the hub's cluster.
+            LeafOp::Info(json) => {
+                if let Ok(info) = serde_json::from_slice::<HubInfo>(json) {
+                    self.learn(&info);
+                }
+            }
             LeafOp::Sub(i) if i.subject == lds => {
                 // Our own subject came back: the links loop.
                 let account = &self.lane.shared.accounts[client.account.get() as usize];

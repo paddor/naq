@@ -722,13 +722,21 @@ impl Drop for GoServer {
     }
 }
 
-/// A free port.
+/// A free port, each once per run, below the kernel's ephemeral ports
+/// (32768 on): a server that binds port 0 cannot take it first.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    // Test binaries of other runs start elsewhere.
+    let base = 20_000 + (std::process::id() % 400) as u16 * 30;
+    loop {
+        // Relaxed: only uniqueness matters.
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = 20_000 + (base - 20_000 + n) % 12_000;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// `GET path` on the hub's monitoring port, once it answers.
@@ -750,13 +758,19 @@ fn get(port: u16, path: &str) -> serde_json::Value {
 
 /// Waits until `f` holds of the hub's `/leafz`, and returns it.
 fn leafz_until(http: u16, f: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    until(http, "/leafz?subs=1", f)
+}
+
+/// Waits until `f` holds of `path` on the hub's monitoring port, and
+/// returns it.
+fn until(http: u16, path: &str, f: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
     let deadline = Instant::now() + WAIT;
     loop {
-        let z = get(http, "/leafz?subs=1");
+        let z = get(http, path);
         if f(&z) {
             return z;
         }
-        assert!(Instant::now() < deadline, "/leafz: {z}");
+        assert!(Instant::now() < deadline, "{path}: {z}");
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1117,4 +1131,60 @@ fn a_go_hub_takes_the_link_over_websocket_with_tls() {
     });
     leafz_until(http, |z| z["leafnodes"] == 1);
     published_to_go(&leaf, &mut sub);
+}
+
+#[test]
+fn a_hub_named_in_an_info_is_dialed_next_with_the_credentials_configured() {
+    let (one, two) = (Hub::new(), Hub::new());
+    let _leaf = leaf(&format!("nats://u:p@127.0.0.1:{}", one.port()));
+    let mut p = linked(&one);
+    p.send(&format!(
+        "INFO {{\"leafnode_urls\":[\"127.0.0.1:{}\"]}}\r\n",
+        two.port()
+    ));
+    p.send("PING\r\n");
+    assert_eq!(p.line(), "PONG");
+    drop(p);
+    let mut q = two.accept();
+    q.send(INFO);
+    let json: serde_json::Value =
+        serde_json::from_str(q.line().strip_prefix("CONNECT ").unwrap()).unwrap();
+    assert_eq!(
+        (json["user"].as_str(), json["pass"].as_str()),
+        (Some("u"), Some("p"))
+    );
+}
+
+#[test]
+fn a_leaf_fails_over_to_another_node_of_a_go_hub_cluster() {
+    let ports: Vec<[u16; 3]> = (0..2)
+        .map(|_| [free_port(), free_port(), free_port()])
+        .collect();
+    // Only node b dials the route: routes dialed both ways race, and the
+    // hub tells its leafs of the cluster without node b for a moment.
+    let conf = |me: usize| {
+        let [route, leafport, http] = ports[me];
+        let routes = if me == 1 {
+            format!("routes: [\"nats-route://127.0.0.1:{}\"]", ports[0][0])
+        } else {
+            String::new()
+        };
+        format!(
+            "port: -1\nhttp_port: {http}\ncluster {{ name: c, listen: \"127.0.0.1:{route}\", {routes} }}\nleafnodes {{ listen: \"127.0.0.1:{leafport}\" }}\n"
+        )
+    };
+    let Some(a) = go(&conf(0)) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let _b = go(&conf(1)).unwrap();
+    // Once the cluster is up, node a tells of node b in its first INFO.
+    // A route pool: several routes to the one peer.
+    until(ports[0][2], "/routez", |z| {
+        z["num_routes"].as_u64() > Some(0)
+    });
+    let _leaf = leaf(&format!("nats-leaf://127.0.0.1:{}", ports[0][1]));
+    leafz_until(ports[0][2], |z| z["leafnodes"] == 1);
+    drop(a);
+    leafz_until(ports[1][2], |z| z["leafnodes"] == 1);
 }

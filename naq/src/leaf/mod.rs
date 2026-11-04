@@ -11,12 +11,21 @@ pub(crate) use side::LinkSide;
 pub(crate) use tls::Connector;
 pub(crate) use url::HubUrl;
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::lane;
 use crate::server::Shared;
+
+/// The URLs a hub told of last: of its cluster's leaf node ports, and of
+/// its WebSocket ports.
+#[derive(Debug, Default)]
+pub(super) struct Told {
+    pub(super) nats: Vec<String>,
+    pub(super) ws: Vec<String>,
+}
 
 /// How a link ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,16 +116,26 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
         }
     }
     let interval = shared.opts.leaf_reconnect;
+    let told = RefCell::new(None);
     loop {
         let Some(url) = urls.pop_front() else {
             return;
         };
         urls.push_back(url.clone());
-        let wait = match link::session(&lane, index, &url, &all).await {
+        let wait = match link::session(&lane, index, &url, &all, &told).await {
             // Some jitter, so leafs do not dial a hub in step.
             Ended::Unreached => interval + interval.mul_f64(lane.below(1000) as f64 / 1000.0),
             Ended::Closed { delay } => interval + delay,
         };
+        // The hub's latest word on its cluster, as `nats-server` takes it.
+        if let Some(t) = told.take() {
+            let found = if all.first().is_some_and(|u| u.ws.is_some()) {
+                t.ws
+            } else {
+                t.nats
+            };
+            urls = url::rebuild(&found, &all).into();
+        }
         tokio::time::sleep(wait).await;
     }
 }

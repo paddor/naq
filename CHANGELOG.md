@@ -184,6 +184,11 @@ Notable changes to naq. The format follows
   the URL's path with `/leafnode` after it, checks the hub's answer as
   `nats-server` does, and masks its frames; it does not compress them. A
   remote cannot mix WebSocket and other URLs.
+- `naq`: leaf node links fail over across a hub cluster. Each `INFO` with
+  `leafnode_urls`, or `ws_connect_urls` for a WebSocket remote, sets the
+  URLs to dial next, as `nats-server` sets them: those but ones configured,
+  then the configured ones. They take the scheme of the configured URLs
+  and the credentials of the first configured URL with some.
 
 ### Changed
 

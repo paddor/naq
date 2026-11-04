@@ -57,6 +57,37 @@ impl HubUrl {
     }
 }
 
+/// The URLs to dial after a hub told of `found`, `host:port` each: those
+/// but the ones configured already, then the `configured` ones, as
+/// `nats-server` orders them. Found ones take the scheme of the configured
+/// ones and the credentials of the first configured URL with some.
+pub(crate) fn rebuild(found: &[String], configured: &[HubUrl]) -> Vec<HubUrl> {
+    let scheme = match configured.first().map(|u| u.ws.is_some()) {
+        Some(true) if configured.iter().any(|u| u.wss) => "wss",
+        Some(true) => "ws",
+        _ => "nats-leaf",
+    };
+    let creds = configured.iter().find(|u| u.user.is_some());
+    let mut urls: Vec<HubUrl> = found
+        .iter()
+        .filter_map(|f| HubUrl::parse(&format!("{scheme}://{f}")).ok())
+        .filter(|f| {
+            !configured
+                .iter()
+                .any(|c| c.host == f.host && c.port == f.port)
+        })
+        .map(|mut f| {
+            if let Some(c) = creds {
+                f.user.clone_from(&c.user);
+                f.pass.clone_from(&c.pass);
+            }
+            f
+        })
+        .collect();
+    urls.extend_from_slice(configured);
+    urls
+}
+
 /// `host`, `host:port`, `[v6]` or `[v6]:port`.
 fn host_port(s: &str) -> Option<(String, u16)> {
     let (host, port) = if let Some(v6) = s.strip_prefix('[') {
@@ -135,6 +166,22 @@ mod tests {
         assert_eq!(ws.user.as_deref(), Some("u"));
         let wss = HubUrl::parse("WSS://hub").unwrap();
         assert_eq!((wss.ws.as_deref(), wss.wss), (Some(""), true));
+    }
+
+    #[test]
+    fn urls_a_hub_tells_of_come_first_with_the_credentials_configured() {
+        let configured = [
+            HubUrl::parse("nats://h1:1").unwrap(),
+            HubUrl::parse("nats://u:p@h2:2").unwrap(),
+        ];
+        let found = ["h3:3".to_owned(), "h1:1".to_owned(), "bad:x".to_owned()];
+        let urls = rebuild(&found, &configured);
+        assert_eq!(urls[0], url("h3", 3, Some("u"), Some("p")));
+        assert_eq!(&urls[1..], &configured);
+        let ws = [HubUrl::parse("wss://h1").unwrap()];
+        let urls = rebuild(&["h4:4".to_owned()], &ws);
+        assert_eq!((urls[0].ws.as_deref(), urls[0].wss), (Some(""), true));
+        assert_eq!(rebuild(&[], &ws), ws);
     }
 
     #[test]
