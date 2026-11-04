@@ -284,7 +284,7 @@ mod tests {
         let lines: Vec<&str> = t.lines().collect();
         assert_eq!(
             lines[1],
-            "one-to-one     16 B        2.000M     14.000M   7.00    1.0%    5.1     7.0  target met"
+            "one-to-one     16 B        2.000M     14.000M   7.00    1.0%    6.9     7.0  target met"
         );
         assert!(lines[2].contains("1 KiB") && lines[2].ends_with("below floor"));
         assert!(lines[3].starts_with("fan-out-4") && lines[3].ends_with("-       -  -"));

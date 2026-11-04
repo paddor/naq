@@ -77,24 +77,25 @@ pub struct Gate {
 }
 
 /// The target workloads: one publisher, one subscriber. Floors sit about
-/// 10% under the ratios measured when they were set.
+/// 10% under the ratios measured when they were set, and below the
+/// targets.
 pub const GATES: [Gate; 3] = [
     Gate {
         workload: "one-to-one",
         payload: 16,
-        floor: 5.1,
+        floor: 6.9,
         target: 7.0,
     },
     Gate {
         workload: "one-to-one",
         payload: 64,
-        floor: 5.3,
+        floor: 6.9,
         target: 7.0,
     },
     Gate {
         workload: "one-to-one",
         payload: 1024,
-        floor: 2.2,
+        floor: 2.3,
         target: 3.0,
     },
 ];
