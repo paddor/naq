@@ -443,6 +443,7 @@ impl Conn {
             .borrow_mut()
             .insert(s.subject, s.queue, entry);
         self.lane.announce(account, s.subject, s.queue, true);
+        self.lane.changed(account, s.subject, s.queue);
         self.unfenced = self.lane.lanes() > 1;
         self.ok();
     }

@@ -2,8 +2,10 @@
 //! own, dialing again whenever it ends.
 
 mod link;
+mod side;
 mod url;
 
+pub(crate) use side::LinkSide;
 pub(crate) use url::HubUrl;
 
 use std::collections::VecDeque;
@@ -20,6 +22,23 @@ pub(super) enum Ended {
     Unreached,
     /// It ended, and the hub asked to wait this long beyond the interval.
     Closed { delay: Duration },
+}
+
+/// A fresh loop detection subject: `$LDS.` and 22 random letters and
+/// digits, as `nats-server` makes them.
+pub(crate) fn lds() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let state = std::collections::hash_map::RandomState::new();
+    let mut s = String::from("$LDS.");
+    for i in 0..22u8 {
+        let mut h = state.build_hasher();
+        h.write_u8(i);
+        s.push(char::from(
+            DIGITS[(h.finish() % DIGITS.len() as u64) as usize],
+        ));
+    }
+    s
 }
 
 /// Why `opts.remotes` cannot run as given.

@@ -241,6 +241,27 @@ impl Index {
             .find(|e| e.client.id == id && *e.sid == *sid)
     }
 
+    /// Members on any lane of the plain subscriptions of `filter`, or of
+    /// its queue group `queue`.
+    pub(crate) fn count(&self, filter: &[u8], queue: Option<&[u8]>) -> u32 {
+        let interest = if subject::is_literal(filter) {
+            self.literal.get(filter)
+        } else {
+            self.wild.get(filter)
+        };
+        let group = interest.and_then(|i| match queue {
+            None => Some(&i.plain),
+            Some(q) => i.queues.iter().find(|(n, _)| **n == *q).map(|(_, g)| g),
+        });
+        group.map_or(0, |g| u32::try_from(g.weight()).unwrap_or(u32::MAX))
+    }
+
+    /// Calls `f` with every filter and its interest.
+    pub(crate) fn each(&self, mut f: impl FnMut(&[u8], &Interest)) {
+        self.literal.each(&mut f);
+        self.wild.each(&mut Vec::new(), &mut f);
+    }
+
     /// The interest of every filter that matches `subject`, if any does.
     #[expect(
         clippy::inline_always,
@@ -334,6 +355,34 @@ mod tests {
         assert_eq!(hit(b"a..b"), Vec::<usize>::new());
         assert_eq!(hit(b"a.b."), Vec::<usize>::new());
         assert_eq!(hit(b"a.*"), [1, 2, 4], "a wildcard published is a token");
+    }
+
+    #[test]
+    fn every_filter_is_walked_and_counted() {
+        let mut idx = Index::default();
+        for f in ["a.b", "a.*", "a.>", ">", "*", "a.*.c", "b"] {
+            idx.remote(f.as_bytes(), None, 1, true);
+        }
+        idx.remote(b"a.*", Some(b"q"), 1, true);
+        idx.remote(b"a.*", Some(b"q"), 2, true);
+        let mut seen = Vec::new();
+        idx.each(|f, i| seen.push((String::from_utf8_lossy(f).into_owned(), i.queues.len())));
+        seen.sort();
+        let want = [
+            ("*", 0),
+            (">", 0),
+            ("a.*", 1),
+            ("a.*.c", 0),
+            ("a.>", 0),
+            ("a.b", 0),
+            ("b", 0),
+        ];
+        assert_eq!(seen, want.map(|(f, q)| (f.to_owned(), q)));
+        assert_eq!(idx.count(b"a.*", Some(b"q")), 2);
+        assert_eq!(idx.count(b"a.*", None), 1);
+        assert_eq!(idx.count(b"a.b", None), 1);
+        assert_eq!(idx.count(b"a.b", Some(b"q")), 0);
+        assert_eq!(idx.count(b"x", None), 0);
     }
 
     #[test]

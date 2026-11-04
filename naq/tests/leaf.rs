@@ -124,7 +124,9 @@ fn a_leaf_connects_as_nats_server_does_and_answers_pings() {
     for absent in ["compress_mode", "lang", "account", "protocol", "auth_token"] {
         assert!(json.get(absent).is_none(), "{absent} in {connect}");
     }
-    p.send("INFO {\"connect_info\":true,\"remote_account\":\"$G\"}\r\nPING\r\n");
+    p.send("INFO {\"connect_info\":true,\"remote_account\":\"$G\"}\r\n");
+    lines_until(&mut p, "LS+ $LDS.");
+    p.send("PING\r\n");
     assert_eq!(p.line(), "PONG");
 }
 
@@ -200,6 +202,7 @@ fn a_hub_that_stops_answering_pings_is_left() {
     p.send(INFO);
     p.line();
     p.send("INFO {\"connect_info\":true}\r\n");
+    lines_until(&mut p, "LS+ $LDS.");
     assert_eq!(p.line(), "PING");
     p.send("PONG\r\n");
     assert_eq!(p.line(), "PING");
@@ -208,13 +211,20 @@ fn a_hub_that_stops_answering_pings_is_left() {
     assert!(p.closed());
 }
 
-/// A link up to its `connect_info`, from the hub's end.
-fn linked(hub: &Hub) -> Peer {
+/// A link up to its `connect_info`, from the hub's end, and the interest
+/// the leaf tells of first.
+fn linked_with(hub: &Hub) -> (Peer, Vec<String>) {
     let mut p = hub.accept();
     p.send(INFO);
     p.line();
     p.send("INFO {\"connect_info\":true}\r\n");
-    p
+    let first = lines_until(&mut p, "LS+ $LDS.");
+    (p, first)
+}
+
+/// A link up to its `connect_info` and the interest that follows.
+fn linked(hub: &Hub) -> Peer {
+    linked_with(hub).0
 }
 
 /// Whether the leaf dials again within half a second, as it does after a
@@ -258,6 +268,7 @@ fn a_ping_before_the_connect_info_is_answered() {
     p.send("+OK\r\nPING\r\n");
     assert_eq!(p.line(), "PONG");
     p.send("INFO {\"connect_info\":true}\r\n");
+    lines_until(&mut p, "LS+ $LDS.");
     // A message in two reads, then a PING behind it.
     let big = "x".repeat(70_000);
     p.send(&format!("LMSG s {}\r\n{}", big.len(), &big[..10]));
@@ -323,6 +334,98 @@ fn hub_urls_are_tried_in_turn() {
         p.send(INFO);
         assert!(p.line().starts_with("CONNECT "));
     }
+}
+
+/// A client of `server`, subscribed as `subs` say, once the server
+/// answered its `PING`.
+fn client(server: &Server, subs: &str) -> Peer {
+    let s = TcpStream::connect(server.addr()).unwrap();
+    s.set_read_timeout(Some(WAIT)).unwrap();
+    let mut c = Peer {
+        r: BufReader::new(s.try_clone().unwrap()),
+        w: s,
+    };
+    c.line();
+    c.send(&format!("CONNECT {{\"verbose\":false}}\r\n{subs}PING\r\n"));
+    assert_eq!(c.line(), "PONG");
+    c
+}
+
+/// The lines the leaf sends until one starts with `last`, that one too.
+fn lines_until(p: &mut Peer, last: &str) -> Vec<String> {
+    let mut got = Vec::new();
+    loop {
+        let l = p.line();
+        let done = l.starts_with(last);
+        got.push(l);
+        if done {
+            return got;
+        }
+    }
+}
+
+#[test]
+fn the_hub_hears_of_local_interest_as_it_comes_and_goes() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let _before = client(&leaf, "SUB a.b 1\r\nSUB w.* q 2\r\n");
+    let (mut p, mut first) = linked_with(&hub);
+    let lds = first.pop().unwrap();
+    first.sort();
+    assert_eq!(first, ["LS+ a.b", "LS+ w.* q 1"]);
+    assert_eq!(lds.len(), "LS+ $LDS.".len() + 22, "{lds}");
+    let mut after = client(&leaf, "SUB a.b 1\r\nSUB c 2\r\nSUB w.* q 3\r\n");
+    let mut more = vec![p.line(), p.line()];
+    more.sort();
+    assert_eq!(more, ["LS+ c", "LS+ w.* q 2"]);
+    after.send("UNSUB 2\r\nUNSUB 3\r\nPING\r\n");
+    assert_eq!(after.line(), "PONG");
+    let mut gone = vec![p.line(), p.line()];
+    gone.sort();
+    assert_eq!(gone, ["LS+ w.* q 1", "LS- c"]);
+    drop(after);
+    // Its plain sub went with it, the one before stays.
+    p.send("PING\r\n");
+    assert_eq!(p.line(), "PONG");
+}
+
+#[test]
+fn its_own_loop_subject_coming_back_ends_the_link() {
+    let hub = Hub::new();
+    let _leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let (mut p, mut first) = linked_with(&hub);
+    let lds = first.pop().unwrap();
+    p.send(&format!("{lds}\r\n"));
+    let err = p.line();
+    assert!(
+        err.starts_with("-ERR 'Loop detected for leafnode account=\"$G\"."),
+        "{err}"
+    );
+    assert!(p.closed());
+    assert!(!dials_soon(&hub));
+}
+
+#[test]
+fn a_go_hub_learns_the_interest_of_naq_clients() {
+    let (leafport, http) = (free_port(), free_port());
+    let conf = format!("port: -1\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n");
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let leaf = leaf(&format!("nats-leaf://127.0.0.1:{leafport}"));
+    let _c = client(&leaf, "SUB orders.* 1\r\nSUB jobs q 2\r\n");
+    let z = leafz_until(http, |z| z["leafs"][0]["subscriptions"] == 3);
+    let mut subs: Vec<String> = z["leafs"][0]["subscriptions_list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_owned())
+        .filter(|s| !s.starts_with("$LDS."))
+        .collect();
+    subs.sort();
+    // `nats-server` lists queue subscriptions by subject.
+    assert_eq!(subs, ["jobs", "orders.*"]);
 }
 
 /// `nats-server` from `NAQ_GO`, with `conf`; `None` without `NAQ_GO`.
@@ -393,7 +496,7 @@ fn get(port: u16, path: &str) -> serde_json::Value {
 fn leafz_until(http: u16, f: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
     let deadline = Instant::now() + WAIT;
     loop {
-        let z = get(http, "/leafz");
+        let z = get(http, "/leafz?subs=1");
         if f(&z) {
             return z;
         }

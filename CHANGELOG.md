@@ -148,8 +148,13 @@ Notable changes to naq. The format follows
   `nats-leaf://`, `nats://` or `host:port`, with credentials in the URL. It
   sends the `CONNECT` of a `nats-server` leaf, without compression, answers
   and sends `PING`s, and dials again after the interval, or 30 s after a
-  loop or cluster name error and 5 s after a version refusal. The link
-  carries no interest or messages yet.
+  loop or cluster name error and 5 s after a version refusal.
+- `naq`: a leaf node link tells its hub of the interest of its account's
+  clients: an `LS+` for each subject on the link, queue groups with their
+  member counts, and its `$LDS.` loop detection subject, then `LS+` and
+  `LS-` as interest comes and goes. Literal JetStream subjects, which
+  `nats-server` refuses across links, are left out. Its own `$LDS.` coming
+  back from the hub ends the link for 30 s.
 
 ### Changed
 

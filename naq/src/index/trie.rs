@@ -96,6 +96,30 @@ impl Node {
         }
     }
 
+    /// Calls `f` with every filter below this node and its interest.
+    /// `path` holds the tokens to here, each followed by a separator.
+    pub(super) fn each(&self, path: &mut Vec<u8>, f: &mut impl FnMut(&[u8], &Interest)) {
+        let at = path.len();
+        if let Some(h) = &self.here {
+            f(&path[..at.saturating_sub(1)], h);
+        }
+        if let Some(t) = &self.tail {
+            path.push(b'>');
+            f(path, t);
+            path.truncate(at);
+        }
+        let any = self.any.as_deref().map(|c| (&b"*"[..], c));
+        for (token, child) in any
+            .into_iter()
+            .chain(self.next.iter().map(|(t, c)| (&**t, c)))
+        {
+            path.extend_from_slice(token);
+            path.push(naq_proto::subject::SEP);
+            child.each(path, f);
+            path.truncate(at);
+        }
+    }
+
     /// Adds the interest of every filter below this node that matches
     /// `subject`, which has all its tokens.
     pub(super) fn matches<'a>(&'a self, subject: &[u8], found: &mut Few<'a, Interest>) {

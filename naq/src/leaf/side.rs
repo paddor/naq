@@ -1,0 +1,160 @@
+//! A link's side on its lane: where its output goes, and the local
+//! interest it told the hub of, kept current.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use naq_proto::{leaf, subject};
+use rustc_hash::FxHashMap;
+
+use crate::conn::Client;
+use crate::index::Index;
+
+/// Subjects `nats-server` denies on every link of an account that is not
+/// the system account: a literal one in an `LS+` ends the link.
+const DENIED: [&[u8]; 3] = [b"$JS.API.>", b"$KV.>", b"$OBJ.>"];
+
+/// What the hub was told, by filter and queue group: 1 for plain
+/// interest, the member count for a queue group.
+type Told = FxHashMap<(Box<[u8]>, Option<Box<[u8]>>), u32>;
+
+/// A link on its lane.
+#[derive(Debug)]
+pub(crate) struct LinkSide {
+    /// Its client ID.
+    pub(crate) id: u64,
+    /// The local account it binds.
+    pub(crate) account: u32,
+    /// Its output to the hub.
+    pub(crate) client: Rc<Client>,
+    told: RefCell<Told>,
+}
+
+impl LinkSide {
+    pub(crate) fn new(account: u32, client: Rc<Client>) -> LinkSide {
+        LinkSide {
+            id: client.id,
+            account,
+            client,
+            told: RefCell::default(),
+        }
+    }
+
+    /// Tells the hub of all interest in `index`, its account's, and of
+    /// `lds`, the loop detection subject.
+    pub(crate) fn snapshot(&self, index: &Index, lds: &[u8]) {
+        let mut out = self.client.out.borrow_mut();
+        let mut told = self.told.borrow_mut();
+        index.each(|filter, i| {
+            if denied(filter) {
+                return;
+            }
+            if i.plain.weight() > 0 {
+                leaf::sub(&mut *out, filter, None);
+                told.insert((filter.into(), None), 1);
+            }
+            for (q, g) in &i.queues {
+                let n = members(g.weight());
+                if n > 0 {
+                    leaf::sub(&mut *out, filter, Some((q, n)));
+                    told.insert((filter.into(), Some(q.clone())), n);
+                }
+            }
+        });
+        leaf::sub(&mut *out, lds, None);
+    }
+
+    /// Tells the hub what changed of the interest in `filter`, in `queue`
+    /// if given, as `index` has it now.
+    pub(crate) fn update(&self, index: &Index, filter: &[u8], queue: Option<&[u8]>) {
+        if denied(filter) {
+            return;
+        }
+        let n = index.count(filter, queue);
+        let key = (Box::from(filter), queue.map(Box::from));
+        let mut told = self.told.borrow_mut();
+        let was = told.get(&key).copied().unwrap_or(0);
+        // Plain interest is there or not; a queue group tells its count.
+        let same = if queue.is_none() {
+            (n > 0) == (was > 0)
+        } else {
+            n == was
+        };
+        if same {
+            return;
+        }
+        let mut out = self.client.out.borrow_mut();
+        if n == 0 {
+            told.remove(&key);
+            leaf::unsub(&mut *out, filter, queue);
+        } else {
+            let n = if queue.is_none() { 1 } else { n };
+            told.insert(key, n);
+            leaf::sub(&mut *out, filter, queue.map(|q| (q, n)));
+        }
+    }
+}
+
+/// Members of a group, as an `LS+` weight.
+fn members(n: u64) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Whether `filter` is a literal subject the hub refuses interest in.
+fn denied(filter: &[u8]) -> bool {
+    subject::is_literal(filter) && DENIED.iter().any(|d| subject::matches(d, filter))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::Entry;
+
+    fn told(side: &LinkSide) -> String {
+        let out = std::mem::take(&mut *side.client.out.borrow_mut());
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn the_hub_hears_of_interest_once_and_of_queue_counts_always() {
+        let side = LinkSide::new(0, Rc::new(Client::new(9)));
+        let mut idx = Index::default();
+        let c = Rc::new(Client::new(1));
+        idx.insert(b"a", None, Entry::new(c.clone(), b"1"));
+        idx.insert(b"a.*", Some(b"q"), Entry::new(c.clone(), b"2"));
+        idx.insert(b"$KV.b.k", None, Entry::new(c.clone(), b"3"));
+        side.snapshot(&idx, b"$LDS.x");
+        let first = told(&side);
+        assert!(
+            first.contains("LS+ a\r\n") && first.contains("LS+ a.* q 1\r\n"),
+            "{first}"
+        );
+        assert!(
+            first.ends_with("LS+ $LDS.x\r\n") && !first.contains("$KV"),
+            "{first}"
+        );
+
+        idx.insert(b"a", None, Entry::new(c.clone(), b"4"));
+        side.update(&idx, b"a", None);
+        idx.remote(b"a.*", Some(b"q"), 1, true);
+        side.update(&idx, b"a.*", Some(b"q"));
+        idx.insert(b"$KV.b.k", None, Entry::new(c.clone(), b"5"));
+        side.update(&idx, b"$KV.b.k", None);
+        assert_eq!(told(&side), "LS+ a.* q 2\r\n");
+
+        idx.remove(b"a", None, 1, b"1");
+        side.update(&idx, b"a", None);
+        assert_eq!(told(&side), "");
+        idx.remove(b"a", None, 1, b"4");
+        side.update(&idx, b"a", None);
+        idx.remote(b"a.*", Some(b"q"), 1, false);
+        side.update(&idx, b"a.*", Some(b"q"));
+        idx.remove(b"a.*", Some(b"q"), 1, b"2");
+        side.update(&idx, b"a.*", Some(b"q"));
+        assert_eq!(told(&side), "LS- a\r\nLS+ a.* q 1\r\nLS- a.* q\r\n");
+        // A new subject after the snapshot.
+        idx.insert(b"b", None, Entry::new(c, b"6"));
+        side.update(&idx, b"b", None);
+        assert_eq!(told(&side), "LS+ b\r\n");
+    }
+}

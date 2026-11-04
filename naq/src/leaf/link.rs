@@ -15,7 +15,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use super::{Ended, HubUrl};
+use super::{Ended, HubUrl, LinkSide};
 use crate::conn::Client;
 use crate::lane::Lane;
 
@@ -67,6 +67,15 @@ struct Connect<'a> {
 /// Why a link ends: the wait the hub asked for, beyond the interval.
 type End = Duration;
 
+/// What an established link keeps track of.
+#[derive(Debug, Default)]
+struct State {
+    /// `PING`s the hub has not answered.
+    pings_out: u32,
+    /// The wait an `-ERR` of the hub asked for.
+    delay: End,
+}
+
 /// A link's read side.
 struct Link<'l> {
     lane: &'l Rc<Lane>,
@@ -96,7 +105,7 @@ pub(super) async fn session(lane: &Rc<Lane>, remote: usize, url: &HubUrl) -> End
         },
     };
     let delay = match link.handshake(remote, url, &mut w).await {
-        Ok(()) => link.serve(w).await,
+        Ok(()) => link.serve(remote, w).await,
         Err(delay) => delay,
     };
     Ended::Closed { delay }
@@ -192,18 +201,32 @@ impl Link<'_> {
         }
     }
 
-    /// Serves the established link until it ends: answers and sends
-    /// `PING`s, and notes what the hub says.
-    async fn serve(&mut self, w: OwnedWriteHalf) -> End {
+    /// Serves the established link of remote `remote` until it ends: tells
+    /// the hub of local interest, answers and sends `PING`s, and notes what
+    /// the hub says.
+    async fn serve(&mut self, remote: usize, w: OwnedWriteHalf) -> End {
         let shared = &self.lane.shared;
+        let name = shared.opts.remotes[remote]
+            .account
+            .as_deref()
+            .unwrap_or("$G");
+        // Known to exist: the options were checked.
+        let account = shared.accounts.iter().position(|a| a == name).unwrap_or(0) as u32;
         let client = Rc::new(Client::new(shared.next_client()));
+        client.account.set(account);
         let mut writer: JoinHandle<()> = tokio::task::spawn_local(crate::conn::writer(
             client.clone(),
             w,
             shared.opts.write_deadline,
             || (),
         ));
-        let end = self.read_loop(&client).await;
+        let side = Rc::new(LinkSide::new(account, client.clone()));
+        let lds = shared.lds[account as usize].as_bytes();
+        side.snapshot(&self.lane.index(account).borrow(), lds);
+        self.lane.links.borrow_mut().push(side.clone());
+        self.lane.mark(&client);
+        let end = self.read_loop(&client, lds).await;
+        self.lane.links.borrow_mut().retain(|l| l.id != side.id);
         client.close();
         if timeout(LINGER, &mut writer).await.is_err() {
             writer.abort();
@@ -211,30 +234,18 @@ impl Link<'_> {
         end
     }
 
-    async fn read_loop(&mut self, client: &Rc<Client>) -> End {
+    async fn read_loop(&mut self, client: &Rc<Client>, lds: &[u8]) -> End {
         let opts = &self.lane.shared.opts;
         let interval = opts.ping_interval;
-        let mut pings_out = 0;
-        let mut delay = End::ZERO;
+        let mut st = State::default();
         let timer = tokio::time::sleep(interval);
         tokio::pin!(timer);
         loop {
             loop {
                 match leaf::parse(&self.buf, &self.limits) {
                     Ok(Parsed::Op(op, used)) => {
-                        match op {
-                            LeafOp::Ping => self.send(client, encode::PONG),
-                            LeafOp::Pong => pings_out = 0,
-                            LeafOp::Err(text) => {
-                                delay = delay.max(err_delay(text));
-                                if delay == LOOP_DELAY {
-                                    return delay;
-                                }
-                            }
-                            LeafOp::Connect(_) => return delay,
-                            // Interest and messages come with the routing
-                            // across the link.
-                            _ => {}
+                        if let Err(end) = self.handle(op, client, lds, &mut st) {
+                            return end;
                         }
                         self.buf.advance(used);
                     }
@@ -245,7 +256,7 @@ impl Link<'_> {
                         self.buf.reserve(room);
                         break;
                     }
-                    Err(_) => return delay,
+                    Err(_) => return st.delay,
                 }
             }
             self.lane.flush();
@@ -253,22 +264,55 @@ impl Link<'_> {
             // `notified` passes its wake on, and the timer keeps its deadline.
             tokio::select! {
                 biased;
-                () = client.stopped() => return delay,
+                () = client.stopped() => return st.delay,
                 () = &mut timer => {
-                    if pings_out >= opts.max_pings_out {
+                    if st.pings_out >= opts.max_pings_out {
                         self.send_err(client, "Stale Connection");
-                        return delay;
+                        return st.delay;
                     }
-                    pings_out += 1;
+                    st.pings_out += 1;
                     self.send(client, encode::PING);
                     timer.as_mut().reset(Instant::now() + interval);
                 }
                 n = self.r.read_buf(&mut self.buf) => match n {
-                    Ok(0) | Err(_) => return delay,
+                    Ok(0) | Err(_) => return st.delay,
                     Ok(_) => {}
                 },
             }
         }
+    }
+
+    /// Acts on what the hub sent. `Err` ends the link.
+    fn handle(
+        &self,
+        op: LeafOp<'_>,
+        client: &Rc<Client>,
+        lds: &[u8],
+        st: &mut State,
+    ) -> Result<(), End> {
+        match op {
+            LeafOp::Ping => self.send(client, encode::PONG),
+            LeafOp::Pong => st.pings_out = 0,
+            LeafOp::Err(text) => {
+                st.delay = st.delay.max(err_delay(text));
+                if st.delay == LOOP_DELAY {
+                    return Err(st.delay);
+                }
+            }
+            LeafOp::Connect(_) => return Err(st.delay),
+            LeafOp::Sub(i) if i.subject == lds => {
+                // Our own subject came back: the links loop.
+                let account = &self.lane.shared.accounts[client.account.get() as usize];
+                self.send_err(
+                client,
+                &format!("Loop detected for leafnode account={account:?}. Delaying attempt to reconnect for 30s"),
+            );
+                return Err(LOOP_DELAY);
+            }
+            // Interest and messages come with the routing across the link.
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Queues `bytes` for the hub.

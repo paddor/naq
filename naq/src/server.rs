@@ -37,6 +37,8 @@ pub(crate) struct Shared {
     pub(crate) auth: Option<Auth>,
     /// What WebSocket clients authenticate with, where it is not `auth`.
     ws_auth: Option<Auth>,
+    /// The loop detection subject of each account on leaf node links.
+    pub(crate) lds: Box<[String]>,
     /// Message counts of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
     /// Slow consumers and stale clients so far.
@@ -128,6 +130,7 @@ impl Server {
             addr,
             server_id: server_id(),
             lanes: txs.into_boxed_slice(),
+            lds: accounts.iter().map(|_| crate::leaf::lds()).collect(),
             accounts,
             auth,
             ws_auth,

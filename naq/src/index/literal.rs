@@ -63,6 +63,13 @@ impl Literals {
             .map(|f| &f.interest)
     }
 
+    /// Calls `f` with every subject and its interest.
+    pub(super) fn each(&self, f: &mut impl FnMut(&[u8], &Interest)) {
+        for filter in &self.table {
+            f(&filter.subject, &filter.interest);
+        }
+    }
+
     /// The interest in `subject`, made if new.
     pub(super) fn interest(&mut self, subject: &[u8]) -> &mut Interest {
         let entry = self.table.entry(

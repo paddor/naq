@@ -116,6 +116,7 @@ impl Client {
             .borrow_mut()
             .remove(&sub.subject, queue, self.id, sid);
         lane.announce(account, &sub.subject, queue, false);
+        lane.changed(account, &sub.subject, queue);
     }
 
     /// Whether its permissions let it get `m`. Notes requests it may reply

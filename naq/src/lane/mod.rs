@@ -111,6 +111,8 @@ pub(crate) struct Lane {
     pub(crate) clients: RefCell<FxHashMap<u64, Rc<Client>>>,
     /// Read buffers of its clients that batches may still refer to.
     pub(crate) reads: SpentReads,
+    /// Leaf node links on this lane.
+    pub(crate) links: RefCell<Vec<Rc<crate::leaf::LinkSide>>>,
 }
 
 impl Lane {
@@ -147,6 +149,20 @@ impl Lane {
         let mut slot = self.dirty.borrow_mut();
         if slot.is_empty() {
             *slot = dirty;
+        }
+    }
+
+    /// Tells the links on this lane that client interest in `filter` of
+    /// `account`, in `queue` if given, changed.
+    pub(crate) fn changed(&self, account: u32, filter: &[u8], queue: Option<&[u8]>) {
+        let links = self.links.borrow();
+        if links.is_empty() {
+            return;
+        }
+        let index = self.index(account).borrow();
+        for l in links.iter().filter(|l| l.account == account) {
+            l.update(&index, filter, queue);
+            self.mark(&l.client);
         }
     }
 
@@ -199,6 +215,7 @@ impl Lane {
                 self.index(account)
                     .borrow_mut()
                     .remote(&subject, queue.as_deref(), lane, add);
+                self.changed(account, &subject, queue.as_deref());
             }
             Control::Fence(done) => {
                 let _ = done.send(());
@@ -226,6 +243,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         tally: Tally::default(),
         clients: RefCell::default(),
         reads: SpentReads::default(),
+        links: RefCell::default(),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;
@@ -236,6 +254,8 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
             for c in controls.drain(..) {
                 l.control(c);
             }
+            // Wakes the links told of interest.
+            l.flush();
         }
     });
     tokio::task::spawn_local(data::run(lane, data));
