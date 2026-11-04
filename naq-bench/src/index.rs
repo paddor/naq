@@ -47,25 +47,23 @@ pub fn run(kind: Kind, subjects: usize, duration: Duration) -> Report {
         .collect();
     let topics: Vec<String> = names.iter().map(|s| s.replace('.', "/")).collect();
     let mut found = 0u64;
-    let mut lookups = 0u64;
     // Lookups between clock reads, so reading the clock costs little.
     let reps = (4096 / subjects).max(1);
-    let start = Instant::now();
-    match kind {
+    let round = reps * subjects;
+    let (ns, lookups) = match kind {
         Kind::Hash => {
             let map: FxHashMap<Box<[u8]>, u32> = names
                 .iter()
                 .enumerate()
                 .map(|(i, s)| (s.as_bytes().into(), i as u32))
                 .collect();
-            while start.elapsed() < duration {
+            timed(duration, round, || {
                 for _ in 0..reps {
                     for s in &names {
                         found += u64::from(map.contains_key(black_box(s.as_bytes())));
                     }
                 }
-                lookups += (reps * names.len()) as u64;
-            }
+            })
         }
         Kind::Trie | Kind::Wild => {
             let mut trie = TopicTrie::new();
@@ -76,7 +74,7 @@ pub fn run(kind: Kind, subjects: usize, duration: Duration) -> Report {
                     trie.insert(&format!("orders/{i}/#"), i as u32);
                 }
             }
-            while start.elapsed() < duration {
+            timed(duration, round, || {
                 for _ in 0..reps {
                     for t in &topics {
                         trie.for_each_match(black_box(t), |v| {
@@ -85,17 +83,30 @@ pub fn run(kind: Kind, subjects: usize, duration: Duration) -> Report {
                         });
                     }
                 }
-                lookups += (reps * topics.len()) as u64;
-            }
+            })
         }
-    }
-    let ns = start.elapsed().as_secs_f64() * 1e9 / lookups as f64;
+    };
     Report {
         kind,
         subjects,
         ns_lookup: ns,
         matches: found as f64 / lookups as f64,
     }
+}
+
+/// Runs `round`, `lookups` lookups each, until `duration` is over, at
+/// least once. Returns nanoseconds per lookup and the lookups made.
+fn timed(duration: Duration, lookups: usize, mut round: impl FnMut()) -> (f64, u64) {
+    let start = Instant::now();
+    let mut made = 0u64;
+    loop {
+        round();
+        made += lookups as u64;
+        if start.elapsed() >= duration {
+            break;
+        }
+    }
+    (start.elapsed().as_secs_f64() * 1e9 / made as f64, made)
 }
 
 #[cfg(test)]
@@ -105,7 +116,8 @@ mod tests {
     #[test]
     fn every_kind_finds_its_subjects() {
         for kind in Kind::ALL {
-            let r = run(kind, 10, Duration::from_millis(5));
+            // Not even a moment: one round still counts.
+            let r = run(kind, 10, Duration::ZERO);
             assert!(r.ns_lookup > 0.0, "{r:?}");
             let want = if kind == Kind::Wild { 3.0 } else { 1.0 };
             assert!((r.matches - want).abs() < f64::EPSILON, "{r:?}");
