@@ -8,6 +8,7 @@
 mod control;
 mod data;
 mod interest;
+mod tell;
 
 pub(crate) use data::{gone, push};
 use interest::Heard;
@@ -135,6 +136,7 @@ fn socket_options(identity: Bytes) -> Options {
         identity,
         heartbeat_interval: Some(std::time::Duration::from_secs(1)),
         heartbeat_timeout: Some(std::time::Duration::from_secs(3)),
+        heartbeat_ttl: Some(std::time::Duration::from_secs(3)),
         handshake_timeout: Some(std::time::Duration::from_secs(3)),
         reconnect: omq_tokio::ReconnectPolicy::Fixed(std::time::Duration::from_millis(100)),
         ..Options::default()

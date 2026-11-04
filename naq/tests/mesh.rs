@@ -573,6 +573,8 @@ const OPEN: u8 = 0;
 const CUT: u8 = 1;
 const BLACKHOLE: u8 = 2;
 const STOPPED: u8 = 3;
+/// Reads nothing: what is sent backs up.
+const STALLED: u8 = 4;
 
 impl Proxy {
     fn to(port: u16) -> Proxy {
@@ -608,7 +610,13 @@ impl Proxy {
                     let state = state.clone();
                     std::thread::spawn(move || {
                         let mut buf = [0; 16 << 10];
-                        while let Ok(n @ 1..) = from.read(&mut buf) {
+                        loop {
+                            while state.load(Ordering::Relaxed) == STALLED {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            let Ok(n @ 1..) = from.read(&mut buf) else {
+                                break;
+                            };
                             if state.load(Ordering::Relaxed) == OPEN
                                 && to.write_all(&buf[..n]).is_err()
                             {
@@ -773,5 +781,86 @@ fn a_server_hears_of_much_interest_whole() {
     send(&mut c, &subs(N));
     until(&late, "/routez", |z| {
         route_subs(z, "n0") == Some(2 * N as u64)
+    });
+}
+
+#[test]
+fn a_server_that_falls_behind_holds_up_no_other() {
+    use std::fmt::Write as _;
+    // Long subjects: fewer deltas fill the route.
+    const N: usize = 30_000;
+    let (servers, proxies) = proxied();
+    let up: Vec<Option<&Server>> = servers.iter().map(Some).collect();
+    quiet(&up, together, &[Vec::new(), Vec::new(), Vec::new()]);
+    // What server 1 tells server 2 backs up.
+    proxies[2][1].as_ref().unwrap().set(STALLED);
+    let pad = "x".repeat(200);
+    let subs = (0..N).fold(String::new(), |mut all, i| {
+        write!(all, "SUB s.{i}.{pad} {i}\r\n").unwrap();
+        all
+    });
+    let _c = client(&servers[1], &subs);
+    until(&servers[0], "/routez", |z| {
+        route_subs(z, "n1") == Some(N as u64)
+    });
+    // And it catches up once it reads again.
+    proxies[2][1].as_ref().unwrap().set(OPEN);
+    until(&servers[2], "/routez", |z| {
+        route_subs(z, "n1") == Some(N as u64)
+    });
+}
+
+#[test]
+fn a_server_that_asks_again_gets_a_snapshot_again() {
+    use bytes::Bytes;
+    use naq_proto::peer::{self, Control, Hello};
+    use omq_tokio::{Message, Socket};
+    // The subjects of the next snapshot `d` gets, past beats.
+    async fn snapshot(d: &Socket) -> Vec<String> {
+        let mut subjects = Vec::new();
+        loop {
+            let msg = tokio::time::timeout(WAIT, d.recv()).await.unwrap().unwrap();
+            match peer::decode(&msg.into_bytes().unwrap()).unwrap() {
+                Control::Entry(i) => subjects.push(String::from_utf8_lossy(i.subject).into_owned()),
+                Control::SnapshotEnd { .. } => return subjects,
+                _ => {}
+            }
+        }
+    }
+    let encode = |c: Control<'_>| {
+        let mut out = Vec::new();
+        c.encode(&mut out);
+        Message::single(Bytes::from(out))
+    };
+    let ports = [free_port(), free_port()];
+    let s = member(0, &ports);
+    let _c = client(&s, "SUB a 1\r\n");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let d = omq_tokio::Context::current().socket(
+            omq_tokio::SocketType::Dealer,
+            omq_tokio::Options {
+                identity: Bytes::from_static(b"FAKE"),
+                ..omq_tokio::Options::default()
+            },
+        );
+        d.connect(format!("tcp://{}", s.cluster_addr().unwrap()))
+            .await
+            .unwrap();
+        let hello = Control::Hello(Hello {
+            epoch: 1,
+            server_id: b"FAKE",
+            name: b"fake",
+            cluster: b"c",
+            data: b"",
+            client_urls: b"",
+        });
+        d.send(encode(hello)).await.unwrap();
+        assert_eq!(snapshot(&d).await, ["a"]);
+        d.send(encode(Control::Resync)).await.unwrap();
+        assert_eq!(snapshot(&d).await, ["a"]);
     });
 }

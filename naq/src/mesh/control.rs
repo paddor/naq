@@ -3,7 +3,6 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use naq_proto::peer::{self, Control, Hello};
@@ -14,9 +13,6 @@ use super::{Mesh, Peer, endpoint, route, socket_options};
 use crate::Cluster;
 use crate::lane::Control as LaneControl;
 use crate::server::Shared;
-
-/// How often the deltas sent so far are told.
-const BEAT: Duration = Duration::from_secs(1);
 
 /// What this server tells the others of itself.
 #[derive(Debug)]
@@ -77,62 +73,7 @@ pub(super) async fn serve(
     for i in 0..c.routes.len() {
         tokio::task::spawn_local(dial(shared.clone(), mesh.clone(), me.clone(), i));
     }
-    answer(router, &me, mesh).await;
-}
-
-/// Answers each server that dials this one: with this one's `Hello` and a
-/// snapshot of its interest, then the deltas and beats of it.
-async fn answer(router: Socket, me: &Me, mesh: &Mesh) {
-    let Ok(ids) = router.identity_routing() else {
-        return;
-    };
-    // The servers that dialed this one, by routing identity.
-    let mut others: Vec<Bytes> = Vec::new();
-    let mut beat = tokio::time::interval(BEAT);
-    loop {
-        // Cancel-safe: a dropped receive takes no message, a dropped
-        // `notified` keeps its permit, and the interval keeps its deadline.
-        tokio::select! {
-            got = ids.recv_from() => {
-                let Ok((who, msg)) = got else { return };
-                let Ok(bytes) = msg.into_bytes() else { continue };
-                let who = who.to_bytes();
-                match peer::decode(&bytes) {
-                    Ok(Control::Hello(h)) if h.cluster == me.cluster.as_bytes() => {
-                        if !others.contains(&who) {
-                            others.push(who.clone());
-                        }
-                        let _ = ids.send_to(&who, Message::single(me.hello.clone())).await;
-                        snapshot(&ids, &who, mesh).await;
-                    }
-                    Ok(Control::Resync) if others.contains(&who) => {
-                        snapshot(&ids, &who, mesh).await;
-                    }
-                    _ => {}
-                }
-            }
-            () = mesh.told.wake.notified() => {
-                for delta in mesh.told.take() {
-                    for who in &others {
-                        let _ = ids.send_to(who, Message::single(delta.clone())).await;
-                    }
-                }
-            }
-            _ = beat.tick() => {
-                let b = mesh.told.beat();
-                for who in &others {
-                    let _ = ids.send_to(who, Message::single(b.clone())).await;
-                }
-            }
-        }
-    }
-}
-
-/// Sends `who` a snapshot of this server's interest.
-async fn snapshot(ids: &omq_tokio::IdentitySocket, who: &Bytes, mesh: &Mesh) {
-    for part in mesh.told.snapshot() {
-        let _ = ids.send_to(who, Message::single(part)).await;
-    }
+    super::tell::answer(router, &me.cluster, &me.hello, mesh).await;
 }
 
 /// Dials route `i` of `mesh` and keeps track of the server there: says

@@ -225,8 +225,9 @@ Notable changes to naq. The format follows
 - `naq`: the servers of a cluster tell each other of their clients'
   interest: a snapshot on each connection, then numbered deltas and beats;
   a server that sees a gap, or a snapshot cut short, asks for a snapshot
-  again. A server waits for a peer that is behind rather than drop part of
-  a snapshot. Plain interest is
+  again. Each server told has a sender and a queue of its own, so one that
+  falls behind holds up no other; past 65536 waiting messages, a snapshot
+  replaces them. Plain interest is
   told once, a queue group with its member count. A server gone takes its
   interest with it. `/routez` counts each route's subscriptions.
 - `naq`: messages cross the cluster. A message goes once to each other
