@@ -8,9 +8,11 @@ The server runs core publish and subscribe: wildcards, queue groups,
 `UNSUB` maximums, accounts, users with passwords, tokens or NKeys,
 permissions, over TCP, TLS and WebSocket. It links to `nats-server` hubs
 as a leaf node, over TCP, TLS or WebSocket, with credentials, failover
-across a hub cluster and the hub's permissions. It reads `nats-server`
+across a hub cluster and the hub's permissions. Servers of one cluster
+mesh over OMQ: they share their clients' interest, carry messages one hop
+and tell clients of each other for failover. It reads `nats-server`
 configuration files (`naq -c FILE`), the keys it serves so far, and serves
-`/healthz`, `/varz`, `/connz` and `/leafz` (`naq -m PORT`).
+`/healthz`, `/varz`, `/connz`, `/routez` and `/leafz` (`naq -m PORT`).
 
 | Crate | Role |
 | --- | --- |

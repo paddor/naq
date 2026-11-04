@@ -26,31 +26,111 @@ fn free_port() -> u16 {
     }
 }
 
+/// Server `n{i}` of cluster `c`, two lanes, on cluster port `port` with
+/// routes to `routes`.
+fn node(i: usize, port: u16, routes: &[u16]) -> Server {
+    Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        http_port: Some(0),
+        server_name: format!("n{i}"),
+        cluster: Some(Cluster {
+            name: "c".into(),
+            host: "127.0.0.1".into(),
+            port,
+            routes: routes
+                .iter()
+                .map(|p| format!("nats-route://127.0.0.1:{p}"))
+                .collect(),
+        }),
+        ..Options::default()
+    })
+    .unwrap()
+}
+
+/// Server `i` of a cluster on `ports`, with routes to all the others.
+fn member(i: usize, ports: &[u16]) -> Server {
+    let others: Vec<u16> = (0..ports.len())
+        .filter(|&j| j != i)
+        .map(|j| ports[j])
+        .collect();
+    node(i, ports[i], &others)
+}
+
 /// `n` servers of cluster `c`, each with routes to all the others.
 fn cluster(n: usize) -> Vec<Server> {
     let ports: Vec<u16> = (0..n).map(|_| free_port()).collect();
-    (0..n)
-        .map(|i| {
-            Server::start(&Options {
-                host: "127.0.0.1".into(),
-                port: 0,
-                lanes: 2,
-                http_port: Some(0),
-                server_name: format!("n{i}"),
-                cluster: Some(Cluster {
-                    name: "c".into(),
-                    host: "127.0.0.1".into(),
-                    port: ports[i],
-                    routes: (0..n)
-                        .filter(|&j| j != i)
-                        .map(|j| format!("nats-route://127.0.0.1:{}", ports[j]))
-                        .collect(),
-                }),
-                ..Options::default()
-            })
-            .unwrap()
+    (0..n).map(|i| member(i, &ports)).collect()
+}
+
+/// Interest one server tells the others of: subject, queue group and its
+/// members there, 1 for plain interest.
+type Told = (String, Option<String>, u64);
+
+/// `entries`, sorted, as [`heard`] gives them.
+fn told(entries: &[(&str, Option<&str>, u64)]) -> Vec<Told> {
+    let mut all: Vec<Told> = entries
+        .iter()
+        .map(|&(s, q, w)| (s.to_owned(), q.map(str::to_owned), w))
+        .collect();
+    all.sort();
+    all
+}
+
+/// What `s` heard of the interest of server `name`, sorted; `None`
+/// while its route is down.
+fn heard(s: &Server, name: &str) -> Option<Vec<Told>> {
+    let z = get(s, "/routez?subs=detail");
+    let r = z["routes"]
+        .as_array()?
+        .iter()
+        .find(|r| r["remote_name"] == name)?;
+    let mut all: Vec<Told> = r["subscriptions_list_detail"]
+        .as_array()
+        .map(|subs| {
+            subs.iter()
+                .map(|d| {
+                    (
+                        d["subject"].as_str().unwrap().to_owned(),
+                        d["qgroup"].as_str().map(str::to_owned),
+                        d["queue_weight"].as_u64().unwrap_or(1),
+                    )
+                })
+                .collect()
         })
-        .collect()
+        .unwrap_or_default();
+    all.sort();
+    Some(all)
+}
+
+/// The oracle of a quiet cluster. Waits until each server `n{i}` that is
+/// up, `Some` in `servers`, heard of each other one `n{j}` what `want[j]`
+/// says of its clients, if `apart(i, j)` does not keep them apart, and
+/// has no route to it otherwise.
+fn quiet(servers: &[Option<&Server>], apart: impl Fn(usize, usize) -> bool, want: &[Vec<Told>]) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let mut wrong = None;
+        for (i, s) in servers.iter().enumerate() {
+            let Some(s) = s else { continue };
+            for (j, other) in servers.iter().enumerate().filter(|&(j, _)| j != i) {
+                let got = heard(s, &format!("n{j}"));
+                let expect = other.filter(|_| !apart(i, j)).map(|_| want[j].clone());
+                if got != expect {
+                    wrong = Some(format!("n{i} heard of n{j}: {got:?}, not {expect:?}"));
+                }
+            }
+        }
+        let Some(wrong) = wrong else { return };
+        assert!(Instant::now() < deadline, "{wrong}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Never apart.
+const fn together(_: usize, _: usize) -> bool {
+    false
 }
 
 /// `GET path` on `s`'s monitoring port.
@@ -189,21 +269,38 @@ fn route_subs(z: &serde_json::Value, name: &str) -> Option<u64> {
 
 #[test]
 fn the_others_hear_of_the_interest_of_a_servers_clients() {
-    let servers = cluster(3);
-    for s in &servers {
-        until(s, "/routez", |z| z["num_routes"] == 2);
-    }
+    let servers = met_cluster();
+    let up: Vec<Option<&Server>> = servers.iter().map(Some).collect();
+    let none = Vec::new();
     let mut c = client(&servers[1], "SUB a 1\r\nSUB a 2\r\nSUB w.* q 3\r\n");
-    for s in [&servers[0], &servers[2]] {
-        until(s, "/routez", |z| route_subs(z, "n1") == Some(2));
-    }
-    c.get_mut()
-        .write_all(b"UNSUB 1\r\nUNSUB 3\r\nPING\r\n")
-        .unwrap();
+    let d = client(&servers[1], "SUB w.* q 1\r\n");
+    let n1 = told(&[("a", None, 1), ("w.*", Some("q"), 2)]);
+    quiet(&up, together, &[none.clone(), n1, none.clone()]);
+    let z = get(&servers[0], "/routez?subs=1");
+    let mut subjects = z["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["remote_name"] == "n1")
+        .unwrap()["subscriptions_list"]
+        .clone();
+    subjects
+        .as_array_mut()
+        .unwrap()
+        .sort_by_key(ToString::to_string);
+    assert_eq!(subjects, serde_json::json!(["a", "w.*"]));
+    assert!(
+        get(&servers[0], "/routez")
+            .to_string()
+            .find("subscriptions_list")
+            .is_none()
+    );
+    send(&mut c, "UNSUB 1\r\nUNSUB 3\r\nPING\r\n");
     // One subscription to a stays: the others hear of no change for it.
-    until(&servers[0], "/routez", |z| route_subs(z, "n1") == Some(1));
-    drop(c);
-    until(&servers[2], "/routez", |z| route_subs(z, "n1") == Some(0));
+    let n1 = told(&[("a", None, 1), ("w.*", Some("q"), 1)]);
+    quiet(&up, together, &[none.clone(), n1, none.clone()]);
+    drop((c, d));
+    quiet(&up, together, &[none.clone(), none.clone(), none]);
 }
 
 #[test]
@@ -430,4 +527,251 @@ fn clients_hear_where_the_clients_of_the_others_connect() {
     let mut want: Vec<String> = servers[1..].iter().map(|s| s.addr().to_string()).collect();
     want.sort();
     assert_eq!(others, want);
+}
+
+#[test]
+fn a_server_that_starts_again_is_heard_anew() {
+    let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
+    let (zero, two) = (member(0, &ports), member(2, &ports));
+    let one = member(1, &ports);
+    let none = Vec::new();
+    let _old = client(&one, "SUB old 1\r\nSUB q.* g 2\r\n");
+    let n1 = told(&[("old", None, 1), ("q.*", Some("g"), 1)]);
+    quiet(
+        &[Some(&zero), Some(&one), Some(&two)],
+        together,
+        &[none.clone(), n1, none.clone()],
+    );
+    drop(one);
+    quiet(
+        &[Some(&zero), None, Some(&two)],
+        together,
+        &[none.clone(), none.clone(), none.clone()],
+    );
+    // On its cluster port again, with data links of a new start.
+    let one = member(1, &ports);
+    let mut new = client(&one, "SUB new 1\r\n");
+    let n1 = told(&[("new", None, 1)]);
+    quiet(
+        &[Some(&zero), Some(&one), Some(&two)],
+        together,
+        &[none.clone(), n1, none],
+    );
+    let mut p = client(&zero, "");
+    until_heard(&mut p, &mut new, "new");
+}
+
+/// A TCP proxy to a port, to cut or blackhole what goes through it.
+struct Proxy {
+    port: u16,
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    conns: std::sync::Arc<std::sync::Mutex<Vec<TcpStream>>>,
+}
+
+/// [`Proxy`] states.
+const OPEN: u8 = 0;
+const CUT: u8 = 1;
+const BLACKHOLE: u8 = 2;
+const STOPPED: u8 = 3;
+
+impl Proxy {
+    fn to(port: u16) -> Proxy {
+        use std::sync::atomic::Ordering;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let p = Proxy {
+            port: l.local_addr().unwrap().port(),
+            state: std::sync::Arc::default(),
+            conns: std::sync::Arc::default(),
+        };
+        let (state, conns) = (p.state.clone(), p.conns.clone());
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                // Relaxed: a test switch, nothing else hangs on it.
+                let now = state.load(Ordering::Relaxed);
+                let Ok(c) = c else { return };
+                if now == STOPPED {
+                    return;
+                }
+                if now == CUT {
+                    continue;
+                }
+                let Ok(up) = TcpStream::connect(("127.0.0.1", port)) else {
+                    continue;
+                };
+                conns
+                    .lock()
+                    .unwrap()
+                    .extend([c.try_clone().unwrap(), up.try_clone().unwrap()]);
+                for (mut from, mut to) in
+                    [(c.try_clone().unwrap(), up.try_clone().unwrap()), (up, c)]
+                {
+                    let state = state.clone();
+                    std::thread::spawn(move || {
+                        let mut buf = [0; 16 << 10];
+                        while let Ok(n @ 1..) = from.read(&mut buf) {
+                            if state.load(Ordering::Relaxed) == OPEN
+                                && to.write_all(&buf[..n]).is_err()
+                            {
+                                break;
+                            }
+                        }
+                        // A blackhole tells of no end either.
+                        if state.load(Ordering::Relaxed) != BLACKHOLE {
+                            let _ = to.shutdown(std::net::Shutdown::Both);
+                        }
+                    });
+                }
+            }
+        });
+        p
+    }
+
+    /// Closes what goes through it, and what comes, until set [`OPEN`].
+    fn cut(&self) {
+        self.set(CUT);
+        self.close();
+    }
+
+    fn close(&self) {
+        for c in self.conns.lock().unwrap().drain(..) {
+            let _ = c.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    fn set(&self, state: u8) {
+        self.state
+            .store(state, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.set(STOPPED);
+        self.close();
+        // Wakes its accept.
+        let _ = TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
+/// Three servers whose routes go through proxies, by server and route.
+fn proxied() -> (Vec<Server>, Vec<Vec<Option<Proxy>>>) {
+    let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
+    let proxies: Vec<Vec<Option<Proxy>>> = (0..3)
+        .map(|i| {
+            (0..3)
+                .map(|j| (i != j).then(|| Proxy::to(ports[j])))
+                .collect()
+        })
+        .collect();
+    let servers = (0..3)
+        .map(|i| {
+            let routes: Vec<u16> = proxies[i].iter().flatten().map(|p| p.port).collect();
+            node(i, ports[i], &routes)
+        })
+        .collect();
+    (servers, proxies)
+}
+
+/// Sets every proxy between server 2 and the others to `state`.
+fn isolate_two(proxies: &[Vec<Option<Proxy>>], state: u8) {
+    for (i, j) in [(0, 2), (2, 0), (1, 2), (2, 1)] {
+        let p = proxies[i][j].as_ref().unwrap();
+        if state == CUT {
+            p.cut();
+        } else {
+            p.set(state);
+        }
+    }
+}
+
+/// Server 2 is apart from the others.
+const fn two_apart(i: usize, j: usize) -> bool {
+    (i == 2) != (j == 2)
+}
+
+/// Server 2's interest changes while it is apart; once back, each side
+/// hears the other as it is now, and messages cross again.
+fn partition_heals(state: u8) {
+    let (servers, proxies) = proxied();
+    let up: Vec<Option<&Server>> = servers.iter().map(Some).collect();
+    let none = Vec::new();
+    let mut before = client(&servers[2], "SUB before 1\r\nSUB g g 2\r\n");
+    let n2 = told(&[("before", None, 1), ("g", Some("g"), 1)]);
+    quiet(&up, together, &[none.clone(), none.clone(), n2]);
+    isolate_two(&proxies, state);
+    quiet(&up, two_apart, &[none.clone(), none.clone(), none.clone()]);
+    send(&mut before, "UNSUB 1\r\nSUB during 3\r\n");
+    let mut zero = client(&servers[0], "SUB zero 1\r\n");
+    let (n0, n2) = (
+        told(&[("zero", None, 1)]),
+        told(&[("during", None, 1), ("g", Some("g"), 1)]),
+    );
+    // Long enough for the routes to be dialed again, into the partition.
+    std::thread::sleep(Duration::from_millis(500));
+    isolate_two(&proxies, OPEN);
+    quiet(&up, together, &[n0, none, n2]);
+    until_heard(&mut zero, &mut before, "during");
+    until_heard(&mut before, &mut zero, "zero");
+}
+
+#[test]
+fn a_cut_from_the_cluster_heals() {
+    partition_heals(CUT);
+}
+
+#[test]
+fn a_silent_partition_heals() {
+    partition_heals(BLACKHOLE);
+}
+
+#[test]
+fn a_publisher_goes_on_when_a_server_with_interest_dies_unseen() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (mut servers, proxies) = proxied();
+    let mut sub = client(&servers[2], "SUB x 1\r\n");
+    let mut p = client(&servers[0], "");
+    until_heard(&mut p, &mut sub, "x");
+    // Its data links close; its routes, silent, stay up for a while.
+    isolate_two(&proxies, BLACKHOLE);
+    drop((sub, servers.pop()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let mut w = p.get_ref().try_clone().unwrap();
+    let writer = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            // Relaxed: a test switch.
+            while !stop.load(Ordering::Relaxed) {
+                w.write_all(b"PUB x 1\r\na\r\n").unwrap();
+            }
+            w.write_all(b"PING\r\n").unwrap();
+        })
+    };
+    let up = [Some(&servers[0]), Some(&servers[1]), None];
+    quiet(&up, together, &[Vec::new(), Vec::new(), Vec::new()]);
+    stop.store(true, Ordering::Relaxed);
+    // Past the server's own `PING`s.
+    while line(&mut p) != "PONG" {}
+    writer.join().unwrap();
+}
+
+#[test]
+fn a_server_hears_of_much_interest_whole() {
+    const N: usize = 20_000;
+    let ports: Vec<u16> = (0..2).map(|_| free_port()).collect();
+    let first = member(0, &ports);
+    let subs = |from: usize| -> String {
+        use std::fmt::Write as _;
+        (from..from + N).fold(String::new(), |mut all, i| {
+            write!(all, "SUB s.{i} {i}\r\n").unwrap();
+            all
+        })
+    };
+    let mut c = client(&first, &subs(0));
+    // All of it in its snapshot, then as many again in deltas.
+    let late = member(1, &ports);
+    until(&late, "/routez", |z| route_subs(z, "n0") == Some(N as u64));
+    send(&mut c, &subs(N));
+    until(&late, "/routez", |z| {
+        route_subs(z, "n0") == Some(2 * N as u64)
+    });
 }

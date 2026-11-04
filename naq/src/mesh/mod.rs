@@ -9,7 +9,8 @@ mod control;
 mod data;
 mod interest;
 
-pub(crate) use data::push;
+pub(crate) use data::{gone, push};
+use interest::Heard;
 pub(crate) use interest::Told;
 
 use std::cell::RefCell;
@@ -121,18 +122,20 @@ pub(crate) struct Peer {
     pub(crate) epoch: u64,
     /// The data endpoint of each of its lanes.
     pub(crate) data: Vec<String>,
-    /// Entries of its interest, as applied.
-    pub(crate) subscriptions: usize,
+    /// Its interest, as applied.
+    pub(crate) heard: Heard,
     /// Where its clients connect.
     pub(crate) client_urls: Vec<String>,
 }
 
-/// Options of every socket of the mesh: heartbeats find a peer gone.
+/// Options of every socket of the mesh: heartbeats find a peer gone, and
+/// a connection that does not greet in time is tried again.
 fn socket_options(identity: Bytes) -> Options {
     Options {
         identity,
         heartbeat_interval: Some(std::time::Duration::from_secs(1)),
         heartbeat_timeout: Some(std::time::Duration::from_secs(3)),
+        handshake_timeout: Some(std::time::Duration::from_secs(3)),
         reconnect: omq_tokio::ReconnectPolicy::Fixed(std::time::Duration::from_millis(100)),
         ..Options::default()
     }
@@ -161,7 +164,15 @@ pub(crate) async fn run(
     let mesh = std::rc::Rc::new(Mesh::new(epoch, shared.accounts.clone()));
     *lane.mesh.borrow_mut() = Some(mesh.clone());
     let ctx = omq_tokio::Context::current();
-    let router = ctx.socket(SocketType::Router, socket_options(Bytes::new()));
+    // Mandatory: a peer's full queue holds the sender up instead of losing
+    // part of a snapshot.
+    let router = ctx.socket(
+        SocketType::Router,
+        Options {
+            router_mandatory: true,
+            ..socket_options(Bytes::new())
+        },
+    );
     let bound = match router.bind(endpoint(&c.host, c.port)).await {
         Ok(at) => at.to_string(),
         Err(e) => {

@@ -138,8 +138,8 @@ fn name(accounts: &[String], id: u32) -> &[u8] {
 type Entries = FxHashMap<Key<Box<[u8]>>, u32>;
 
 /// What one other server told this one, by account name, as applied.
-#[derive(Debug, Default)]
-pub(super) struct Heard {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Heard {
     epoch: u64,
     /// The last delta applied; `None` until a snapshot is in.
     seq: Option<u64>,
@@ -151,7 +151,7 @@ pub(super) struct Heard {
 
 /// A change of a server's interest: account name, filter, queue group and
 /// the members now, 0 for none.
-pub(super) type Change<'a> = (&'a [u8], &'a [u8], Option<&'a [u8]>, u32);
+pub(crate) type Change<'a> = (&'a [u8], &'a [u8], Option<&'a [u8]>, u32);
 
 impl Heard {
     /// Takes control message `c` of the other server, and calls `apply`
@@ -201,8 +201,13 @@ impl Heard {
             },
             Control::Beat { epoch, seq } if epoch == self.epoch => match self.seq {
                 Some(last) if seq > last => self.lost(),
-                // Still no snapshot: the ask may have been lost.
-                None => self.coming.is_none(),
+                // Still no snapshot: the ask, or the end of a snapshot, may
+                // have been lost. A snapshot is sent whole, with no beat
+                // in it.
+                None => {
+                    self.coming = None;
+                    true
+                }
                 Some(_) => false,
             },
             _ => false,
@@ -222,8 +227,15 @@ impl Heard {
     }
 
     /// Entries of the other server's interest, as applied.
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.view.len()
+    }
+
+    /// The other server's interest, as applied, in no order.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = Change<'_>> {
+        self.view
+            .iter()
+            .map(|(k, &w)| (&*k.0, &*k.1, k.2.as_deref(), w))
     }
 
     /// Makes `entries` the view, applying what differs.
@@ -372,6 +384,23 @@ mod tests {
             feed(&mut h, &[Control::Beat { epoch: 1, seq: 1 }]).1,
             [true]
         );
+    }
+
+    #[test]
+    fn a_beat_in_a_snapshot_asks_for_it_again() {
+        let mut h = Heard::default();
+        let cut = [
+            hello(1),
+            Control::SnapshotStart { epoch: 1, seq: 0 },
+            Control::Entry(interest(b"a", 1)),
+            Control::Beat { epoch: 1, seq: 0 },
+            Control::SnapshotEnd { epoch: 1 },
+        ];
+        let (changes, asks) = feed(&mut h, &cut);
+        assert_eq!(asks, [false, false, false, true, false]);
+        // What came of it is dropped, and its end does not apply it.
+        assert_eq!(changes, Vec::<(String, u32)>::new());
+        assert_eq!(h.len(), 0);
     }
 
     #[test]

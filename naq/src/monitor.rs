@@ -132,6 +132,15 @@ pub(crate) fn links(lane: &Lane) -> Vec<LeafInfo> {
         .collect()
 }
 
+/// How much of each route's subscriptions `/routez` lists: `subs=1`
+/// for subjects, `subs=detail` for details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Subs {
+    None,
+    List,
+    Detail,
+}
+
 /// One route of the cluster, as `/routez` shows it.
 #[derive(Debug, Serialize)]
 pub(crate) struct RouteInfo {
@@ -143,11 +152,31 @@ pub(crate) struct RouteInfo {
     ip: String,
     port: u16,
     subscriptions: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    subscriptions_list: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    subscriptions_list_detail: Vec<SubDetail>,
+}
+
+/// One subscription a route told of, as `nats-server` details it, and
+/// the members of its queue group there.
+#[derive(Debug, Serialize)]
+pub(crate) struct SubDetail {
+    account: String,
+    subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qgroup: Option<String>,
+    sid: String,
+    msgs: u64,
+    cid: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_weight: Option<u32>,
 }
 
 /// The routes of the cluster to servers that are up, as lane 0 knows
-/// them; none on other lanes.
-pub(crate) fn routes(lane: &Lane) -> Vec<RouteInfo> {
+/// them, with as much of their subscriptions as `subs` asks; none on
+/// other lanes.
+pub(crate) fn routes(lane: &Lane, subs: Subs) -> Vec<RouteInfo> {
     let Some(mesh) = lane.mesh.borrow().clone() else {
         return Vec::new();
     };
@@ -156,17 +185,53 @@ pub(crate) fn routes(lane: &Lane) -> Vec<RouteInfo> {
         .iter()
         .enumerate()
         .filter(|(_, p)| p.up)
-        .map(|(i, p)| RouteInfo {
-            rid: i + 1,
-            remote_id: p.server_id.clone(),
-            remote_name: p.name.clone(),
-            did_solicit: true,
-            is_configured: true,
-            ip: p.host.clone(),
-            port: p.port,
-            subscriptions: p.subscriptions,
+        .map(|(i, p)| {
+            let mut r = RouteInfo {
+                rid: i + 1,
+                remote_id: p.server_id.clone(),
+                remote_name: p.name.clone(),
+                did_solicit: true,
+                is_configured: true,
+                ip: p.host.clone(),
+                port: p.port,
+                subscriptions: p.heard.len(),
+                subscriptions_list: Vec::new(),
+                subscriptions_list_detail: Vec::new(),
+            };
+            match subs {
+                Subs::None => {}
+                Subs::List => r.subscriptions_list = p.heard.entries().map(|e| text(e.1)).collect(),
+                Subs::Detail => {
+                    r.subscriptions_list_detail = p
+                        .heard
+                        .entries()
+                        .map(|(account, subject, queue, weight)| SubDetail {
+                            account: text(account),
+                            subject: text(subject),
+                            qgroup: queue.map(text),
+                            sid: sid(account, subject, queue),
+                            msgs: 0,
+                            cid: i + 1,
+                            queue_weight: queue.map(|_| weight),
+                        })
+                        .collect();
+                }
+            }
+            r
         })
         .collect()
+}
+
+fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+/// The ID `nats-server` gives a subscription of a route: `R`, the
+/// account, the subject and the queue group, if one.
+fn sid(account: &[u8], subject: &[u8], queue: Option<&[u8]>) -> String {
+    let mut parts = vec![&b"R"[..], account, subject];
+    parts.extend(queue);
+    text(&parts.join(&b' '))
 }
 
 /// Serves monitoring on `listener` until it closes.
@@ -242,7 +307,7 @@ async fn answer(shared: &Shared, target: &str) -> (&'static str, Vec<u8>) {
         "/varz" => varz(shared),
         "/connz" => connz(shared).await,
         "/leafz" => leafz(shared, wants_subs(query)).await,
-        "/routez" => routez(shared).await,
+        "/routez" => routez(shared, subs(query)).await,
         _ => return ("404 Not Found", b"{\"error\":\"not found\"}".to_vec()),
     };
     // Cannot fail: plain values only.
@@ -339,9 +404,24 @@ fn wants_subs(query: &str) -> bool {
         .any(|kv| matches!(kv, "subs=1" | "subs=true"))
 }
 
-async fn routez(shared: &Shared) -> serde_json::Value {
+/// How much of the subscriptions `query` asks for: `subs=detail`, else
+/// as [`wants_subs`].
+fn subs(query: &str) -> Subs {
+    if query
+        .split('&')
+        .any(|kv| kv.eq_ignore_ascii_case("subs=detail"))
+    {
+        Subs::Detail
+    } else if wants_subs(query) {
+        Subs::List
+    } else {
+        Subs::None
+    }
+}
+
+async fn routez(shared: &Shared, subs: Subs) -> serde_json::Value {
     let (answer, wait) = oneshot::channel();
-    shared.lanes[0].control(Control::Routes(answer));
+    shared.lanes[0].control(Control::Routes(subs, answer));
     // A lane that stopped has no routes to show.
     let routes = wait.await.unwrap_or_default();
     serde_json::json!({

@@ -73,10 +73,16 @@ pub(crate) enum Control {
     },
     /// Server `server` of the cluster takes this lane's data at `endpoint`.
     Push { server: u16, endpoint: String },
+    /// Server `server` of the cluster is gone: its data link closes, and
+    /// sends waiting on it give up.
+    Gone { server: u16 },
     /// Answered with the lane's leaf node links, for monitoring.
     Links(oneshot::Sender<Vec<crate::monitor::LeafInfo>>),
     /// Answered by lane 0 with the routes of the cluster, for monitoring.
-    Routes(oneshot::Sender<Vec<crate::monitor::RouteInfo>>),
+    Routes(
+        crate::monitor::Subs,
+        oneshot::Sender<Vec<crate::monitor::RouteInfo>>,
+    ),
 }
 
 /// The ways into a lane, for every lane.
@@ -288,11 +294,12 @@ impl Lane {
                     .server(&subject, queue.as_deref(), server, weight);
             }
             Control::Push { server, endpoint } => crate::mesh::push(self, server, &endpoint),
+            Control::Gone { server } => crate::mesh::gone(self, server),
             Control::Links(answer) => {
                 let _ = answer.send(crate::monitor::links(self));
             }
-            Control::Routes(answer) => {
-                let _ = answer.send(crate::monitor::routes(self));
+            Control::Routes(subs, answer) => {
+                let _ = answer.send(crate::monitor::routes(self, subs));
             }
         }
     }

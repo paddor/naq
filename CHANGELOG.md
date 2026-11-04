@@ -220,10 +220,13 @@ Notable changes to naq. The format follows
   `Server::cluster_addr` gives, dials every route over OMQ and greets the
   server there; each lane binds a data socket. `/routez` shows the routes
   to servers that answered. A server of another cluster name is not met;
-  one that stops leaves the routes.
+  one that stops leaves the routes. A route that does not greet in 3 s is
+  dialed again.
 - `naq`: the servers of a cluster tell each other of their clients'
   interest: a snapshot on each connection, then numbered deltas and beats;
-  a server that sees a gap asks for a snapshot again. Plain interest is
+  a server that sees a gap, or a snapshot cut short, asks for a snapshot
+  again. A server waits for a peer that is behind rather than drop part of
+  a snapshot. Plain interest is
   told once, a queue group with its member count. A server gone takes its
   interest with it. `/routez` counts each route's subscriptions.
 - `naq`: messages cross the cluster. A message goes once to each other
@@ -232,9 +235,13 @@ Notable changes to naq. The format follows
   members here and at other servers, each counted as its weight. The
   receiving server delivers to its clients, lanes and links, and to no
   other server. A message of a hub stays with the server linked to it, as
-  in `nats-server`: every server links to the hub of its own.
+  in `nats-server`: every server links to the hub of its own. A server
+  gone closes the data links to it: a publisher waiting on one goes on.
 - `naq`: a client of a cluster server gets `connect_urls` in `INFO`: its
   server's client address, then those of the other servers that are up.
+- `naq`: `/routez?subs=1` and `subs=detail` list each route's
+  subscriptions, as `nats-server` does. A detail of a queue group adds its
+  members at that server as `queue_weight`.
 
 ### Changed
 

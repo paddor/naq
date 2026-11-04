@@ -25,6 +25,21 @@ pub(crate) fn push(lane: &Lane, server: u16, endpoint: &str) {
     }
 }
 
+/// Closes `lane`'s data link to server `server`, by route: sends waiting
+/// on it fail, and what it holds is dropped.
+pub(crate) fn gone(lane: &Lane, server: u16) {
+    let link = lane
+        .pushes
+        .borrow_mut()
+        .get_mut(usize::from(server))
+        .and_then(Option::take);
+    if let Some(s) = link {
+        tokio::task::spawn_local(async move {
+            let _ = s.close().await;
+        });
+    }
+}
+
 /// Routes what the other servers send `lane` on `pull`: to its clients,
 /// its other lanes and its links, never to another server.
 pub(super) async fn receive(lane: Rc<Lane>, pull: Socket) {

@@ -9,7 +9,7 @@ use bytes::Bytes;
 use naq_proto::peer::{self, Control, Hello};
 use omq_tokio::{Message, MonitorEvent, Socket, SocketType};
 
-use super::interest::{Change, Heard};
+use super::interest::Change;
 use super::{Mesh, Peer, endpoint, route, socket_options};
 use crate::Cluster;
 use crate::lane::Control as LaneControl;
@@ -149,7 +149,6 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
     if s.connect(endpoint(&host, port)).await.is_err() {
         return;
     }
-    let mut heard = Heard::default();
     let mut apply = |c: Change<'_>| server_interest(&shared, i, c);
     loop {
         // Cancel-safe: a dropped receive takes no message or event.
@@ -159,11 +158,16 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                     let _ = s.send(Message::single(me.hello.clone())).await;
                 }
                 Ok(MonitorEvent::Disconnected { .. }) => {
-                    heard.forget(&mut apply);
                     {
                         let mut peers = mesh.peers.borrow_mut();
+                        peers[i].heard.forget(&mut apply);
                         peers[i].up = false;
-                        peers[i].subscriptions = 0;
+                        // Linked again at its next `Hello`.
+                        peers[i].data.clear();
+                    }
+                    for tx in &*shared.lanes {
+                        // Routes are few: their count fits.
+                        tx.control(LaneControl::Gone { server: i as u16 });
                     }
                     connect_urls(&shared, &mesh);
                 }
@@ -179,12 +183,12 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                 {
                     continue;
                 }
-                if heard.take(&c, &mut apply) {
+                let lost = mesh.peers.borrow_mut()[i].heard.take(&c, &mut apply);
+                if lost {
                     let mut out = Vec::new();
                     Control::Resync.encode(&mut out);
                     let _ = s.send(Message::single(Bytes::from(out))).await;
                 }
-                mesh.peers.borrow_mut()[i].subscriptions = heard.len();
             }
         }
     }
