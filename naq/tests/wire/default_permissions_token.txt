@@ -1,0 +1,7 @@
+# Default permissions do not go to token clients.
+#! authorization { token: t, default_permissions: { publish: "x" } }
+
+a> CONNECT {"verbose":false,"auth_token":"t"}
+a> PUB y 1
+a> z
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}

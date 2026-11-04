@@ -36,11 +36,16 @@ pub struct Options {
     /// Accounts besides the global one, `$G`, by name (`accounts`). Each has
     /// subjects of its own.
     pub accounts: Vec<String>,
-    /// Who may connect (`authorization`, the `users` of `accounts`). With no
-    /// users and no token, anyone may, into `$G`.
+    /// Who may connect (`authorization { users }`, the `users` of
+    /// `accounts`). With no users, no [`Options::user`] and no token, anyone
+    /// may, into `$G`.
     pub users: Vec<User>,
+    /// The one user clients log in as, with its password, plain or a bcrypt
+    /// hash (`authorization { user, password }`): into `$G`, without
+    /// permissions. It cannot go with [`Options::users`].
+    pub user: Option<(String, String)>,
     /// The token clients give instead of users (`authorization { token }`),
-    /// plain or a bcrypt hash.
+    /// plain or a bcrypt hash: into `$G`, without permissions.
     pub token: Option<String>,
     /// The user a client that gives no credentials connects as
     /// (`no_auth_user`).
@@ -148,6 +153,7 @@ impl Default for Options {
             write_deadline: Duration::from_secs(10),
             accounts: Vec::new(),
             users: Vec::new(),
+            user: None,
             token: None,
             no_auth_user: None,
             auth_timeout: Duration::from_secs(2),
@@ -263,7 +269,7 @@ pub struct WebsocketAuth {
     /// The user WebSocket clients log in as, with its password, plain or a
     /// bcrypt hash (`authorization { user, password }`). With it or
     /// [`WebsocketAuth::token`], they log in with these alone: not with
-    /// [`Options::users`] or [`Options::token`].
+    /// [`Options::users`], [`Options::user`] or [`Options::token`].
     pub user: Option<(String, String)>,
     /// The token WebSocket clients give (`authorization { token }`).
     pub token: Option<String>,

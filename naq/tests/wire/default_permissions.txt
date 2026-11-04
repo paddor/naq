@@ -1,0 +1,7 @@
+# Default permissions go to the users of a list, not to the single user.
+#! authorization { user: a, password: b, default_permissions: { publish: "x" } }
+
+a> CONNECT {"verbose":false,"user":"a","pass":"b"}
+a> PUB y 1
+a> z
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}

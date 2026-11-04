@@ -155,3 +155,8 @@ Notable changes to naq. The format follows
   clients get in too, as with `nats-server`.
 - `naq`: a WebSocket client's `INFO` asks for credentials where a
   `no_auth_user` lets it in without, as `nats-server` asks.
+- `naq`: `default_permissions` go to the users of lists alone, not to the
+  single user of `authorization { user, password }` or to token clients,
+  as in `nats-server`. The single user is `Options::user`, apart from
+  `Options::users`; it cannot go with users lists or a token, and it is no
+  `no_auth_user`.

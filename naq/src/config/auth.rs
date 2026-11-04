@@ -30,14 +30,7 @@ pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
         }
     }
     match (user, password) {
-        (Some(user), password) => o.users.push(User {
-            login: Login::Password {
-                user,
-                password: password.unwrap_or_default(),
-            },
-            account: None,
-            permissions: None,
-        }),
+        (Some(user), password) => o.user = Some((user, password.unwrap_or_default())),
         (None, Some(_)) => return Err((item.line, "authorization: password without user".into())),
         (None, None) => {}
     }

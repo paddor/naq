@@ -124,7 +124,7 @@ fn errors_name_the_file() {
 
 #[test]
 fn users_tokens_and_accounts_come_from_their_blocks() {
-    let o: Options = "authorization {\n  user: u\n  password: p\n  timeout: 0.5\n  users: [{user: v, pass: q}]\n}\n\
+    let o: Options = "authorization {\n  timeout: 0.5\n  users: [{user: v, pass: q}]\n}\n\
                       accounts {\n  A { users: [{username: a, password: x}] }\n  B {}\n}\n\
                       no_auth_user: a\n"
         .parse()
@@ -142,10 +142,10 @@ fn users_tokens_and_accounts_come_from_their_blocks() {
             (user.as_str(), password.as_str(), u.account.as_deref())
         })
         .collect();
-    assert_eq!(
-        users,
-        [("v", "q", None), ("u", "p", None), ("a", "x", Some("A"))]
-    );
+    assert_eq!(users, [("v", "q", None), ("a", "x", Some("A"))]);
+    let one: Options = "authorization { user: u, password: p }\n".parse().unwrap();
+    assert_eq!(one.user, Some(("u".into(), "p".into())));
+    assert_eq!(one.users.len(), 0);
     let t: Options = "authorization { token: abc, timeout: \"3s\" }\naccounts [X, Y]\n"
         .parse()
         .unwrap();
@@ -155,11 +155,52 @@ fn users_tokens_and_accounts_come_from_their_blocks() {
 }
 
 #[test]
+fn users_lists_naq_cannot_read_are_an_error() {
+    for (text, reason) in [
+        (
+            "authorization { users: [{nkey: UABC}] }\n",
+            "users: nkey: not a public user NKey",
+        ),
+        (
+            "authorization { users: [{password: p}] }\n",
+            "users: a user needs a name",
+        ),
+        (
+            "authorization { users: [{nkey: UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ, user: x}] }\n",
+            "users: an NKey user has no name or password",
+        ),
+        ("authorization { users: 1 }\n", "users: expected a list"),
+        ("authorization { users: [1] }\n", "users: expected a map"),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn auth_that_contradicts_itself_is_an_error() {
     for (text, reason) in [
         (
             "authorization { token: t, users: [{user: a}] }\n",
             "a token cannot go with users",
+        ),
+        (
+            "authorization { user: u, users: [{user: a}] }\n",
+            "a single user cannot go with users",
+        ),
+        (
+            "authorization { user: u }\naccounts { A { users: [{user: a}] } }\n",
+            "a single user cannot go with users",
+        ),
+        (
+            "authorization { user: u, token: t }\n",
+            "a token cannot go with a user",
+        ),
+        (
+            "authorization { user: u }\nno_auth_user: u\n",
+            "no_auth_user \"u\" is not a user",
         ),
         (
             "no_auth_user: nobody\n",
@@ -177,20 +218,6 @@ fn auth_that_contradicts_itself_is_an_error() {
             "authorization { bogus: 1 }\n",
             "authorization: bogus: not supported",
         ),
-        (
-            "authorization { users: [{nkey: UABC}] }\n",
-            "users: nkey: not a public user NKey",
-        ),
-        (
-            "authorization { users: [{password: p}] }\n",
-            "users: a user needs a name",
-        ),
-        (
-            "authorization { users: [{nkey: UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ, user: x}] }\n",
-            "users: an NKey user has no name or password",
-        ),
-        ("authorization { users: 1 }\n", "users: expected a list"),
-        ("authorization { users: [1] }\n", "users: expected a map"),
         (
             "authorization { timeout: true }\n",
             "authorization: timeout: expected seconds or a duration",

@@ -1,0 +1,15 @@
+# Default permissions go to the users of a list without their own.
+#! authorization {
+#!   default_permissions: { publish: "x" }
+#!   users [ { user: a, password: b }, { user: c, password: d, permissions: { publish: "y" } } ]
+#! }
+
+a> CONNECT {"verbose":false,"user":"a","pass":"b"}
+a> PUB y 1
+a> z
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< -ERR 'Permissions Violation for Publish to "y"'
+c> CONNECT {"verbose":false,"user":"c","pass":"d"}
+c> PUB y 1
+c> z
+c< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}

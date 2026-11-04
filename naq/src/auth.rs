@@ -117,6 +117,12 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
     if opts.token.is_some() && !opts.users.is_empty() {
         return Err("a token cannot go with users".into());
     }
+    if opts.user.is_some() && !opts.users.is_empty() {
+        return Err("a single user cannot go with users".into());
+    }
+    if opts.user.is_some() && opts.token.is_some() {
+        return Err("a token cannot go with a user".into());
+    }
     let mut seen = Vec::new();
     for u in &opts.users {
         let user = name(&u.login);
@@ -177,7 +183,7 @@ pub(crate) fn nonce() -> String {
 impl Auth {
     /// The authentication `opts` ask for, if any. `opts` are valid.
     pub(crate) fn new(opts: &Options, accounts: &[String]) -> Option<Auth> {
-        if opts.users.is_empty() && opts.token.is_none() {
+        if opts.users.is_empty() && opts.user.is_none() && opts.token.is_none() {
             return None;
         }
         let id = |name: Option<&String>| {
@@ -207,13 +213,19 @@ impl Auth {
                 }
             }
         }
+        // As in `nats-server`, the single user and token clients have no
+        // permissions: defaults are for users of lists.
+        let bare = Grant {
+            account: GLOBAL,
+            perms: None,
+        };
+        if let Some((user, password)) = &opts.user {
+            users.insert(user.clone(), (password.clone(), bare.clone()));
+        }
         Some(Auth {
             users,
             nkeys,
-            token_grant: Grant {
-                account: GLOBAL,
-                perms: defaults,
-            },
+            token_grant: bare,
             token: opts.token.clone(),
             no_auth_user: opts.no_auth_user.clone(),
             timeout: opts.auth_timeout,
@@ -344,7 +356,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::User;
+    use crate::{Permissions, User};
 
     fn pass(account: u32) -> Check {
         Check::Pass(Grant {
@@ -584,6 +596,36 @@ mod tests {
     }
 
     #[test]
+    fn default_permissions_go_to_users_of_lists_only() {
+        let accounts = ["$G".to_owned()];
+        let defaults = Some(Permissions::default());
+        let single = Options {
+            user: Some(("u".into(), "p".into())),
+            default_permissions: defaults.clone(),
+            ..Options::default()
+        };
+        let auth = Auth::new(&single, &accounts).unwrap();
+        assert_eq!(auth.check(&creds(Some("u"), Some("p"), None), b""), pass(0));
+        let token = Options {
+            token: Some("t".into()),
+            default_permissions: defaults.clone(),
+            ..Options::default()
+        };
+        let auth = Auth::new(&token, &accounts).unwrap();
+        assert_eq!(auth.check(&creds(None, None, Some("t")), b""), pass(0));
+        let listed = Options {
+            users: vec![user("a", "p", None)],
+            default_permissions: defaults,
+            ..Options::default()
+        };
+        let auth = Auth::new(&listed, &accounts).unwrap();
+        let Check::Pass(g) = auth.check(&creds(Some("a"), Some("p"), None), b"") else {
+            panic!("a list user passes");
+        };
+        assert!(g.perms.is_some());
+    }
+
+    #[test]
     fn no_auth_means_no_check() {
         assert!(Auth::new(&Options::default(), &["$G".into()]).is_none());
     }
@@ -607,6 +649,16 @@ mod tests {
             Options {
                 users: vec![user("a", "p", None)],
                 no_auth_user: Some("b".into()),
+                ..Options::default()
+            },
+            Options {
+                user: Some(("u".into(), "p".into())),
+                users: vec![user("a", "p", None)],
+                ..Options::default()
+            },
+            Options {
+                user: Some(("u".into(), "p".into())),
+                token: Some("t".into()),
                 ..Options::default()
             },
         ];
