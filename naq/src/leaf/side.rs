@@ -105,6 +105,8 @@ impl LinkSide {
             .borrow_mut()
             .peer(subject, queue, peer);
         lane.announce_peer(self.account, subject, queue, peer);
+        // Other links tell their hubs.
+        lane.changed(self.account, subject, queue);
     }
 
     /// Encodes `m` for the hub: for its plain interest, and for one member
@@ -156,12 +158,12 @@ impl LinkSide {
             if denied(filter) || !self.tells(filter) {
                 return;
             }
-            if i.plain.weight() > 0 {
+            if i.plain.told(self.id) > 0 {
                 leaf::sub(&mut *out, filter, None);
                 told.insert((filter.into(), None), 1);
             }
             for (q, g) in &i.queues {
-                let n = members(g.weight());
+                let n = members(g.told(self.id));
                 if n > 0 {
                     leaf::sub(&mut *out, filter, Some((q, n)));
                     told.insert((filter.into(), Some(q.clone())), n);
@@ -177,7 +179,7 @@ impl LinkSide {
         if denied(filter) || !self.tells(filter) {
             return;
         }
-        let n = index.count(filter, queue);
+        let n = index.count(filter, queue, self.id);
         let key = (Box::from(filter), queue.map(Box::from));
         let mut told = self.told.borrow_mut();
         let was = told.get(&key).copied().unwrap_or(0);

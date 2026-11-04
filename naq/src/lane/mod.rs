@@ -165,8 +165,8 @@ impl Lane {
         }
     }
 
-    /// Tells the links on this lane that client interest in `filter` of
-    /// `account`, in `queue` if given, changed.
+    /// Tells the links on this lane that interest in `filter` of `account`,
+    /// in `queue` if given, changed: of a client or of a link's hub.
     pub(crate) fn changed(&self, account: u32, filter: &[u8], queue: Option<&[u8]>) {
         let links = self.links.borrow();
         if links.is_empty() {
@@ -239,6 +239,7 @@ impl Lane {
                 self.index(account)
                     .borrow_mut()
                     .peer(&subject, queue.as_deref(), peer);
+                self.changed(account, &subject, queue.as_deref());
             }
             Control::Fence(done) => {
                 let _ = done.send(());

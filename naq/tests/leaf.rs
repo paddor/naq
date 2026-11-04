@@ -1292,3 +1292,70 @@ fn a_request_crosses_a_go_hub_and_its_reply_comes_back() {
     svc.send("PUB _INBOX.r 6\r\nanswer\r\n");
     assert_eq!(lines(&mut c, 2), ["MSG _INBOX.r 7 6", "answer"]);
 }
+
+#[test]
+fn the_interest_of_one_hub_is_told_to_another() {
+    let (one, two) = (Hub::new(), Hub::new());
+    let remote = |h: &Hub| Remote {
+        urls: vec![format!("127.0.0.1:{}", h.port())],
+        ..Remote::default()
+    };
+    let _leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        server_name: "naq-leaf".into(),
+        remotes: vec![remote(&one), remote(&two)],
+        ..Options::default()
+    })
+    .unwrap();
+    let (mut p1, mut p2) = (linked(&one), linked(&two));
+    p2.send("LS+ m\r\nLS+ m q 2\r\nLS+ m q 3\r\n");
+    // Not told back to the hub it came from, which hears of no LS+.
+    p2.send("PING\r\n");
+    assert_eq!(p2.line(), "PONG");
+    told(&mut p1, &["LS+ m", "LS+ m q 3"]);
+    p2.send("LS- m q\r\nLS- m\r\n");
+    told(&mut p1, &["LS- m q", "LS- m"]);
+    drop(p2);
+    p1.send("PING\r\n");
+    assert_eq!(p1.line(), "PONG");
+}
+
+#[test]
+fn a_naq_leaf_bridges_two_go_hubs() {
+    let hubs: Vec<[u16; 3]> = (0..2)
+        .map(|_| [free_port(), free_port(), free_port()])
+        .collect();
+    let conf = |[port, leafport, http]: [u16; 3]| {
+        format!("port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n")
+    };
+    let Some(_a) = go(&conf(hubs[0])) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let _b = go(&conf(hubs[1])).unwrap();
+    let mut sub = go_client(hubs[0][0], "SUB x 1\r\n");
+    let remote = |h: [u16; 3]| Remote {
+        urls: vec![format!("nats-leaf://127.0.0.1:{}", h[1])],
+        ..Remote::default()
+    };
+    let _leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        server_name: "naq-bridge".into(),
+        remotes: vec![remote(hubs[0]), remote(hubs[1])],
+        ..Options::default()
+    })
+    .unwrap();
+    // Hub b hears of the interest at hub a through the leaf.
+    leafz_until(hubs[1][2], |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|s| s == "x"))
+    });
+    let mut publisher = go_client(hubs[1][0], "");
+    publisher.send("PUB x 6\r\nbridge\r\n");
+    assert_eq!(lines(&mut sub, 2), ["MSG x 1 6", "bridge"]);
+}

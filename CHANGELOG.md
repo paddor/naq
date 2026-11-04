@@ -198,6 +198,10 @@ Notable changes to naq. The format follows
   out, as a `nats-server` leaf does, so the hub keeps the link. Service
   replies (`_R_.`) and JetStream acks always come in. The `CONNECT` sends
   `deny_imports` as `deny_pub`, and `isolate` when asked.
+- `naq`: a server with several leaf node remotes bridges their hubs. The
+  interest of one hub is told to the others, never back to it, with queue
+  members counted across the hubs, so messages flow from one hub to
+  another through the server.
 
 ### Changed
 
