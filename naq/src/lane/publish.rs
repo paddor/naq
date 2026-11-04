@@ -16,6 +16,8 @@ pub(crate) struct Routing<'a, 'p> {
     /// Messages for each other lane.
     fwd: &'a mut [Out],
     p: &'a Pub<'p>,
+    /// The message as clients get it: `p` but for some of a hub.
+    d: &'a Pub<'p>,
     /// The read buffer `p` lies in.
     buf: &'a [u8],
     /// Who gets nothing: a client without echo, or the link a message
@@ -45,6 +47,7 @@ impl<'a, 'p> Routing<'a, 'p> {
             lane,
             fwd,
             p,
+            d: p,
             buf,
             skip,
             from: None,
@@ -53,9 +56,11 @@ impl<'a, 'p> Routing<'a, 'p> {
         }
     }
 
-    /// Only the queue groups message `m` of a link lists get a pick.
-    pub(crate) const fn listed(mut self, m: &'a leaf::Msg<'p>) -> Self {
+    /// The message is `m` of a link, which clients get as `d`: only the
+    /// queue groups it lists get a pick.
+    pub(crate) const fn by_link(mut self, m: &'a leaf::Msg<'p>, d: &'a Pub<'p>) -> Self {
         self.from = Some(m);
+        self.d = d;
         self
     }
 
@@ -95,7 +100,7 @@ impl<'a, 'p> Routing<'a, 'p> {
     fn plain(&mut self, i: &Interest, once: bool) {
         self.delivered |= self
             .lane
-            .deliver(&i.plain.local, self.p, self.skip, &mut self.stalled);
+            .deliver(&i.plain.local, self.d, self.skip, &mut self.stalled);
         for &(to, _) in &i.plain.lanes {
             self.fwd[to].plain(self.buf, self.p, once);
             self.delivered = true;
@@ -146,7 +151,7 @@ impl<'a, 'p> Routing<'a, 'p> {
         };
         match self
             .lane
-            .deliver_queue(&q, self.p, self.skip, &mut self.stalled)
+            .deliver_queue(&q, self.d, self.skip, &mut self.stalled)
         {
             Queued::Here => self.delivered = true,
             Queued::Lane(to) => {

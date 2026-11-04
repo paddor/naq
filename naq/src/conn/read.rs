@@ -15,7 +15,7 @@ use super::ping::Tick;
 use super::{Client, Close, Conn, Stage};
 use crate::auth::{Check, Creds, Grant, Pending};
 use crate::index::{Entry, Found, Index, Interest};
-use crate::lane::Routing;
+use crate::lane::{Origin, Routing};
 use crate::perms::{Held, quoted};
 
 /// Bytes a read may fill at least. With less room, the buffer takes back
@@ -156,8 +156,11 @@ impl Conn {
     /// Drops the `at` bytes parsed from `buf`, handing those that publishes
     /// for other lanes refer to over to those lanes.
     async fn ship(&mut self, buf: &mut BytesMut, at: usize) {
-        let account = self.client.account.get();
-        self.lane.ship_reads(&mut self.fwd, buf, at, account).await;
+        let from = Origin {
+            account: self.client.account.get(),
+            link: false,
+        };
+        self.lane.ship_reads(&mut self.fwd, buf, at, from).await;
     }
 
     // Inlined into the parse loop; what is rare stays out of line, so it

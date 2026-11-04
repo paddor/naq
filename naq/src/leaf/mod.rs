@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use naq_proto::client::Pub;
 use naq_proto::subject;
 
 use crate::lane;
@@ -36,6 +37,26 @@ pub(super) enum Ended {
     Unreached,
     /// It ended, and the hub asked to wait this long beyond the interval.
     Closed { delay: Duration },
+}
+
+/// Message `m` of a hub as a client gets it, if it differs: a JetStream
+/// ack reply that ends in `@` and a subject was matched for that subject,
+/// which the client gets with the reply before the `@`, as `nats-server`
+/// hands it on.
+pub(crate) fn for_clients<'a>(m: &Pub<'a>) -> Option<Pub<'a>> {
+    let reply = m
+        .reply
+        .filter(|r| r.len() > 8 && r.starts_with(b"$JS.ACK."))?;
+    let mut dots = 0;
+    let at = reply.iter().position(|&b| {
+        dots += usize::from(b == b'.');
+        b == b'@' && dots >= 8
+    })?;
+    (at + 1 < reply.len()).then(|| Pub {
+        subject: &reply[at + 1..],
+        reply: Some(&reply[..at]),
+        ..*m
+    })
 }
 
 /// A fresh loop detection subject: `$LDS.` and 22 random letters and
@@ -150,5 +171,40 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
             urls = url::rebuild(&found, &all).into();
         }
         tokio::time::sleep(wait).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_reply(reply: &[u8]) -> Pub<'_> {
+        Pub {
+            subject: b"_INBOX.x",
+            reply: Some(reply),
+            headers: None,
+            payload: b"hi",
+        }
+    }
+
+    #[test]
+    fn clients_get_a_jetstream_message_of_a_hub_for_its_own_subject() {
+        let m = with_reply(b"$JS.ACK.S.C.1.2.3.4.0@orders.1");
+        let got = for_clients(&m).unwrap();
+        assert_eq!(got.subject, b"orders.1");
+        assert_eq!(got.reply, Some(&b"$JS.ACK.S.C.1.2.3.4.0"[..]));
+        assert_eq!(got.payload, b"hi");
+        // An `@` in a stream name comes before the eighth dot.
+        let named = with_reply(b"$JS.ACK.S@x.C.1.2.3.4.0@orders.1");
+        assert_eq!(for_clients(&named).unwrap().subject, b"orders.1");
+        for plain in [
+            &b"$JS.ACK.S.C.1.2.3.4.0"[..],
+            b"$JS.ACK.S.C.1.2.3.4.0@",
+            b"_INBOX.y@orders.1",
+            b"$JS.ACK.",
+        ] {
+            assert!(for_clients(&with_reply(plain)).is_none(), "{plain:?}");
+        }
+        assert!(for_clients(&Pub { reply: None, ..m }).is_none());
     }
 }

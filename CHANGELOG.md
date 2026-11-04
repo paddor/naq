@@ -205,6 +205,11 @@ Notable changes to naq. The format follows
 - `naq`: `/leafz` shows the server's leaf node links as `nats-server` does:
   the hub's name and address, the link's account, its message counts, and
   the subjects of the hub's interest with `subs=1`.
+- `naq`: clients of a leaf node use the JetStream of its hub through the
+  hub's domain (`$JS.<domain>.API`), pull consumers and acks included. A
+  message of a hub whose `$JS.ACK.` reply ends in `@` and a subject reaches
+  clients with that subject and the reply before the `@`, as `nats-server`
+  hands it on; links get it as it came.
 
 ### Changed
 

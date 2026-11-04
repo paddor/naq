@@ -76,8 +76,17 @@ impl Fwd {
 pub(crate) struct Batch {
     pub(crate) chunk: Bytes,
     pub(crate) out: Out,
+    pub(crate) from: Origin,
+}
+
+/// Where the publishes of a batch come from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Origin {
     /// The publisher's account.
     pub(crate) account: u32,
+    /// A link: messages of a hub, which clients may get otherwise, see
+    /// [`crate::leaf::for_clients`].
+    pub(crate) link: bool,
 }
 
 /// The publishes of one read for one other lane.
@@ -170,14 +179,14 @@ fn pub_of<'b>(b: &'b Batch, f: &Fwd) -> Pub<'b> {
 
 impl Lane {
     /// Drops the `at` bytes parsed from `buf`, handing those that the
-    /// messages in `fwd` refer to over to their lanes, as batches of
-    /// `account`.
+    /// messages in `fwd` refer to over to their lanes, as batches `from`
+    /// there.
     pub(crate) async fn ship_reads(
         &self,
         fwd: &mut [Out],
         buf: &mut BytesMut,
         at: usize,
-        account: u32,
+        from: Origin,
     ) {
         if fwd.iter().all(Out::is_empty) {
             buf.advance(at);
@@ -189,7 +198,7 @@ impl Lane {
                 let batch = Batch {
                     chunk: chunk.clone(),
                     out: out.take(),
-                    account,
+                    from,
                 };
                 self.ship(to, batch).await;
             }
@@ -208,19 +217,25 @@ impl Lane {
     #[inline]
     fn deliver_fwd(&self, b: &Batch, f: &Fwd, stalled: &mut Option<Rc<crate::conn::Client>>) {
         let p = pub_of(b, f);
-        let index = self.index(b.account).borrow();
+        let index = self.index(b.from.account).borrow();
         let Some(found) = index.matches(p.subject) else {
             return;
         };
+        let remapped = if b.from.link {
+            crate::leaf::for_clients(&p)
+        } else {
+            None
+        };
+        let to_clients = remapped.as_ref().unwrap_or(&p);
         // The publisher is on another lane: nothing to skip.
         match (&found, f.queue.get_some(&b.out.names)) {
             (Found::One(i), None) => {
-                self.deliver(&i.plain.local, &p, 0, stalled);
+                self.deliver(&i.plain.local, to_clients, 0, stalled);
                 self.peers_here(&i.plain.peers);
             }
             (Found::Many(all), None) => {
                 for i in all.iter() {
-                    self.deliver(&i.plain.local, &p, 0, stalled);
+                    self.deliver(&i.plain.local, to_clients, 0, stalled);
                     self.peers_here(&i.plain.peers);
                 }
             }
@@ -229,7 +244,7 @@ impl Lane {
                     name,
                     groups: found.queue_groups(0, name),
                 };
-                self.deliver_any(&q, &p, true, stalled);
+                self.deliver_any(&q, to_clients, true, stalled);
             }
         }
     }

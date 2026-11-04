@@ -18,7 +18,7 @@ use tokio::time::{Instant, timeout};
 use super::{Ended, Facts, HubUrl, LinkSide, Told, creds, side};
 use crate::Rules;
 use crate::conn::{self, Client};
-use crate::lane::{Lane, Out, Routing};
+use crate::lane::{Lane, Origin, Out, Routing};
 use crate::perms::Perms;
 use crate::ws;
 
@@ -508,8 +508,11 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             let (at, stop) = self.parse(&buf, side, lds, &mut st);
             lane.flush();
             lane.expire();
-            lane.ship_reads(&mut self.fwd, &mut buf, at, side.account)
-                .await;
+            let from = Origin {
+                account: side.account,
+                link: true,
+            };
+            lane.ship_reads(&mut self.fwd, &mut buf, at, from).await;
             let need = match stop {
                 Ok(need) => need,
                 Err(end) => return end,
@@ -635,7 +638,9 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         let Some(found) = index.matches(p.subject) else {
             return;
         };
-        let mut r = Routing::new(lane, &mut self.fwd, &p, buf, side.id).listed(m);
+        let d = super::for_clients(&p);
+        let d = d.as_ref().unwrap_or(&p);
+        let mut r = Routing::new(lane, &mut self.fwd, &p, buf, side.id).by_link(m, d);
         r.route(&found);
         if let Some(s) = r.stalled {
             self.stalled = Some(s);

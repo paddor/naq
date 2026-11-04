@@ -1411,3 +1411,138 @@ fn leafz_shows_the_links_and_the_interest_of_their_hubs() {
         serde_json::json!(["a", "b"])
     );
 }
+
+/// The next line `c` gets but `PING`s, which it answers.
+fn not_ping(c: &mut Peer) -> String {
+    loop {
+        let l = c.line();
+        if l != "PING" {
+            return l;
+        }
+        c.send("PONG\r\n");
+    }
+}
+
+/// The answer to request `body` on `subject`, from a client subscribed
+/// to `_INBOX.js` as SID 1.
+fn ask(c: &mut Peer, subject: &str, body: &str) -> serde_json::Value {
+    c.send(&format!(
+        "PUB {subject} _INBOX.js {}\r\n{body}\r\n",
+        body.len()
+    ));
+    let head = not_ping(c);
+    assert!(head.starts_with("MSG _INBOX.js 1 "), "{head}");
+    serde_json::from_str(&c.line()).unwrap()
+}
+
+/// A client of `leaf`, subscribed to `_INBOX.js` as SID 1, once the
+/// JetStream of the hub with monitoring port `http` answers it through
+/// domain `hub`.
+fn js_client(leaf: &Server, http: u16) -> Peer {
+    let mut c = client(leaf, "SUB _INBOX.js 1\r\n");
+    leafz_until(http, |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|s| s == "_INBOX.js"))
+    });
+    // The hub's interest in its domain's API reaches the leaf in its time.
+    let deadline = Instant::now() + WAIT;
+    c.w.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    loop {
+        c.send("PUB $JS.hub.API.INFO _INBOX.js 0\r\n\r\n");
+        let mut l = String::new();
+        if c.r.read_line(&mut l).is_ok() && l.starts_with("MSG _INBOX.js 1 ") {
+            let info: serde_json::Value = serde_json::from_str(&c.line()).unwrap();
+            assert_eq!(
+                info["type"],
+                "io.nats.jetstream.api.v1.account_info_response"
+            );
+            assert_eq!(info["domain"], "hub");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no JetStream answer");
+    }
+    c.w.set_read_timeout(Some(WAIT)).unwrap();
+    c
+}
+
+#[test]
+fn naq_clients_use_the_jetstream_of_a_go_hub_through_its_domain() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let dir = std::env::temp_dir().join(format!("naq-leaf-js-{}", fastrand()));
+    let conf = format!(
+        "port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\njetstream {{ store_dir: \"{}\", domain: hub }}\n",
+        dir.display()
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let leaf = leaf(&format!("nats-leaf://127.0.0.1:{leafport}"));
+    let mut c = js_client(&leaf, http);
+    let stream = r#"{"name":"S","subjects":["orders.>"]}"#;
+    let made = ask(&mut c, "$JS.hub.API.STREAM.CREATE.S", stream);
+    assert_eq!(made["config"]["name"], "S", "{made}");
+    // The stream's interest reaches the leaf too: published until stored.
+    let deadline = Instant::now() + WAIT;
+    while ask(&mut c, "$JS.hub.API.STREAM.INFO.S", "")["state"]["messages"] == 0 {
+        c.send("PUB orders.1 2\r\nhi\r\n");
+        assert!(Instant::now() < deadline, "nothing stored");
+    }
+    // A pull consumer: the message comes over the link, the ack goes back.
+    let consumer = r#"{"stream_name":"S","config":{"durable_name":"C","ack_policy":"explicit"}}"#;
+    assert_eq!(
+        ask(&mut c, "$JS.hub.API.CONSUMER.CREATE.S.C", consumer)["name"],
+        "C"
+    );
+    c.send("PUB $JS.hub.API.CONSUMER.MSG.NEXT.S.C _INBOX.js 1\r\n1\r\n");
+    // As a client of the hub gets it: the stream's subject, and an ack
+    // reply without the `@` and subject the hub sent.
+    let head = not_ping(&mut c);
+    let ack = head
+        .strip_prefix("MSG orders.1 1 ")
+        .and_then(|r| r.split(' ').next());
+    assert!(ack.is_some_and(|a| a.starts_with("$JS.ACK.S.C.")), "{head}");
+    assert_eq!(c.line(), "hi");
+    c.send(&format!("PUB {} 0\r\n\r\n", ack.unwrap()));
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let info = ask(&mut c, "$JS.hub.API.CONSUMER.INFO.S.C", "");
+        if info["num_ack_pending"] == 0 && info["ack_floor"]["consumer_seq"] == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not acked: {info}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn clients_on_any_lane_get_jetstream_messages_of_the_hub_as_go_leafs_hand_them_on() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    // One on the link's lane, one not.
+    let subs = "SUB _INBOX.x 1\r\nSUB _INBOX.x q 2\r\n";
+    let (mut a, mut b) = (client(&leaf, subs), client(&leaf, subs));
+    told(&mut p, &["LS+ _INBOX.x q 2"]);
+    p.send("LMSG _INBOX.x + $JS.ACK.S.C.1.2.3.4.0@orders.1 q 2\r\nhi\r\n");
+    for c in [&mut a, &mut b] {
+        assert_eq!(
+            lines(c, 2),
+            ["MSG orders.1 1 $JS.ACK.S.C.1.2.3.4.0 2", "hi"]
+        );
+    }
+    let picked = [a, b].map(|mut c| {
+        c.w.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut l = String::new();
+        let got = c.r.read_line(&mut l).is_ok() && !l.is_empty();
+        assert!(
+            !got || l == "MSG orders.1 2 $JS.ACK.S.C.1.2.3.4.0 2\r\n",
+            "{l}"
+        );
+        got
+    });
+    assert_eq!(picked.iter().filter(|&&g| g).count(), 1, "one member of q");
+}
