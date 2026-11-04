@@ -86,9 +86,21 @@ pub(crate) struct Batch {
 pub(crate) struct Origin {
     /// The publisher's account.
     pub(crate) account: u32,
-    /// A link: messages of a hub, which clients may get otherwise, see
+    pub(crate) source: Source,
+}
+
+/// Who sent a message to this server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// One of its clients.
+    Client,
+    /// A hub, over a link: clients may get its messages otherwise, see
     /// [`crate::leaf::for_clients`].
-    pub(crate) link: bool,
+    Hub,
+    /// Another server of the cluster. Links to hubs do not get its
+    /// messages: the hub has a link of its own to that server, as in
+    /// `nats-server`.
+    Server,
 }
 
 /// What one read leaves for others: publishes for each other lane, and
@@ -231,14 +243,14 @@ fn pub_of<'b>(b: &'b Batch, f: &Fwd) -> Pub<'b> {
 
 impl Lane {
     /// Drops the `at` bytes parsed from `buf`, handing those that the
-    /// messages in `out` refer to over to their lanes, as batches of a link
-    /// if `link`, and sends the batches for other servers.
+    /// messages in `out` refer to over to their lanes, as batches from
+    /// `source`, and sends the batches for other servers.
     pub(crate) async fn ship_reads(
         &self,
         out: &mut Outs,
         buf: &mut BytesMut,
         at: usize,
-        link: bool,
+        source: Source,
     ) {
         self.ship_servers(out).await;
         if out.lanes.iter().all(Out::is_empty) {
@@ -246,15 +258,15 @@ impl Lane {
             return;
         }
         let chunk = buf.split_to(at).freeze();
-        self.ship_chunk(out, chunk, link).await;
+        self.ship_chunk(out, chunk, source).await;
     }
 
     /// Hands `chunk`, which the messages in `out` refer to, over to their
-    /// lanes, as batches of a link if `link`.
-    pub(crate) async fn ship_chunk(&self, out: &mut Outs, chunk: Bytes, link: bool) {
+    /// lanes, as batches from `source`.
+    pub(crate) async fn ship_chunk(&self, out: &mut Outs, chunk: Bytes, source: Source) {
         let from = Origin {
             account: out.account,
-            link,
+            source,
         };
         for (to, out) in out.lanes.iter_mut().enumerate() {
             if !out.is_empty() {
@@ -283,10 +295,14 @@ impl Lane {
         }
     }
 
-    /// Notes the links on this lane among `peers`. Out of line, as most
-    /// interest has none: the loop of [`run`] stays small.
+    /// Notes the links on this lane among `peers`, for a message from
+    /// `source`. Out of line, as most interest has none: the loop of
+    /// [`run`] stays small.
     #[inline(never)]
-    fn peers_here(&self, peers: &[crate::index::Peer]) {
+    fn peers_here(&self, peers: &[crate::index::Peer], source: Source) {
+        if source == Source::Server {
+            return;
+        }
         for p in peers.iter().filter(|p| p.lane == self.id) {
             self.hit_link(p.link, None);
         }
@@ -318,7 +334,7 @@ impl Lane {
         let Some(found) = index.matches(p.subject) else {
             return;
         };
-        let remapped = if b.from.link {
+        let remapped = if b.from.source == Source::Hub {
             crate::leaf::for_clients(&p)
         } else {
             None
@@ -329,14 +345,14 @@ impl Lane {
             (Found::One(i), None) => {
                 self.deliver(&i.plain.local, to_clients, 0, stalled);
                 if !i.plain.peers.is_empty() {
-                    self.peers_here(&i.plain.peers);
+                    self.peers_here(&i.plain.peers, b.from.source);
                 }
             }
             (Found::Many(all), None) => {
                 for i in all.iter() {
                     self.deliver(&i.plain.local, to_clients, 0, stalled);
                     if !i.plain.peers.is_empty() {
-                        self.peers_here(&i.plain.peers);
+                        self.peers_here(&i.plain.peers, b.from.source);
                     }
                 }
             }

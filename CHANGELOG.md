@@ -235,9 +235,11 @@ Notable changes to naq. The format follows
   server with plain interest, on the publishing lane's data link to it, as
   a batch per read; a queue group gets one pick at the source across
   members here and at other servers, each counted as its weight. The
-  receiving server delivers to its clients, lanes and links, and to no
-  other server. A message of a hub stays with the server linked to it, as
-  in `nats-server`: every server links to the hub of its own. A server
+  receiving server delivers to its clients and lanes, to no other server,
+  and to its links only for a queue group without a member here. A
+  message of a hub stays with the server linked to it, and a hub gets
+  only the messages of the server linked to it, as in `nats-server`:
+  every server links to the hub of its own. A server
   gone closes the data links to it: a publisher waiting on one goes on.
 - `naq`: a client of a cluster server gets `connect_urls` in `INFO`: its
   server's client address, then those of the other servers that are up.

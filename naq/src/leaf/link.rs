@@ -18,7 +18,7 @@ use tokio::time::{Instant, timeout};
 use super::{Ended, Facts, HubUrl, LinkSide, Told, creds, side};
 use crate::Rules;
 use crate::conn::{self, Client};
-use crate::lane::{Lane, Outs, Routing};
+use crate::lane::{Lane, Outs, Routing, Source};
 use crate::perms::Perms;
 use crate::ws;
 
@@ -509,7 +509,8 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             let (at, stop) = self.parse(&buf, side, lds, &mut st);
             lane.flush();
             lane.expire();
-            lane.ship_reads(&mut self.out, &mut buf, at, true).await;
+            lane.ship_reads(&mut self.out, &mut buf, at, Source::Hub)
+                .await;
             let need = match stop {
                 Ok(need) => need,
                 Err(end) => return end,

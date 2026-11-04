@@ -29,6 +29,8 @@ pub(crate) struct Routing<'a, 'p> {
     listed: Option<&'a [u8]>,
     /// It goes to other servers with interest: not when one sent it.
     servers: bool,
+    /// It goes to links with plain interest: not when a server sent it.
+    links: bool,
     /// Servers it went to already, as bits by route.
     sent: u64,
     /// A subscriber past the stall mark.
@@ -57,6 +59,7 @@ impl<'a, 'p> Routing<'a, 'p> {
             skip,
             listed: None,
             servers: true,
+            links: true,
             sent: 0,
             stalled: None,
             delivered: false,
@@ -74,13 +77,15 @@ impl<'a, 'p> Routing<'a, 'p> {
     }
 
     /// The message came from another server, for one member of `queue` if
-    /// given, else for plain subscriptions: it goes to no other server.
+    /// given, else for plain subscriptions: it goes to no other server,
+    /// and to links only for a queue group.
     pub(crate) const fn by_server(mut self, queue: Option<&'a [u8]>) -> Self {
         self.listed = Some(match queue {
             Some(q) => q,
             None => b"",
         });
         self.servers = false;
+        self.links = false;
         self
     }
 
@@ -151,6 +156,9 @@ impl<'a, 'p> Routing<'a, 'p> {
     /// from: here, or forwarded to their lanes.
     #[inline(never)]
     fn peers(&mut self, peers: &[Peer]) {
+        if !self.links {
+            return;
+        }
         for p in peers {
             if p.lane != self.lane.id {
                 self.out.lanes[p.lane].plain(self.buf, self.p, true);

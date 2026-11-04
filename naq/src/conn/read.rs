@@ -156,7 +156,9 @@ impl Conn {
     /// Drops the `at` bytes parsed from `buf`, handing those that publishes
     /// for other lanes refer to over to those lanes.
     async fn ship(&mut self, buf: &mut BytesMut, at: usize) {
-        self.lane.ship_reads(&mut self.out, buf, at, false).await;
+        self.lane
+            .ship_reads(&mut self.out, buf, at, crate::lane::Source::Client)
+            .await;
     }
 
     // Inlined into the parse loop; what is rare stays out of line, so it

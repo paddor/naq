@@ -10,7 +10,7 @@ use omq_tokio::{Socket, SocketType};
 
 use super::socket_options;
 use crate::conn::{self, Client};
-use crate::lane::{Lane, Outs, Routing};
+use crate::lane::{Lane, Outs, Routing, Source};
 
 /// Gives `lane` a data link to server `server`, by route, at `endpoint`,
 /// in place of the one it had.
@@ -55,7 +55,7 @@ pub(super) async fn receive(lane: Rc<Lane>, pull: Socket) {
         let stalled = route(&lane, &mut out, &chunk);
         lane.flush();
         lane.expire();
-        lane.ship_chunk(&mut out, chunk, false).await;
+        lane.ship_chunk(&mut out, chunk, Source::Server).await;
         // A subscriber past the stall mark slows the other server to its
         // pace: its link fills up meanwhile.
         if let Some(sub) = stalled {

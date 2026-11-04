@@ -507,6 +507,71 @@ fn a_message_of_a_hub_stays_with_the_server_linked_to_it() {
 }
 
 #[test]
+fn a_message_of_another_server_is_not_sent_to_a_hub() {
+    use std::io::BufRead;
+    let hub = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ports: Vec<u16> = (0..2).map(|_| free_port()).collect();
+    // Clients and links take lanes in turn: the remote and the first
+    // client are on lane 0.
+    let start = |i: usize| {
+        Server::start(&Options {
+            host: "127.0.0.1".into(),
+            port: 0,
+            lanes: 2,
+            http_port: Some(0),
+            server_name: format!("n{i}"),
+            cluster: Some(Cluster {
+                name: "c".into(),
+                host: "127.0.0.1".into(),
+                port: ports[i],
+                routes: vec![format!("127.0.0.1:{}", ports[1 - i])],
+            }),
+            remotes: if i == 0 {
+                vec![naq::Remote {
+                    urls: vec![format!("127.0.0.1:{}", hub.local_addr().unwrap().port())],
+                    ..naq::Remote::default()
+                }]
+            } else {
+                Vec::new()
+            },
+            ..Options::default()
+        })
+        .unwrap()
+    };
+    let (linked, other) = (start(0), start(1));
+    let (link, _) = hub.accept().unwrap();
+    link.set_read_timeout(Some(WAIT)).unwrap();
+    let mut r = std::io::BufReader::new(link.try_clone().unwrap());
+    let mut w = link;
+    w.write_all(b"INFO {\"server_id\":\"HUB\",\"client_id\":5,\"info_on_connect\":true}\r\n")
+        .unwrap();
+    let mut l = String::new();
+    r.read_line(&mut l).unwrap();
+    w.write_all(b"INFO {\"connect_info\":true}\r\nLS+ x\r\n")
+        .unwrap();
+    until(&linked, "/leafz?subs=1", |z| {
+        z["leafs"][0]["subscriptions_list"] == serde_json::json!(["x"])
+    });
+    let mut near = client(&linked, "SUB x 1\r\n");
+    // Their messages come in on their lanes of the linked server: lane 0
+    // has the link, lane 1 hands them on to lane 0.
+    let mut on0 = client(&other, "");
+    let mut on1 = client(&other, "");
+    // The hub has a link of its own to every server that should send it
+    // a message, as in `nats-server`.
+    until_heard(&mut on0, &mut near, "x");
+    until_heard(&mut on1, &mut near, "x");
+    send(&mut near, "PUB x 4\r\nnear\r\n");
+    let lmsg = loop {
+        let l = line(&mut r);
+        if l.starts_with("LMSG") {
+            break l;
+        }
+    };
+    assert_eq!([lmsg, line(&mut r)], ["LMSG x 4", "near"]);
+}
+
+#[test]
 fn clients_hear_where_the_clients_of_the_others_connect() {
     use std::io::BufRead;
     let servers = met_cluster();

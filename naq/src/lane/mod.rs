@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-pub(crate) use data::{Batch, Outs};
+pub(crate) use data::{Batch, Outs, Source};
 pub(crate) use publish::Routing;
 pub(crate) use route::{Queue, Queued};
 
