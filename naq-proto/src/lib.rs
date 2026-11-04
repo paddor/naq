@@ -1,6 +1,7 @@
-//! Sans-I/O codec for the NATS client protocol.
+//! Sans-I/O codec for the NATS client and leaf node protocols.
 //!
-//! [`client::parse`] reads what a client sends, as slices of the input.
+//! [`client::parse`] reads what a client sends, as slices of the input;
+//! [`leaf::parse`] reads what a leaf or its hub sends on a link.
 //! [`encode`] writes what a server sends. [`subject`] has the rules of
 //! subjects and wildcards. No I/O and no allocation: the caller owns every
 //! buffer.
@@ -35,5 +36,6 @@
 
 pub mod client;
 pub mod encode;
+pub mod leaf;
 mod num;
 pub mod subject;

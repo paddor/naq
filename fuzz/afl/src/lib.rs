@@ -5,14 +5,16 @@ pub mod seeds;
 
 use naq_proto::client::{self, ClientOp, Limits, Parsed};
 use naq_proto::encode::Msg;
+use naq_proto::leaf::{self, LeafOp};
 
 /// A fuzz target body.
 pub type Target = fn(&[u8]);
 
 /// Every target, by name.
-pub const TARGETS: [(&str, Target); 4] = [
+pub const TARGETS: [(&str, Target); 5] = [
     ("client_wire", client_wire),
     ("config", config),
+    ("leaf_wire", leaf_wire),
     ("subjects", subjects),
     ("websocket", websocket),
 ];
@@ -63,6 +65,51 @@ pub fn client_wire(data: &[u8]) {
                 at += used;
             }
             Ok(Parsed::Partial(need)) => {
+                if let Some(n) = need {
+                    assert!(n > data.len() - at, "needs {n}, has {}", data.len() - at);
+                }
+                return;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// Parses leaf link operations until the input ends or breaks. An
+/// operation takes at least one byte and no more than there are; a message
+/// and an interest encode back to what parses as the same.
+///
+/// # Panics
+///
+/// When the parser or the encoders break those rules.
+pub fn leaf_wire(data: &[u8]) {
+    let limits = Limits {
+        max_control_line: 256,
+        max_payload: 4096,
+    };
+    let mut at = 0;
+    while at < data.len() {
+        match leaf::parse(&data[at..], &limits) {
+            Ok(leaf::Parsed::Op(op, used)) => {
+                assert!(used > 0 && used <= data.len() - at, "took {used}");
+                let mut out = Vec::new();
+                match op {
+                    LeafOp::Msg(m) => {
+                        assert!(m.payload.len() <= limits.max_payload);
+                        m.encode(&mut out);
+                    }
+                    LeafOp::Sub(i) => {
+                        leaf::sub(&mut out, i.subject, i.queue.map(|q| (q, i.weight)));
+                    }
+                    _ => {}
+                }
+                if !out.is_empty() {
+                    let again = leaf::parse(&out, &limits);
+                    assert_eq!(again, Ok(leaf::Parsed::Op(op, out.len())), "re-encoded");
+                }
+                at += used;
+            }
+            Ok(leaf::Parsed::Partial(need)) => {
                 if let Some(n) = need {
                     assert!(n > data.len() - at, "needs {n}, has {}", data.len() - at);
                 }

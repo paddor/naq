@@ -137,6 +137,11 @@ Notable changes to naq. The format follows
   the server's users and token, a `no_auth_user` for the server's, and a
   timeout for its own. `advertise` is accepted; `jwt_cookie` is refused, as
   `nats-server` refuses it without trusted operators.
+- `naq-proto`: `leaf`, the leaf node wire. `leaf::parse` reads `INFO`,
+  `CONNECT`, `LS+`, `LS-`, `LMSG`, `HMSG`, `PING`, `PONG`, `+OK` and `-ERR`
+  from either side of a link, as slices of the input, splitting arguments
+  as `nats-server` does. `leaf::sub`, `leaf::unsub`, `leaf::connect` and
+  `leaf::Msg::encode` write what a leaf sends.
 
 ### Changed
 

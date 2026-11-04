@@ -16,7 +16,7 @@ use crate::num::parse_size;
 
 /// Control line bytes allowed beyond [`Limits::max_control_line`]: the verb,
 /// the blanks after it and the line end.
-const LINE_SLACK: usize = 64;
+pub(crate) const LINE_SLACK: usize = 64;
 
 /// Limits a parse enforces. The defaults are those of `nats-server`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,7 +354,7 @@ fn verb(buf: &[u8]) -> Result<Option<Verb>, ParseError> {
 /// As in `nats-server`, blanks before the arguments are skipped, and a `\r`
 /// anywhere after their first byte drops the last byte before the `\n`.
 #[inline]
-fn line<'a>(
+pub(crate) fn line<'a>(
     buf: &'a [u8],
     from: usize,
     limits: &Limits,
@@ -491,7 +491,7 @@ fn split<const N: usize>(arg: &[u8], sep: impl Fn(u8) -> bool) -> Option<([&[u8]
 
 /// Separates `PUB` and `HPUB` arguments.
 #[inline]
-const fn is_blank(b: u8) -> bool {
+pub(crate) const fn is_blank(b: u8) -> bool {
     matches!(b, b' ' | b'\t')
 }
 

@@ -20,6 +20,15 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
             "tls { cert_file: a.pem, key_file: b.pem, timeout: 0.5 }\nhttp_port: 8222\n",
             "a = [1, 2k, 3MB, -4, 1.5, yes, 'q', \"e\\t\"]\nb { c: $a }\n",
         ],
+        "leaf_wire" => &[
+            "INFO {\"server_id\":\"h\",\"nonce\":\"abc\",\"info_on_connect\":true} \r\nPING\r\n",
+            "LS+ foo\r\nLS+ bar.* q 3\r\nLS- bar.* q\r\nLS- foo\r\nLS+ $LDS.xyz\r\n",
+            "LMSG foo 2\r\nhi\r\nLMSG foo r 0\r\n\r\nLMSG foo | q1 q2 2\r\nhi\r\n",
+            "LMSG foo + _INBOX.1 q 2\r\nhi\r\nHMSG h | q 12 14\r\nNATS/1.0\r\n\r\nhi\r\n",
+            "-ERR 'Loop detected for leafnode account=\"$G\". Delaying attempt to reconnect for 30s'\r\n+OK\r\nPONG\r\n",
+            "CONNECT {\"name\":\"leaf\",\"headers\":true}\r\nLMSG a 3\r\nab",
+            "LS+ s q\r\n",
+        ],
         "subjects" => &[
             "a.b.c\na.b.c\na.*.c\na.>\n>\nb.*\n*.*.*\n",
             "orders.1\norders.*\norders.>\n*.1\n",
