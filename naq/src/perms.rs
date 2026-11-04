@@ -87,7 +87,7 @@ impl Perms {
     }
 
     /// Whether the rules let it publish to `subject`; replies aside.
-    fn publish(&self, subject: &[u8]) -> bool {
+    pub(crate) fn publish(&self, subject: &[u8]) -> bool {
         self.publish.allow.as_ref().is_none_or(|a| a.plain(subject))
             && !self.publish.deny.plain(subject)
     }

@@ -1068,6 +1068,7 @@ fn published_to_go(leaf: &Server, sub: &mut Peer) {
         c.send("PUB s 2\r\nhi\r\n");
         let mut l = String::new();
         if sub.r.read_line(&mut l).is_ok() && l.starts_with("MSG s 1 2") {
+            sub.line();
             break;
         }
         assert!(Instant::now() < deadline, "nothing came");
@@ -1187,4 +1188,107 @@ fn a_leaf_fails_over_to_another_node_of_a_go_hub_cluster() {
     leafz_until(ports[0][2], |z| z["leafnodes"] == 1);
     drop(a);
     leafz_until(ports[1][2], |z| z["leafnodes"] == 1);
+}
+
+#[test]
+fn the_hub_hears_of_the_denies_and_the_isolation_asked_for() {
+    let json = connect_of(
+        &Hub::new(),
+        Remote {
+            deny_imports: vec!["secret.>".into()],
+            request_isolation: true,
+            ..Remote::default()
+        },
+    );
+    assert_eq!(json["deny_pub"], serde_json::json!(["secret.>"]));
+    assert_eq!(json["isolate"], true);
+    let plain = connect_of(&Hub::new(), Remote::default());
+    assert!(plain.get("deny_pub").is_none() && plain.get("isolate").is_none());
+}
+
+#[test]
+fn the_imports_and_exports_of_the_hub_and_the_remote_hold() {
+    let hub = Hub::new();
+    let naq = leaf_with(Remote {
+        urls: vec![format!("127.0.0.1:{}", hub.port())],
+        deny_imports: vec!["in.no".into()],
+        deny_exports: vec!["out.no".into()],
+        ..Remote::default()
+    });
+    let mut p = hub.accept();
+    p.send(INFO);
+    p.line();
+    p.send(
+        "INFO {\"connect_info\":true,\"import\":{\"allow\":[\"in.>\",\"done\"]},\"export\":{\"allow\":[\"out.>\"]}}\r\n",
+    );
+    lines_until(&mut p, "LS+ $LDS.");
+    // Interest outside the imports is not told.
+    let mut c = client(
+        &naq,
+        "SUB other 1\r\nSUB in.no 2\r\nSUB _R_.x 3\r\nSUB in.a 4\r\nSUB done 9\r\n",
+    );
+    told(&mut p, &["LS+ in.a", "LS+ done"]);
+    // Literal interest outside the exports is left out; wildcards count.
+    p.send("LS+ bad\r\nLS+ out.no\r\nLS+ out.ok\r\nLS+ >\r\n");
+    wait_for_interest(&naq, &mut p, "out.ok");
+    c.send("PUB bad 2\r\nno\r\nPUB out.no 2\r\nno\r\nPUB out.ok 2\r\nok\r\n");
+    assert_eq!(lines(&mut p, 2), ["LMSG out.ok 2", "ok"]);
+    // Messages outside the imports stay out, but service replies.
+    p.send(
+        "LMSG other 2\r\nno\r\nLMSG in.no 2\r\nno\r\nLMSG _R_.x 2\r\nok\r\nLMSG in.a 2\r\nok\r\n",
+    );
+    p.send("LMSG done 0\r\n\r\n");
+    let got: Vec<_> = got_until_done(&mut c).into_iter().map(|(m, _)| m).collect();
+    assert_eq!(got, ["MSG _R_.x 3 2", "MSG in.a 4 2"]);
+}
+
+#[test]
+fn a_go_hub_keeps_the_link_of_a_leaf_that_keeps_to_its_permissions() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!(
+        "port: {port}\nhttp_port: {http}\nauthorization {{ users: [{{ user: l, password: p, permissions: {{ publish: s, subscribe: in }} }}, {{ user: c, password: c }}] }}\nno_auth_user: c\nleafnodes {{ port: {leafport} }}\n"
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let mut sub = go_client(port, "SUB > 1\r\n");
+    let leaf = leaf(&format!("nats-leaf://l:p@127.0.0.1:{leafport}"));
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    published_to_go(&leaf, &mut sub);
+    // The hub would end the link for this one: it is not sent.
+    let mut c = client(&leaf, "");
+    c.send("PUB t 2\r\nno\r\nPUB s 2\r\nok\r\n");
+    let got = lines_until(&mut sub, "ok");
+    assert!(!got.iter().any(|l| l.starts_with("MSG t ")), "{got:?}");
+    assert_eq!(get(http, "/leafz")["leafnodes"], 1);
+}
+
+#[test]
+fn a_request_crosses_a_go_hub_and_its_reply_comes_back() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!("port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n");
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    // Its interest in s comes with the one in svc.
+    let mut svc = go_client(port, "SUB s 1\r\nSUB svc 2\r\n");
+    let leaf = leaf(&format!("nats-leaf://127.0.0.1:{leafport}"));
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    published_to_go(&leaf, &mut svc);
+    let mut c = client(
+        &leaf,
+        "CONNECT {\"headers\":true,\"no_responders\":true}\r\nSUB _INBOX.r 7\r\n",
+    );
+    leafz_until(http, |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|s| s == "_INBOX.r"))
+    });
+    c.send("PUB svc _INBOX.r 3\r\nask\r\n");
+    lines_until(&mut svc, "MSG svc 2 _INBOX.r 3");
+    assert_eq!(svc.line(), "ask");
+    svc.send("PUB _INBOX.r 6\r\nanswer\r\n");
+    assert_eq!(lines(&mut c, 2), ["MSG _INBOX.r 7 6", "answer"]);
 }

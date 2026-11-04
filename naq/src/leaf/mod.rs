@@ -16,6 +16,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use naq_proto::subject;
+
 use crate::lane;
 use crate::server::Shared;
 
@@ -73,6 +75,17 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
             && !opts.accounts.iter().any(|x| x == a)
         {
             return Err(format!("leafnode remote: no account {a:?}"));
+        }
+        for (key, list) in [
+            ("deny_imports", &r.deny_imports),
+            ("deny_exports", &r.deny_exports),
+        ] {
+            if let Some(s) = list
+                .iter()
+                .find(|s| !subject::is_valid_filter(s.as_bytes()))
+            {
+                return Err(format!("leafnode remote: {key}: invalid subject {s:?}"));
+            }
         }
         if r.credentials.is_some() && r.nkey.is_some() {
             return Err("leafnode remote: both credentials and an nkey".into());

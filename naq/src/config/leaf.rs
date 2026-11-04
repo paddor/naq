@@ -32,7 +32,7 @@ pub(super) fn leafnodes(o: &mut Options, item: &Item) -> Result<(), Bad> {
 }
 
 /// One remote: `{ url, urls, account, no_randomize, credentials, nkey,
-/// tls }`.
+/// tls, deny_imports, deny_exports, request_isolation }`.
 fn remote(item: &Item) -> Result<Remote, Bad> {
     let Value::Map(m) = &item.value else {
         return Err((item.line, "leafnodes: remotes: expected a map".into()));
@@ -68,6 +68,18 @@ fn remote(item: &Item) -> Result<Remote, Bad> {
                 r.nkey = Some(string(v).ok_or_else(|| bad("expected a string"))?);
             }
             "tls" => r.tls = Some(tls(v)?),
+            "deny_imports" | "deny_import" => {
+                r.deny_imports = subjects(v).ok_or_else(|| bad("expected a subject or a list"))?;
+            }
+            "deny_exports" | "deny_export" => {
+                r.deny_exports = subjects(v).ok_or_else(|| bad("expected a subject or a list"))?;
+            }
+            "request_isolation" => {
+                r.request_isolation = match v.value {
+                    Value::Bool(b) => b,
+                    _ => return Err(bad("expected true or false")),
+                };
+            }
             _ => return Err(bad("not supported")),
         }
     }
@@ -104,4 +116,13 @@ fn tls(item: &Item) -> Result<RemoteTls, Bad> {
         }
     }
     Ok(t)
+}
+
+/// A subject, or a list of them.
+fn subjects(item: &Item) -> Option<Vec<String>> {
+    match &item.value {
+        Value::Str(s) => Some(vec![s.clone()]),
+        Value::Array(a) => a.iter().map(string).collect(),
+        _ => None,
+    }
 }

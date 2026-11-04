@@ -16,8 +16,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use super::{Ended, HubUrl, LinkSide, Told, creds, side};
+use crate::Rules;
 use crate::conn::{self, Client};
 use crate::lane::{Lane, Out, Routing};
+use crate::perms::Perms;
 use crate::ws;
 
 /// Time to connect to a hub.
@@ -47,6 +49,35 @@ struct HubInfo {
     info_on_connect: bool,
     connect_info: bool,
     nonce: String,
+    /// What the link may send to the hub, in `connect_info`.
+    export: Option<Acl>,
+    /// What it may take from the hub.
+    import: Option<Acl>,
+}
+
+/// Subjects allowed, and those denied among them, as an `INFO` gives them.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Acl {
+    allow: Option<Vec<String>>,
+    deny: Vec<String>,
+}
+
+impl From<Option<Acl>> for Rules {
+    fn from(a: Option<Acl>) -> Rules {
+        let a = a.unwrap_or_default();
+        Rules {
+            allow: a.allow,
+            deny: a.deny,
+        }
+    }
+}
+
+/// What the handshake settled.
+struct Terms {
+    /// The link carries header blocks.
+    headers: bool,
+    perms: Option<Perms>,
 }
 
 /// The leaf's `CONNECT`. Without `compress_mode`, the hub stays
@@ -69,6 +100,11 @@ struct Connect<'a> {
     nkey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sig: Option<String>,
+    /// The remote's `deny_imports`, which the hub sends the link nothing on.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    deny_pub: &'a [String],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    isolate: bool,
 }
 
 /// Why a link ends: the wait the hub asked for, beyond the interval.
@@ -310,23 +346,22 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
     /// `first` INFO if read already, then the link until it ends.
     async fn run(mut self, remote: usize, url: &HubUrl, first: Option<HubInfo>) -> End {
         match self.handshake(remote, url, first).await {
-            Ok(headers) => {
+            Ok(terms) => {
                 let (mut link, w) = self.split();
-                link.serve(remote, w, headers).await
+                link.serve(remote, w, terms).await
             }
             Err(delay) => delay,
         }
     }
 
     /// The checks of the hub's `first` INFO, read here unless given, the
-    /// `CONNECT`, and the `INFO` that answers it. Returns whether the link
-    /// carries header blocks.
+    /// `CONNECT`, and the `INFO` that answers it. Returns what they settled.
     async fn handshake(
         &mut self,
         remote: usize,
         url: &HubUrl,
         first: Option<HubInfo>,
-    ) -> Result<bool, End> {
+    ) -> Result<Terms, End> {
         let info = match first {
             Some(info) => info,
             None => timeout(FIRST_INFO, self.info())
@@ -362,6 +397,8 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             jwt: proof.jwt,
             nkey: proof.nkey,
             sig: proof.sig,
+            deny_pub: &r.deny_imports,
+            isolate: r.request_isolation,
         };
         let mut out = Vec::new();
         leaf::connect(&mut out, &serde_json::to_vec(&connect).unwrap_or_default());
@@ -374,7 +411,10 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         }
         self.learn(&info);
         self.learn(&answer);
-        Ok(info.headers)
+        Ok(Terms {
+            headers: info.headers,
+            perms: side::perms(answer.export.into(), answer.import.into(), r),
+        })
     }
 
     /// Reads up to the next `INFO`, answering `PING`s on the way.
@@ -407,7 +447,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         &mut self,
         remote: usize,
         w: W,
-        headers: bool,
+        terms: Terms,
     ) -> End {
         let shared = &self.lane.shared;
         let name = shared.opts.remotes[remote]
@@ -424,7 +464,12 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             shared.opts.write_deadline,
             || (),
         ));
-        let side = Rc::new(LinkSide::new(account, client.clone(), headers));
+        let side = Rc::new(LinkSide::new(
+            account,
+            client.clone(),
+            terms.headers,
+            terms.perms,
+        ));
         let lds = shared.lds[account as usize].as_bytes();
         side.snapshot(&self.lane.index(account).borrow(), lds);
         self.lane.links.borrow_mut().push(side.clone());
@@ -567,7 +612,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         let len = m.payload.len() + m.headers.map_or(0, <[u8]>::len);
         lane.tally.took(len);
         side.client.tally.took(len);
-        if side::denied(m.subject) {
+        if side::denied(m.subject) || !side.takes(m.subject) {
             return;
         }
         let p = Pub {

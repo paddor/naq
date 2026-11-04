@@ -745,3 +745,44 @@ fn a_remote_tls_file_that_cannot_be_read_stops_the_start() {
     let e = naq::Server::start(&o).unwrap_err();
     assert!(matches!(e, Error::Tls(_)), "{e}");
 }
+
+#[test]
+fn a_remote_takes_denies_and_isolation() {
+    let o: Options = "leafnodes { remotes: [{ url: h, deny_imports: a, deny_export: [\"b.*\", c], \
+                      request_isolation: true }] }\n"
+        .parse()
+        .unwrap();
+    let r = &o.remotes[0];
+    assert_eq!(
+        (
+            &r.deny_imports[..],
+            &r.deny_exports[..],
+            r.request_isolation
+        ),
+        (
+            &["a".to_owned()][..],
+            &["b.*".to_owned(), "c".to_owned()][..],
+            true
+        )
+    );
+    for (text, reason) in [
+        (
+            "leafnodes { remotes: [{url: h, deny_imports: 1}] }",
+            "leafnodes: remotes: deny_imports: expected a subject or a list",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, deny_exports: {}}] }",
+            "leafnodes: remotes: deny_exports: expected a subject or a list",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, request_isolation: 1}] }",
+            "leafnodes: remotes: request_isolation: expected true or false",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, deny_exports: \"a..b\"}] }",
+            "leafnode remote: deny_exports: invalid subject \"a..b\"",
+        ),
+    ] {
+        config_error(text, reason);
+    }
+}

@@ -189,6 +189,15 @@ Notable changes to naq. The format follows
   URLs to dial next, as `nats-server` sets them: those but ones configured,
   then the configured ones. They take the scheme of the configured URLs
   and the credentials of the first configured URL with some.
+- `naq`: permissions on leaf node links (`Remote::deny_imports`,
+  `Remote::deny_exports`, `Remote::request_isolation`; `deny_imports`,
+  `deny_exports` and `request_isolation` of a remote). The hub's `import`
+  and `export` in `connect_info`, with the remote's denies, decide what the
+  link tells the hub of and takes from it, and what it sends and takes
+  interest in: other messages are dropped, and literal hub interest is left
+  out, as a `nats-server` leaf does, so the hub keeps the link. Service
+  replies (`_R_.`) and JetStream acks always come in. The `CONNECT` sends
+  `deny_imports` as `deny_pub`, and `isolate` when asked.
 
 ### Changed
 

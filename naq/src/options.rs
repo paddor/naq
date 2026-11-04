@@ -309,6 +309,15 @@ pub struct Remote {
     /// public key and signs the hub's nonce with it. Not with
     /// [`Remote::credentials`].
     pub nkey: Option<String>,
+    /// Subjects the link takes no messages on and tells the hub of no
+    /// interest in (`deny_imports`); the hub learns them too.
+    pub deny_imports: Vec<String>,
+    /// Subjects the link sends no messages on and takes no hub interest in
+    /// (`deny_exports`).
+    pub deny_exports: Vec<String>,
+    /// The hub sends this link no interest of its other leaf nodes
+    /// (`request_isolation`).
+    pub request_isolation: bool,
     /// TLS to the hub (`tls`). Without it, the link starts TLS only when
     /// the hub asks for it, and trusts the system's certificate
     /// authorities.
