@@ -187,14 +187,20 @@ impl Lane {
         };
         match lane {
             Some(l) => Queued::Lane(l),
-            None => self.to_peer(groups, q.name),
+            None => self.to_peer(groups, q.name, skip),
         }
     }
 
     /// Sends a message for queue group `name` to one of the links of
-    /// `groups`, each as likely as its weight says, if there is one.
-    fn to_peer(&self, groups: &Few<'_, Group>, name: &[u8]) -> Queued {
-        let peers = || groups.iter().flat_map(|g| &g.peers);
+    /// `groups` but link `skip`, each as likely as its weight says, if
+    /// there is one.
+    fn to_peer(&self, groups: &Few<'_, Group>, name: &[u8], skip: u64) -> Queued {
+        let peers = || {
+            groups
+                .iter()
+                .flat_map(|g| &g.peers)
+                .filter(move |p| p.link != skip)
+        };
         let total: u64 = peers().map(|p| u64::from(p.weight)).sum();
         if total == 0 {
             return Queued::Nowhere;

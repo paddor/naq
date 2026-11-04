@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 use naq_proto::client::{self, ClientOp, Limits, ParseError, Parsed, Pub, Sub, Unsub};
 use naq_proto::{encode, subject};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -14,15 +14,15 @@ use tokio::time::Instant;
 use super::ping::Tick;
 use super::{Client, Close, Conn, Stage};
 use crate::auth::{Check, Creds, Grant, Pending};
-use crate::index::{Entry, Few, Found, Index, Interest, Peer};
-use crate::lane::{Batch, Lane, Out, Queue, Queued};
+use crate::index::{Entry, Found, Index, Interest};
+use crate::lane::Routing;
 use crate::perms::{Held, quoted};
 
 /// Bytes a read may fill at least. With less room, the buffer takes back
 /// what was parsed already, or the read goes on in a buffer of
 /// [`READ_CHUNK`].
 const READ_ROOM: usize = 16 << 10;
-const READ_CHUNK: usize = 256 << 10;
+pub(crate) const READ_CHUNK: usize = 256 << 10;
 /// Spent read buffers a lane keeps; beyond these, the oldest is let go.
 const SPENT_MAX: usize = 8;
 
@@ -156,23 +156,8 @@ impl Conn {
     /// Drops the `at` bytes parsed from `buf`, handing those that publishes
     /// for other lanes refer to over to those lanes.
     async fn ship(&mut self, buf: &mut BytesMut, at: usize) {
-        if self.fwd.iter().all(Out::is_empty) {
-            buf.advance(at);
-            return;
-        }
-        let chunk = buf.split_to(at).freeze();
-        for to in 0..self.fwd.len() {
-            if self.fwd[to].is_empty() {
-                continue;
-            }
-            let out = self.fwd[to].take();
-            let batch = Batch {
-                chunk: chunk.clone(),
-                out,
-                account: self.client.account.get(),
-            };
-            self.lane.ship(to, batch).await;
-        }
+        let account = self.client.account.get();
+        self.lane.ship_reads(&mut self.fwd, buf, at, account).await;
     }
 
     // Inlined into the parse loop; what is rare stays out of line, so it
@@ -225,8 +210,8 @@ impl Conn {
     }
 
     /// Encodes the message for every plain subscription on this lane and
-    /// one member of each queue group here, and queues it once for each
-    /// other lane with interest. `p` lies in `buf`.
+    /// one member of each queue group here, queues it once for each other
+    /// lane with interest, and hands it to links. `p` lies in `buf`.
     #[inline]
     fn publish(&mut self, p: &Pub<'_>, buf: &[u8]) {
         let index = self.lane.index(self.client.account.get()).borrow();
@@ -234,27 +219,9 @@ impl Conn {
             self.nobody_got(&index, p);
             return;
         };
-        let mut r = Routing {
-            lane: &self.lane,
-            fwd: &mut self.fwd,
-            p,
-            buf,
-            skip: if self.opts.echo { 0 } else { self.client.id },
-            stalled: None,
-            delivered: false,
-        };
-        match &found {
-            Found::One(i) => {
-                r.plain(i, false);
-                for (name, _) in &i.queues {
-                    r.queue(&found, 0, name);
-                }
-            }
-            Found::Many(all) => r.many(&found, all),
-        }
-        if self.lane.has_hits() {
-            self.lane.send_hits(p, &mut r.stalled);
-        }
+        let skip = if self.opts.echo { 0 } else { self.client.id };
+        let mut r = Routing::new(&self.lane, &mut self.fwd, p, buf, skip);
+        r.route(&found);
         if let Some(s) = r.stalled {
             self.stalled = Some(s);
         }
@@ -496,110 +463,12 @@ fn no_responders(index: &Index, client: &Client, reply: &[u8], subject: &[u8]) -
     true
 }
 
-/// A publish being routed on its lane.
-struct Routing<'a, 'p> {
-    lane: &'a Lane,
-    /// Publishes for each other lane.
-    fwd: &'a mut [Out],
-    p: &'a Pub<'p>,
-    /// The read buffer `p` lies in.
-    buf: &'a [u8],
-    /// The publisher's client ID without echo, else 0.
-    skip: u64,
-    /// A subscriber past the stall mark.
-    stalled: Option<Rc<Client>>,
-    /// Some subscription got it, here or on another lane.
-    delivered: bool,
-}
-
-impl Routing<'_, '_> {
-    /// Delivers to the plain subscriptions of `i` here, and forwards to
-    /// each other lane with some; with `once`, unless forwarded there for
-    /// another filter already.
-    #[expect(
-        clippy::inline_always,
-        reason = "measured: a call here costs every publish"
-    )]
-    #[inline(always)]
-    fn plain(&mut self, i: &Interest, once: bool) {
-        self.delivered |= self
-            .lane
-            .deliver(&i.plain.local, self.p, self.skip, &mut self.stalled);
-        for &(to, _) in &i.plain.lanes {
-            self.fwd[to].plain(self.buf, self.p, once);
-            self.delivered = true;
-        }
-        if !i.plain.peers.is_empty() {
-            self.peers(&i.plain.peers);
-        }
-    }
-
-    /// Hands the message to links with plain interest: here, or forwarded
-    /// to their lanes.
-    #[inline(never)]
-    fn peers(&mut self, peers: &[Peer]) {
-        for p in peers {
-            if p.lane == self.lane.id {
-                self.lane.hit_link(p.link, None);
-            } else {
-                self.fwd[p.lane].plain(self.buf, self.p, true);
-            }
-        }
-        self.delivered = true;
-    }
-
-    /// Routes to the filters in `all`, wildcard ones among them: each
-    /// plain subscription once, each queue group once across filters.
-    #[inline(never)]
-    fn many(&mut self, found: &Found<'_>, all: &Few<'_, Interest>) {
-        for i in all.iter() {
-            self.plain(i, true);
-        }
-        for (k, i) in all.iter().enumerate() {
-            for (name, _) in &i.queues {
-                if !merged_before(all, k, name) {
-                    self.queue(found, k, name);
-                }
-            }
-        }
-    }
-
-    /// Delivers to one member of queue group `name`, from the `k`th match
-    /// on, here or on the lane of the member picked.
-    fn queue(&mut self, found: &Found<'_>, k: usize, name: &[u8]) {
-        let q = Queue {
-            name,
-            groups: found.queue_groups(k, name),
-        };
-        match self
-            .lane
-            .deliver_queue(&q, self.p, self.skip, &mut self.stalled)
-        {
-            Queued::Here => self.delivered = true,
-            Queued::Lane(to) => {
-                self.fwd[to].queue(self.buf, self.p, name);
-                self.delivered = true;
-            }
-            Queued::Nowhere => {}
-        }
-    }
-}
-
-/// Whether queue group `name` of `found[k]` was in an earlier match, and
-/// so got its pick already.
-fn merged_before(found: &Few<'_, Interest>, k: usize, name: &[u8]) -> bool {
-    found
-        .iter()
-        .take(k)
-        .any(|i| i.queues.iter().any(|(n, _)| **n == *name))
-}
-
 /// Gives `buf`, which holds at most the start of one operation, room for
 /// the next read: [`READ_ROOM`] at least, the rest of an operation of
 /// `need` bytes. Takes back the space parsed already where nothing else
 /// refers to it, so a busy connection reuses one buffer. Where batches on
 /// other lanes still do, the read goes on in a buffer from `spent`.
-fn make_room(buf: &mut BytesMut, need: Option<usize>, spent: &SpentReads) {
+pub(crate) fn make_room(buf: &mut BytesMut, need: Option<usize>, spent: &SpentReads) {
     let room = need.map_or(READ_ROOM, |n| n.saturating_sub(buf.len()).max(READ_ROOM));
     if buf.capacity() - buf.len() >= room {
         return;
@@ -624,7 +493,7 @@ pub(crate) struct SpentReads(RefCell<VecDeque<BytesMut>>);
 impl SpentReads {
     /// A buffer with room for `len` bytes: a spent one nothing refers to
     /// any more, else a new one.
-    fn take(&self, len: usize) -> BytesMut {
+    pub(crate) fn take(&self, len: usize) -> BytesMut {
         let mut spent = self.0.borrow_mut();
         let free = spent.iter_mut().position(|b| b.try_reclaim(len));
         free.and_then(|i| spent.remove(i))
@@ -657,6 +526,8 @@ pub(crate) async fn stall(sub: &Rc<Client>, mark: usize) {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Buf;
+
     use super::*;
 
     #[test]

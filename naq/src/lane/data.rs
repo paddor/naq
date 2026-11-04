@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 use naq_proto::client::Pub;
 
 use super::Lane;
@@ -169,6 +169,33 @@ fn pub_of<'b>(b: &'b Batch, f: &Fwd) -> Pub<'b> {
 }
 
 impl Lane {
+    /// Drops the `at` bytes parsed from `buf`, handing those that the
+    /// messages in `fwd` refer to over to their lanes, as batches of
+    /// `account`.
+    pub(crate) async fn ship_reads(
+        &self,
+        fwd: &mut [Out],
+        buf: &mut BytesMut,
+        at: usize,
+        account: u32,
+    ) {
+        if fwd.iter().all(Out::is_empty) {
+            buf.advance(at);
+            return;
+        }
+        let chunk = buf.split_to(at).freeze();
+        for (to, out) in fwd.iter_mut().enumerate() {
+            if !out.is_empty() {
+                let batch = Batch {
+                    chunk: chunk.clone(),
+                    out: out.take(),
+                    account,
+                };
+                self.ship(to, batch).await;
+            }
+        }
+    }
+
     /// Notes the links on this lane among `peers`.
     #[inline]
     fn peers_here(&self, peers: &[crate::index::Peer]) {

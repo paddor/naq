@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
-use naq_proto::client::Limits;
+use naq_proto::client::{Limits, Pub};
 use naq_proto::encode;
 use naq_proto::leaf::{self, LeafOp, Parsed};
 use serde::{Deserialize, Serialize};
@@ -15,9 +15,9 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use super::{Ended, HubUrl, LinkSide};
-use crate::conn::Client;
-use crate::lane::Lane;
+use super::{Ended, HubUrl, LinkSide, side};
+use crate::conn::{self, Client};
+use crate::lane::{Lane, Out, Routing};
 
 /// Time to connect to a hub.
 const DIAL: Duration = Duration::from_secs(1);
@@ -29,8 +29,6 @@ const CONNECT_INFO: Duration = Duration::from_secs(2);
 const LOOP_DELAY: Duration = Duration::from_secs(30);
 /// The wait after a hub refuses this server's version.
 const VERSION_DELAY: Duration = Duration::from_secs(5);
-/// Bytes a read may fill at least.
-const READ_ROOM: usize = 16 << 10;
 /// How long the writer may take to write what is left at the end.
 const LINGER: Duration = Duration::from_secs(1);
 
@@ -82,6 +80,10 @@ struct Link<'l> {
     r: OwnedReadHalf,
     buf: BytesMut,
     limits: Limits,
+    /// Messages of the hub for each other lane, from the last read.
+    fwd: Box<[Out]>,
+    /// A subscriber past the stall mark.
+    stalled: Option<Rc<Client>>,
 }
 
 /// Dials the hub at `url` for remote `remote`, serves the link and returns
@@ -97,12 +99,14 @@ pub(super) async fn session(lane: &Rc<Lane>, remote: usize, url: &HubUrl) -> End
     let mut link = Link {
         lane,
         r,
-        buf: BytesMut::with_capacity(READ_ROOM),
+        buf: lane.reads.take(conn::READ_CHUNK),
         // `nats-server` allows a leaf link 16 control lines.
         limits: Limits {
             max_control_line: opts.max_control_line.saturating_mul(16),
             max_payload: opts.max_payload,
         },
+        fwd: (0..lane.lanes()).map(|_| Out::default()).collect(),
+        stalled: None,
     };
     let delay = match link.handshake(remote, url, &mut w).await {
         Ok(headers) => link.serve(remote, w, headers).await,
@@ -192,10 +196,7 @@ impl Link<'_> {
 
     /// Reads more, for an operation of `need` bytes if known.
     async fn read(&mut self, need: Option<usize>) -> Result<(), End> {
-        let room = need.map_or(READ_ROOM, |n| {
-            n.saturating_sub(self.buf.len()).max(READ_ROOM)
-        });
-        self.buf.reserve(room);
+        conn::make_room(&mut self.buf, need, &self.lane.reads);
         match self.r.read_buf(&mut self.buf).await {
             Ok(0) | Err(_) => Err(End::ZERO),
             Ok(_) => Ok(()),
@@ -237,32 +238,31 @@ impl Link<'_> {
     }
 
     async fn read_loop(&mut self, side: &LinkSide, lds: &[u8]) -> End {
+        let lane = self.lane;
         let client = &side.client;
-        let opts = &self.lane.shared.opts;
+        let opts = &lane.shared.opts;
         let interval = opts.ping_interval;
+        let mark = opts.max_pending / 4 * 3;
         let mut st = State::default();
+        let mut buf = std::mem::take(&mut self.buf);
         let timer = tokio::time::sleep(interval);
         tokio::pin!(timer);
         loop {
-            loop {
-                match leaf::parse(&self.buf, &self.limits) {
-                    Ok(Parsed::Op(op, used)) => {
-                        if let Err(end) = self.handle(op, side, lds, &mut st) {
-                            return end;
-                        }
-                        self.buf.advance(used);
-                    }
-                    Ok(Parsed::Partial(need)) => {
-                        let room = need.map_or(READ_ROOM, |n| {
-                            n.saturating_sub(self.buf.len()).max(READ_ROOM)
-                        });
-                        self.buf.reserve(room);
-                        break;
-                    }
-                    Err(_) => return st.delay,
-                }
+            let (at, stop) = self.parse(&buf, side, lds, &mut st);
+            lane.flush();
+            lane.expire();
+            lane.ship_reads(&mut self.fwd, &mut buf, at, side.account)
+                .await;
+            let need = match stop {
+                Ok(need) => need,
+                Err(end) => return end,
+            };
+            // A subscriber past the stall mark slows the hub to its pace.
+            if let Some(sub) = self.stalled.take() {
+                conn::stall(&sub, mark).await;
             }
-            self.lane.flush();
+            tokio::task::yield_now().await;
+            conn::make_room(&mut buf, need, &lane.reads);
             // Cancel-safe: a dropped read took no bytes, a dropped
             // `notified` passes its wake on, and the timer keeps its deadline.
             tokio::select! {
@@ -277,7 +277,7 @@ impl Link<'_> {
                     self.send(client, encode::PING);
                     timer.as_mut().reset(Instant::now() + interval);
                 }
-                n = self.r.read_buf(&mut self.buf) => match n {
+                n = self.r.read_buf(&mut buf) => match n {
                     Ok(0) | Err(_) => return st.delay,
                     Ok(_) => {}
                 },
@@ -285,7 +285,36 @@ impl Link<'_> {
         }
     }
 
-    /// Acts on what the hub sent. `Err` ends the link.
+    /// Acts on the operations at the start of `buf`. Returns the bytes they
+    /// took, and the length of the operation after them if known, or how
+    /// the link ends.
+    fn parse(
+        &mut self,
+        buf: &[u8],
+        side: &LinkSide,
+        lds: &[u8],
+        st: &mut State,
+    ) -> (usize, Result<Option<usize>, End>) {
+        let mut at = 0;
+        loop {
+            match leaf::parse(&buf[at..], &self.limits) {
+                Ok(Parsed::Op(LeafOp::Msg(m), used)) => {
+                    self.inbound(&m, buf, side);
+                    at += used;
+                }
+                Ok(Parsed::Op(op, used)) => {
+                    if let Err(end) = self.handle(op, side, lds, st) {
+                        return (at, Err(end));
+                    }
+                    at += used;
+                }
+                Ok(Parsed::Partial(need)) => return (at, Ok(need)),
+                Err(_) => return (at, Err(st.delay)),
+            }
+        }
+    }
+
+    /// Acts on what the hub sent but messages. `Err` ends the link.
     fn handle(
         &self,
         op: LeafOp<'_>,
@@ -315,10 +344,39 @@ impl Link<'_> {
             }
             LeafOp::Sub(i) => side.hub_interest(self.lane, &i, true),
             LeafOp::Unsub(i) => side.hub_interest(self.lane, &i, false),
-            // Messages from the hub come with the routing of them.
+            // A later `INFO`, `+OK`: nothing to act on. Messages were
+            // routed already.
             _ => {}
         }
         Ok(())
+    }
+
+    /// Routes message `m` of the hub, which lies in `buf`, as the hub
+    /// asks: to every plain subscription, to one member of each queue
+    /// group it lists, and to other links, but never back to this one.
+    fn inbound(&mut self, m: &leaf::Msg<'_>, buf: &[u8], side: &LinkSide) {
+        let lane = self.lane;
+        let len = m.payload.len() + m.headers.map_or(0, <[u8]>::len);
+        lane.tally.took(len);
+        side.client.tally.took(len);
+        if side::denied(m.subject) {
+            return;
+        }
+        let p = Pub {
+            subject: m.subject,
+            reply: m.reply,
+            headers: m.headers,
+            payload: m.payload,
+        };
+        let index = lane.index(side.account).borrow();
+        let Some(found) = index.matches(p.subject) else {
+            return;
+        };
+        let mut r = Routing::new(lane, &mut self.fwd, &p, buf, side.id).listed(m);
+        r.route(&found);
+        if let Some(s) = r.stalled {
+            self.stalled = Some(s);
+        }
     }
 
     /// Queues `bytes` for the hub.

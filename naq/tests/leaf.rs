@@ -672,3 +672,157 @@ fn a_go_hub_takes_the_link_uncompressed_and_sees_it_come_back() {
     let _hub = go(&conf).unwrap();
     leafz_until(http, |z| z["leafnodes"] == 1);
 }
+
+/// Waits until the leaf told the hub at `p` each of `lines`, in any
+/// order: the link's lane has that interest then.
+fn told(p: &mut Peer, lines: &[&str]) {
+    let mut left = lines.to_vec();
+    while !left.is_empty() {
+        let l = p.line();
+        left.retain(|x| *x != l);
+    }
+}
+
+/// The messages `c` got, as `MSG` line and payload, until one on `done`.
+fn got_until_done(c: &mut Peer) -> Vec<(String, String)> {
+    let mut got = Vec::new();
+    loop {
+        let m = (c.line(), c.line());
+        if m.0.starts_with("MSG done ") {
+            return got;
+        }
+        got.push(m);
+    }
+}
+
+#[test]
+fn messages_of_the_hub_reach_every_plain_subscriber_and_the_groups_it_lists() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    // Two of each, so one is on the link's lane and one is not. The queue
+    // subscription comes last: once the hub hears of both, the link's lane
+    // has all.
+    let subs = "SUB m 1\r\nSUB m.> 3\r\nSUB done 9\r\nSUB m q 2\r\n";
+    let mut a = client(&leaf, subs);
+    let mut b = client(&leaf, subs);
+    told(&mut p, &["LS+ m q 2"]);
+    p.send("LMSG m 2\r\nhi\r\nLMSG m | q 2\r\nqq\r\nLMSG m + r other q 2\r\nrr\r\n");
+    p.send("LMSG m | other 2\r\nno\r\nLMSG m.x.y r 2\r\nxy\r\nLMSG done 0\r\n\r\n");
+    let pair = |m: &str, p: &str| (m.to_owned(), p.to_owned());
+    let plain = [
+        pair("MSG m 1 2", "hi"),
+        pair("MSG m 1 2", "qq"),
+        pair("MSG m 1 r 2", "rr"),
+        pair("MSG m 1 2", "no"),
+        pair("MSG m.x.y 3 r 2", "xy"),
+    ];
+    let mut picked = Vec::new();
+    for c in [&mut a, &mut b] {
+        let (q, rest): (Vec<_>, Vec<_>) = got_until_done(c)
+            .into_iter()
+            .partition(|(m, _)| m.starts_with("MSG m 2 "));
+        assert_eq!(rest, plain);
+        picked.extend(q);
+    }
+    picked.sort();
+    // One member of q each, where the hub listed it.
+    assert_eq!(picked, [pair("MSG m 2 2", "qq"), pair("MSG m 2 r 2", "rr")]);
+}
+
+#[test]
+fn a_message_of_the_hub_never_goes_back_to_it() {
+    let hub = Hub::new();
+    let _leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    // Its own interest is on the link's lane at once.
+    p.send("LS+ m\r\nLS+ m q 1\r\nLMSG m 2\r\nhi\r\nLMSG m | q 2\r\nhi\r\nPING\r\n");
+    assert_eq!(p.line(), "PONG");
+}
+
+#[test]
+fn messages_of_the_hub_on_denied_subjects_are_dropped() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    let mut c = client(&leaf, "SUB > 1\r\n");
+    told(&mut p, &["LS+ >"]);
+    p.send("LMSG $KV.b.k 2\r\nno\r\nLMSG $JS.API.INFO 2\r\nno\r\nLMSG $JS.ACK.x 2\r\nok\r\n");
+    assert_eq!(lines(&mut c, 2), ["MSG $JS.ACK.x 1 2", "ok"]);
+}
+
+#[test]
+fn headers_of_the_hub_reach_the_clients_that_take_them() {
+    let hub = Hub::new();
+    let leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = linked(&hub);
+    let mut h = client(&leaf, "CONNECT {\"headers\":true}\r\nSUB h 1\r\n");
+    let mut n = client(&leaf, "SUB * 1\r\n");
+    told(&mut p, &["LS+ h", "LS+ *"]);
+    p.send("HMSG h 12 14\r\nNATS/1.0\r\n\r\nhi\r\n");
+    assert_eq!(lines(&mut h, 4), ["HMSG h 1 12 14", "NATS/1.0", "", "hi"]);
+    assert_eq!(lines(&mut n, 2), ["MSG h 1 2", "hi"]);
+}
+
+#[test]
+fn a_message_of_one_hub_reaches_another() {
+    let (one, two) = (Hub::new(), Hub::new());
+    let remote = |h: &Hub| Remote {
+        urls: vec![format!("127.0.0.1:{}", h.port())],
+        ..Remote::default()
+    };
+    let _leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        server_name: "naq-leaf".into(),
+        remotes: vec![remote(&one), remote(&two)],
+        ..Options::default()
+    })
+    .unwrap();
+    let (mut p1, mut p2) = (linked(&one), linked(&two));
+    p2.send("LS+ m\r\nLS+ m q 1\r\n");
+    // Until the interest of hub two reaches the lane of link one.
+    let deadline = Instant::now() + WAIT;
+    p2.w.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        p1.send("LMSG m 4\r\nwait\r\n");
+        let mut l = String::new();
+        if p2.r.read_line(&mut l).is_ok() && l.starts_with("LMSG m 4") {
+            p2.line();
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing came");
+    }
+    p2.w.set_read_timeout(Some(WAIT)).unwrap();
+    // No client member: the group of hub two is the last resort.
+    p1.send("LMSG m | q 2\r\nhi\r\n");
+    loop {
+        let m = lines(&mut p2, 2);
+        if m != ["LMSG m 4", "wait"] {
+            assert_eq!(m, ["LMSG m | q 2", "hi"]);
+            break;
+        }
+    }
+}
+
+#[test]
+fn naq_clients_get_what_go_hub_clients_publish() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!("port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n");
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let leaf = leaf(&format!("nats-leaf://127.0.0.1:{leafport}"));
+    let mut sub = client(&leaf, "SUB orders.* 1\r\nSUB jobs q 2\r\n");
+    leafz_until(http, |z| z["leafs"][0]["subscriptions"] == 3);
+    let mut c = go_client(port, "");
+    // No member at the hub: the one of the leaf gets the job.
+    c.send("PUB orders.1 2\r\nhi\r\nPUB jobs 3\r\njob\r\n");
+    assert_eq!(
+        lines(&mut sub, 4),
+        ["MSG orders.1 1 2", "hi", "MSG jobs 2 3", "job"]
+    );
+}

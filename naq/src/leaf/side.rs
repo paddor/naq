@@ -53,7 +53,7 @@ impl LinkSide {
     /// `lane` and every other. Interest is a set: a repeated `LS+` sets a
     /// queue group's weight, one `LS-` removes it whatever its weight.
     pub(crate) fn hub_interest(&self, lane: &Lane, i: &leaf::Interest<'_>, add: bool) {
-        if !subject::is_valid_filter(i.subject) {
+        if !subject::is_valid_filter(i.subject) || denied(i.subject) {
             return;
         }
         let key = (Box::from(i.subject), i.queue.map(Box::from));
@@ -192,8 +192,9 @@ fn members(n: u64) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// Whether `filter` is a literal subject the hub refuses interest in.
-fn denied(filter: &[u8]) -> bool {
+/// Whether `filter` is a literal subject no link carries: interest in it
+/// and messages on it stay on their side.
+pub(super) fn denied(filter: &[u8]) -> bool {
     subject::is_literal(filter) && DENIED.iter().any(|d| subject::matches(d, filter))
 }
 

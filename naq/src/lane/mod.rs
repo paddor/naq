@@ -8,6 +8,7 @@
 
 mod data;
 mod peer;
+mod publish;
 mod route;
 
 use std::cell::{Cell, RefCell};
@@ -18,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(crate) use data::{Batch, Out};
+pub(crate) use publish::Routing;
 pub(crate) use route::{Queue, Queued};
 
 use crate::conn::{Client, SpentReads};

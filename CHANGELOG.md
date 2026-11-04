@@ -160,6 +160,12 @@ Notable changes to naq. The format follows
   once, as `LMSG` or `HMSG`, with the queue groups picked for it after `|`
   or `+ reply`. A hub's queue group gets a message only when no client of
   the server takes it.
+- `naq`: messages of hubs reach clients over leaf node links. An `LMSG`
+  or `HMSG` goes to every plain subscription and to one member of each
+  queue group it lists, on any lane, and to other links, but never back to
+  the hub it came from. Messages on `$JS.API.>`, `$KV.>` and `$OBJ.>`, and
+  hub interest in literal subjects among them, are dropped. A subscriber
+  past the stall mark slows the link's reads.
 
 ### Changed
 
