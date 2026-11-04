@@ -89,6 +89,21 @@ impl<R> Reader<R> {
         }
     }
 
+    /// The reader of a client: frames from the server come unmasked and
+    /// uncompressed.
+    pub(super) const fn client(inner: R, link: Rc<Link>, max_payload: usize) -> Reader<R> {
+        Reader {
+            inner,
+            link,
+            dec: Decoder::new(false, false),
+            inflate: None,
+            ready: Vec::new(),
+            ready_at: 0,
+            end: None,
+            max_payload,
+        }
+    }
+
     /// Takes the frames in `raw` apart: moves plain payload to its start
     /// and returns its length; inflated payload, and what follows it, goes
     /// to `ready`.
@@ -224,6 +239,8 @@ pub(super) struct Writer<W> {
     whole: bool,
     /// The close frame is staged: nothing may follow it.
     closed: bool,
+    /// Frames are masked, as a client masks them.
+    mask: bool,
 }
 
 impl<W> Writer<W> {
@@ -242,6 +259,35 @@ impl<W> Writer<W> {
             },
             whole: u.agent == Agent::Safari,
             closed: false,
+            mask: false,
+        }
+    }
+
+    /// The writer of a client: masked frames, uncompressed.
+    pub(super) const fn client(inner: W, link: Rc<Link>) -> Writer<W> {
+        Writer {
+            inner,
+            link,
+            staged: Vec::new(),
+            at: 0,
+            deflate: None,
+            packed: Vec::new(),
+            frame_max: FRAME_MAX,
+            whole: false,
+            closed: false,
+            mask: true,
+        }
+    }
+
+    /// Stages a whole frame of `payload`, masked if a client sends it.
+    fn whole_frame(&mut self, op: u8, payload: &[u8]) {
+        if self.mask {
+            let mut key = [0u8; 4];
+            // A zero key on failure still frames right.
+            let _ = getrandom::getrandom(&mut key);
+            frame::masked(&mut self.staged, op, payload, key);
+        } else {
+            frame::control(&mut self.staged, op, payload);
         }
     }
 
@@ -251,7 +297,7 @@ impl<W> Writer<W> {
         if let Some(p) = pong
             && !self.closed
         {
-            frame::control(&mut self.staged, frame::OP_PONG, &p);
+            self.whole_frame(frame::OP_PONG, &p);
         }
     }
 
@@ -260,8 +306,7 @@ impl<W> Writer<W> {
     fn stage(&mut self, msg: &[u8]) {
         let Some(d) = self.deflate.as_mut().filter(|_| msg.len() > COMPRESS_MIN) else {
             for part in msg.chunks(self.frame_max) {
-                frame::header(&mut self.staged, frame::OP_BINARY, true, false, part.len());
-                self.staged.extend_from_slice(part);
+                self.whole_frame(frame::OP_BINARY, part);
             }
             return;
         };
@@ -343,7 +388,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for Writer<W> {
             this.closed = true;
             let chosen = this.link.close.borrow_mut().take();
             let payload = chosen.unwrap_or_else(|| this.farewell());
-            frame::control(&mut this.staged, frame::OP_CLOSE, &payload);
+            this.whole_frame(frame::OP_CLOSE, &payload);
         }
         ready!(this.drain(cx))?;
         Pin::new(&mut this.inner).poll_shutdown(cx)

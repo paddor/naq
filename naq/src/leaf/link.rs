@@ -17,6 +17,7 @@ use tokio::time::{Instant, timeout};
 use super::{Ended, HubUrl, LinkSide, creds, side};
 use crate::conn::{self, Client};
 use crate::lane::{Lane, Out, Routing};
+use crate::ws;
 
 /// Time to connect to a hub.
 const DIAL: Duration = Duration::from_secs(1);
@@ -90,11 +91,12 @@ struct Link<'l, R> {
     fwd: Box<[Out]>,
     /// A subscriber past the stall mark.
     stalled: Option<Rc<Client>>,
+    /// The link as a client of the lane: its output to the hub.
+    client: Rc<Client>,
 }
 
 /// Dials the hub at `url`, one of `urls`, for remote `remote`, serves the
-/// link and returns how it ended. TLS comes first, after the hub's first
-/// `INFO`, or not at all, as remote and hub say.
+/// link and returns how it ended.
 pub(super) async fn session(
     lane: &Rc<Lane>,
     remote: usize,
@@ -102,22 +104,50 @@ pub(super) async fn session(
     urls: &[HubUrl],
 ) -> Ended {
     let dial = timeout(DIAL, TcpStream::connect((url.host.as_str(), url.port)));
-    let Ok(Ok(mut tcp)) = dial.await else {
+    let Ok(Ok(tcp)) = dial.await else {
         return Ended::Unreached;
     };
     let _ = tcp.set_nodelay(true);
-    let tls = &lane.shared.leaf_tls[remote];
-    let mut buf = lane.reads.take(conn::READ_CHUNK);
-    let delay = if tls.first() {
-        match tls.connect(tcp, url, urls).await {
-            Some(s) => Link::new(lane, s, buf).run(remote, url, None).await,
-            None => End::ZERO,
-        }
+    let d = Dial {
+        lane,
+        remote,
+        url,
+        urls,
+    };
+    let delay = if url.ws.is_some() {
+        d.websocket(tcp).await
     } else {
+        d.nats(tcp).await
+    };
+    Ended::Closed { delay }
+}
+
+/// A connection to a hub, made for a remote.
+struct Dial<'a> {
+    lane: &'a Rc<Lane>,
+    remote: usize,
+    url: &'a HubUrl,
+    /// All of the remote's URLs.
+    urls: &'a [HubUrl],
+}
+
+impl Dial<'_> {
+    /// The link over `tcp`: TLS comes first, after the hub's first `INFO`,
+    /// or not at all, as remote and hub say.
+    async fn nats(&self, mut tcp: TcpStream) -> End {
+        let (lane, remote, url) = (self.lane, self.remote, self.url);
+        let tls = &lane.shared.leaf_tls[remote];
+        let mut buf = lane.reads.take(conn::READ_CHUNK);
+        if tls.first() {
+            return match tls.connect(tcp, url, self.urls).await {
+                Some(s) => Link::new(lane, s, buf).run(remote, url, None).await,
+                None => End::ZERO,
+            };
+        }
         let limits = limits(lane);
         match timeout(FIRST_INFO, info(&mut tcp, &mut buf, &limits, lane)).await {
             Ok(Ok(first)) if tls.after_info(first.tls_required) => {
-                match tls.connect(tcp, url, urls).await {
+                match tls.connect(tcp, url, self.urls).await {
                     Some(s) => Link::new(lane, s, buf).run(remote, url, Some(first)).await,
                     None => End::ZERO,
                 }
@@ -130,8 +160,24 @@ pub(super) async fn session(
             Ok(Err(delay)) => delay,
             Err(_) => End::ZERO,
         }
-    };
-    Ended::Closed { delay }
+    }
+
+    /// The link over WebSocket frames on `tcp`: TLS first for `wss://` or
+    /// a remote with `tls`, then the upgrade. No TLS after `INFO`, as in
+    /// `nats-server`.
+    async fn websocket(&self, tcp: TcpStream) -> End {
+        let (lane, remote, url) = (self.lane, self.remote, self.url);
+        let tls = &lane.shared.leaf_tls[remote];
+        let buf = lane.reads.take(conn::READ_CHUNK);
+        if url.wss || tls.after_info(false) {
+            match tls.connect(tcp, url, self.urls).await {
+                Some(s) => Link::new(lane, s, buf).over_ws(remote, url).await,
+                None => End::ZERO,
+            }
+        } else {
+            Link::new(lane, tcp, buf).over_ws(remote, url).await
+        }
+    }
 }
 
 /// Limits of a link: `nats-server` allows it 16 control lines.
@@ -141,6 +187,13 @@ fn limits(lane: &Lane) -> Limits {
         max_control_line: opts.max_control_line.saturating_mul(16),
         max_payload: opts.max_payload,
     }
+}
+
+/// Writes `bytes` to `io` and flushes them: a WebSocket writer holds a
+/// frame until then.
+async fn send<S: AsyncWrite + Unpin>(io: &mut S, bytes: &[u8]) -> Result<(), End> {
+    io.write_all(bytes).await.map_err(|_| End::ZERO)?;
+    io.flush().await.map_err(|_| End::ZERO)
 }
 
 /// Reads up to the next `INFO` from `io` into `buf`, answering `PING`s on
@@ -162,7 +215,7 @@ where
                         Some(serde_json::from_slice(json).map_err(|_| End::ZERO)?)
                     }
                     LeafOp::Ping => {
-                        io.write_all(encode::PONG).await.map_err(|_| End::ZERO)?;
+                        send(io, encode::PONG).await?;
                         None
                     }
                     LeafOp::Err(text) => return Err(err_delay(text)),
@@ -195,7 +248,39 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             limits: limits(lane),
             fwd: (0..lane.lanes()).map(|_| Out::default()).collect(),
             stalled: None,
+            client: Rc::new(Client::new(lane.shared.next_client())),
         }
+    }
+
+    /// Upgrades the link to WebSocket, then the handshake for remote
+    /// `remote` and the link over its frames.
+    async fn over_ws(mut self, remote: usize, url: &HubUrl) -> End {
+        let path = url.ws.as_deref().unwrap_or_default();
+        let up = ws::client::upgrade(&mut self.io, &url.host, url.port, path);
+        let Ok(Some(pre)) = timeout(FIRST_INFO, up).await else {
+            return End::ZERO;
+        };
+        let max = self.lane.shared.opts.max_payload;
+        let Link {
+            lane,
+            io,
+            buf,
+            limits,
+            fwd,
+            stalled,
+            client,
+        } = self;
+        let io = ws::client::stream(io, pre, client.clone(), max);
+        let link = Link {
+            lane,
+            io,
+            buf,
+            limits,
+            fwd,
+            stalled,
+            client,
+        };
+        link.run(remote, url, None).await
     }
 
     /// The handshake for remote `remote` with the hub at `url`, after its
@@ -232,7 +317,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         if let Some(text) = info.cluster.as_deref().and_then(cluster_error) {
             let mut out = Vec::new();
             encode::err(&mut out, text);
-            let _ = self.io.write_all(&out).await;
+            let _ = send(&mut self.io, &out).await;
             return Err(End::ZERO);
         }
         let opts = &self.lane.shared.opts;
@@ -257,7 +342,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         };
         let mut out = Vec::new();
         leaf::connect(&mut out, &serde_json::to_vec(&connect).unwrap_or_default());
-        self.io.write_all(&out).await.map_err(|_| End::ZERO)?;
+        send(&mut self.io, &out).await?;
         let answer = timeout(CONNECT_INFO, self.info())
             .await
             .map_err(|_| End::ZERO)??;
@@ -282,6 +367,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             limits: self.limits,
             fwd: self.fwd,
             stalled: self.stalled,
+            client: self.client,
         };
         (link, w)
     }
@@ -304,7 +390,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             .unwrap_or("$G");
         // Known to exist: the options were checked.
         let account = shared.accounts.iter().position(|a| a == name).unwrap_or(0) as u32;
-        let client = Rc::new(Client::new(shared.next_client()));
+        let client = self.client.clone();
         client.account.set(account);
         let mut writer: JoinHandle<()> = tokio::task::spawn_local(crate::conn::writer(
             client.clone(),

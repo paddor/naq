@@ -622,8 +622,12 @@ fn leafnodes_naq_cannot_use_are_an_error() {
             "leafnode remote without a url",
         ),
         (
-            "leafnodes { remotes: [{url: \"ws://h\"}] }",
-            "leafnode url \"ws://h\": scheme not supported",
+            "leafnodes { remotes: [{url: \"http://h\"}] }",
+            "leafnode url \"http://h\": scheme not supported",
+        ),
+        (
+            "leafnodes { remotes: [{urls: [\"ws://h\", h]}] }",
+            "leafnode remote: websocket and other urls mixed",
         ),
         (
             "leafnodes { remotes: [{url: h, account: B}] }",
@@ -634,10 +638,7 @@ fn leafnodes_naq_cannot_use_are_an_error() {
             "leafnode remotes: the same account, urls and credentials twice",
         ),
     ] {
-        match text.parse::<Options>() {
-            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
-            other => panic!("{text:?}: {other:?}"),
-        }
+        config_error(text, reason);
     }
 }
 

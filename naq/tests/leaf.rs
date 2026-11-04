@@ -1060,3 +1060,61 @@ fn published_to_go(leaf: &Server, sub: &mut Peer) {
     }
     sub.w.set_read_timeout(Some(WAIT)).unwrap();
 }
+
+#[test]
+fn a_go_hub_takes_the_link_over_websocket() {
+    let (port, wsport, leafport, http) = (free_port(), free_port(), free_port(), free_port());
+    // The hub takes WebSocket leafs only with a leaf node port too.
+    let conf = format!(
+        "port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\nwebsocket {{ port: {wsport}, no_tls: true }}\n"
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let mut sub = go_client(port, "SUB s 1\r\n");
+    let leaf = leaf(&format!("ws://127.0.0.1:{wsport}/some/path"));
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    published_to_go(&leaf, &mut sub);
+    // And the other way, over the hub's frames.
+    let mut mine = client(&leaf, "SUB back 1\r\n");
+    leafz_until(http, |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|s| s == "back"))
+    });
+    let mut go = go_client(port, "");
+    go.send(&format!(
+        "PUB back {}\r\n{}\r\n",
+        70_000,
+        "x".repeat(70_000)
+    ));
+    assert_eq!(mine.line(), "MSG back 1 70000");
+    assert_eq!(mine.line().len(), 70_000);
+}
+
+#[test]
+fn a_go_hub_takes_the_link_over_websocket_with_tls() {
+    let pki = Pki::new();
+    let (port, wsport, leafport, http) = (free_port(), free_port(), free_port(), free_port());
+    let conf = format!(
+        "port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\nwebsocket {{ port: {wsport}, tls {{ cert_file: \"{}\", key_file: \"{}\" }} }}\n",
+        pki.path("hub.pem"),
+        pki.path("hub-key.pem"),
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let mut sub = go_client(port, "SUB s 1\r\n");
+    let leaf = leaf_with(Remote {
+        urls: vec![format!("wss://127.0.0.1:{wsport}")],
+        tls: Some(RemoteTls {
+            ca_file: Some(pki.path("ca.pem").into()),
+            ..RemoteTls::default()
+        }),
+        ..Remote::default()
+    });
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    published_to_go(&leaf, &mut sub);
+}

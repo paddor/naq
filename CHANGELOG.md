@@ -179,6 +179,11 @@ Notable changes to naq. The format follows
   authorities, and name the URL's host, or for an IP, the first host name
   of the remote's URLs. `cert_file` and `key_file` give a certificate for
   hubs that verify leafs. A file that cannot be read stops the start.
+- `naq`: leaf node links over WebSocket: `ws://` and `wss://` remote URLs,
+  with TLS first for `wss://` or a remote with `tls`. The link asks for
+  the URL's path with `/leafnode` after it, checks the hub's answer as
+  `nats-server` does, and masks its frames; it does not compress them. A
+  remote cannot mix WebSocket and other URLs.
 
 ### Changed
 

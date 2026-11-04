@@ -326,7 +326,7 @@ pub(super) fn response(u: &Upgrade, headers: &[(String, String)]) -> String {
 }
 
 /// `Sec-WebSocket-Accept` for `key`.
-fn accept_key(key: &str) -> String {
+pub(super) fn accept_key(key: &str) -> String {
     let digest = sha1_smol::Sha1::from(format!("{key}{GUID}")).digest();
     BASE64.encode(&digest.bytes())
 }

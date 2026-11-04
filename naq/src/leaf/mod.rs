@@ -56,6 +56,9 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
             .iter()
             .map(|u| HubUrl::parse(u))
             .collect::<Result<Vec<_>, _>>()?;
+        if urls.iter().any(|u| u.ws.is_some()) && urls.iter().any(|u| u.ws.is_none()) {
+            return Err("leafnode remote: websocket and other urls mixed".into());
+        }
         if let Some(a) = r.account.as_deref()
             && a != "$G"
             && !opts.accounts.iter().any(|x| x == a)

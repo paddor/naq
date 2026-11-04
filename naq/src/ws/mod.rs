@@ -2,6 +2,7 @@
 //! TLS if set up, the HTTP upgrade, then the client protocol over binary
 //! frames.
 
+pub(crate) mod client;
 mod deflate;
 mod frame;
 mod stream;
@@ -267,6 +268,14 @@ pub(crate) fn fuzz(data: &[u8]) {
         let mut raw = piece.to_vec();
         let kept = reader.take(&mut raw);
         assert!(kept <= piece.len(), "kept {kept} of {}", piece.len());
+    }
+    // The same bytes as a hub's answer and frames, to a leaf.
+    let _ = client::accepts(&text, "dGhlIHNhbXBsZSBub25jZQ==");
+    let link = stream::Link::new(Rc::new(conn::Client::new(2)));
+    let mut leaf = stream::Reader::client((), link, 4096);
+    for piece in frames.chunks(step) {
+        let mut raw = piece.to_vec();
+        assert!(leaf.take(&mut raw) <= piece.len());
     }
     let mut packed = Vec::new();
     deflate::Deflate::new().message(frames, &mut packed);

@@ -11,24 +11,28 @@ pub(crate) struct HubUrl {
     /// The user, or the token if there is no password.
     pub(crate) user: Option<String>,
     pub(crate) pass: Option<String>,
+    /// Over WebSocket (`ws://`, `wss://`): the URL's path.
+    pub(crate) ws: Option<String>,
+    /// TLS from the start (`wss://`).
+    pub(crate) wss: bool,
 }
 
 impl HubUrl {
-    /// Reads `nats-leaf://`, `nats://` or a bare `host:port`, with
-    /// `user:password@` or `token@` before the host. A path is ignored.
+    /// Reads `nats-leaf://`, `nats://`, `ws://`, `wss://` or a bare
+    /// `host:port`, with `user:password@` or `token@` before the host. A
+    /// path is kept for WebSocket only.
     pub(crate) fn parse(s: &str) -> Result<HubUrl, String> {
         let s = s.trim();
         let bad = |why: &str| format!("leafnode url {s:?}: {why}");
-        let rest = match s.split_once("://") {
-            Some((scheme, rest)) => {
-                if !["nats-leaf", "nats"].contains(&scheme.to_ascii_lowercase().as_str()) {
-                    return Err(bad("scheme not supported"));
-                }
-                rest
-            }
-            None => s,
+        let (scheme, rest) = match s.split_once("://") {
+            Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+            None => (String::new(), s),
         };
-        let rest = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        if !["", "nats-leaf", "nats", "ws", "wss"].contains(&scheme.as_str()) {
+            return Err(bad("scheme not supported"));
+        }
+        let (rest, path) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+        let path = path.split(['?', '#']).next().unwrap_or_default();
         let (userinfo, hostport) = match rest.rsplit_once('@') {
             Some((u, h)) => (Some(u), h),
             None => (None, rest),
@@ -47,6 +51,8 @@ impl HubUrl {
             port,
             user: user.filter(|u| !u.is_empty()),
             pass,
+            ws: scheme.starts_with("ws").then(|| path.to_owned()),
+            wss: scheme == "wss",
         })
     }
 }
@@ -100,6 +106,8 @@ mod tests {
             port,
             user: user.map(Into::into),
             pass: pass.map(Into::into),
+            ws: None,
+            wss: false,
         }
     }
 
@@ -115,15 +123,24 @@ mod tests {
             ("NATS-LEAF://[::1]:9", url("::1", 9, None, None)),
             ("[::1]", url("::1", 7422, None, None)),
             (" hub ", url("hub", 7422, None, None)),
+            ("nats://hub/x?y#z", url("hub", 7422, None, None)),
         ] {
             assert_eq!(HubUrl::parse(s), Ok(want), "{s}");
         }
+        let ws = HubUrl::parse("ws://u@hub:80/a/b?q").unwrap();
+        assert_eq!(
+            (ws.ws.as_deref(), ws.wss, ws.port),
+            (Some("/a/b"), false, 80)
+        );
+        assert_eq!(ws.user.as_deref(), Some("u"));
+        let wss = HubUrl::parse("WSS://hub").unwrap();
+        assert_eq!((wss.ws.as_deref(), wss.wss), (Some(""), true));
     }
 
     #[test]
     fn urls_naq_cannot_dial_are_an_error() {
         for (s, why) in [
-            ("ws://hub", "scheme not supported"),
+            ("http://hub", "scheme not supported"),
             ("nats://", "expected host:port"),
             ("hub:x", "expected host:port"),
             ("hub:70000", "expected host:port"),

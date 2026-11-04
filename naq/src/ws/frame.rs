@@ -324,6 +324,16 @@ pub(super) fn header(out: &mut Vec<u8>, op: u8, fin: bool, compressed: bool, len
     }
 }
 
+/// Appends a whole frame of a client: masked with `key`, as clients must
+/// mask what they send [RFC 6455 5.3].
+pub(super) fn masked(out: &mut Vec<u8>, op: u8, payload: &[u8], key: [u8; 4]) {
+    let at = out.len();
+    header(out, op, true, false, payload.len());
+    out[at + 1] |= MASKED;
+    out.extend_from_slice(&key);
+    out.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i & 3]));
+}
+
 /// Appends a whole control frame.
 pub(super) fn control(out: &mut Vec<u8>, op: u8, payload: &[u8]) {
     header(out, op, true, false, payload.len());
