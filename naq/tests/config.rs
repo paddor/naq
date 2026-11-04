@@ -54,7 +54,7 @@ fn text_parses_as_options() {
 #[test]
 fn what_naq_cannot_use_is_an_error_with_its_line() {
     for (text, at, reason) in [
-        ("port: 1\ncluster {}\n", "line 2", "cluster: not supported"),
+        ("port: 1\ngateway {}\n", "line 2", "gateway: not supported"),
         ("port: x\n", "line 1", "port: expected a port"),
         ("port: 70000\n", "line 1", "port: expected a port"),
         (
@@ -782,6 +782,53 @@ fn a_remote_takes_denies_and_isolation() {
             "leafnodes { remotes: [{url: h, deny_exports: \"a..b\"}] }",
             "leafnode remote: deny_exports: invalid subject \"a..b\"",
         ),
+    ] {
+        config_error(text, reason);
+    }
+}
+
+#[test]
+fn the_cluster_block_names_the_other_servers() {
+    let o: Options = "cluster {\n  name: c\n  listen: \"127.0.0.1:7244\"\n  routes [\n    \
+                      \"nats-route://a:6222\"\n    b:6223\n  ]\n}\n"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        o.cluster,
+        Some(naq::Cluster {
+            name: "c".into(),
+            host: "127.0.0.1".into(),
+            port: 7244,
+            routes: vec!["nats-route://a:6222".into(), "b:6223".into()],
+        })
+    );
+    let o: Options = "cluster { host: h, port: 1, routes: x:2 }".parse().unwrap();
+    let c = o.cluster.unwrap();
+    assert_eq!(
+        (c.host.as_str(), c.port, &c.routes[..]),
+        ("h", 1, &["x:2".to_owned()][..])
+    );
+    for (text, reason) in [
+        ("cluster: 1", "cluster: expected a map"),
+        (
+            "cluster { pool_size: 3 }",
+            "cluster: pool_size: not supported",
+        ),
+        (
+            "cluster { listen: x }",
+            "cluster: listen: expected host:port",
+        ),
+        (
+            "cluster { routes: 1 }",
+            "cluster: routes: expected a string or a list",
+        ),
+        (
+            "cluster { routes: [1] }",
+            "cluster: routes: expected strings",
+        ),
+        ("cluster { name: 1 }", "cluster: name: expected a string"),
+        ("cluster { host: 1 }", "cluster: host: expected a string"),
+        ("cluster { port: x }", "cluster: port: expected a port"),
     ] {
         config_error(text, reason);
     }

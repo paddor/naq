@@ -15,7 +15,7 @@ workspace = true
 [dependencies]
 bytes = { workspace = true, features = ["std"] }
 naq-proto.workspace = true
-omq-tokio = { version = "=0.33.0", default-features = false }
+omq-tokio.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -680,6 +680,7 @@ dependencies = [
  "memchr",
  "naq-proto",
  "nkeys",
+ "omq-tokio",
  "rcgen",
  "rustc-hash",
  "rustls",

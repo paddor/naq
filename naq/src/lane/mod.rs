@@ -64,6 +64,8 @@ pub(crate) enum Control {
     Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
     /// Answered with the lane's leaf node links, for monitoring.
     Links(oneshot::Sender<Vec<crate::monitor::LeafInfo>>),
+    /// Answered by lane 0 with the routes of the cluster, for monitoring.
+    Routes(oneshot::Sender<Vec<crate::monitor::RouteInfo>>),
 }
 
 /// The ways into a lane, for every lane.
@@ -128,6 +130,8 @@ pub(crate) struct Lane {
     pub(crate) links: RefCell<Vec<Rc<crate::leaf::LinkSide>>>,
     /// Links the message being routed reaches.
     hits: peer::Hits,
+    /// The other servers of the cluster, on lane 0 with a cluster.
+    pub(crate) mesh: RefCell<Option<Rc<crate::mesh::Mesh>>>,
 }
 
 impl Lane {
@@ -252,6 +256,9 @@ impl Lane {
             Control::Links(answer) => {
                 let _ = answer.send(crate::monitor::links(self));
             }
+            Control::Routes(answer) => {
+                let _ = answer.send(crate::monitor::routes(self));
+            }
         }
     }
 }
@@ -274,6 +281,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         reads: SpentReads::default(),
         links: RefCell::default(),
         hits: peer::Hits::default(),
+        mesh: RefCell::default(),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;

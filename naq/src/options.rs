@@ -70,6 +70,35 @@ pub struct Options {
     /// How long a leaf node link waits, once it ended, before it dials
     /// again (`leafnodes { reconnect }`).
     pub leaf_reconnect: Duration,
+    /// The other naq servers of its cluster (`cluster`), if any.
+    pub cluster: Option<Cluster>,
+}
+
+/// A fixed mesh of naq servers (`cluster`): each lists the others, and
+/// each forwards client traffic straight to the others with interest, over
+/// OMQ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cluster {
+    /// The cluster's name (`name`): a server of another one is refused.
+    pub name: String,
+    /// Host to listen on for the other servers (`host`, `listen`).
+    pub host: String,
+    /// Port to listen on (`port`, `listen`); 0 picks a free one.
+    pub port: u16,
+    /// The other servers (`routes`): `nats-route://host:port`, or
+    /// `nats://` or a bare `host:port`.
+    pub routes: Vec<String>,
+}
+
+impl Default for Cluster {
+    fn default() -> Cluster {
+        Cluster {
+            name: String::new(),
+            host: "0.0.0.0".into(),
+            port: 6222,
+            routes: Vec::new(),
+        }
+    }
 }
 
 /// A user that may connect.
@@ -165,6 +194,7 @@ impl Default for Options {
             default_permissions: None,
             remotes: Vec::new(),
             leaf_reconnect: Duration::from_secs(1),
+            cluster: None,
             http_port: None,
             http_host: None,
             tls: None,

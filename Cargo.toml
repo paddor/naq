@@ -56,6 +56,7 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 sha1_smol = "1.0"
 tokio = { version = "1.53", default-features = false }
 zzq-tokio = { version = "=0.6.0", default-features = false }
+omq-tokio = { version = "=0.33.0", default-features = false }
 thiserror = { version = "2.0", default-features = false }
 
 [profile.release]

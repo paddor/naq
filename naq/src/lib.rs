@@ -42,6 +42,7 @@ mod index;
 mod lane;
 mod leaf;
 mod mailbox;
+mod mesh;
 mod monitor;
 mod options;
 mod perms;
@@ -52,7 +53,7 @@ mod ws;
 
 pub use error::Error;
 pub use options::{
-    Cookies, Login, Options, Permissions, Remote, RemoteTls, Responses, Rules, Tls, User,
+    Cluster, Cookies, Login, Options, Permissions, Remote, RemoteTls, Responses, Rules, Tls, User,
     Websocket, WebsocketAuth,
 };
 pub use server::Server;

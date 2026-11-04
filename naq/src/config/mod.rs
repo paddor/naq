@@ -1,6 +1,7 @@
 //! `nats-server` configuration files, the part of them naq serves.
 
 mod auth;
+mod cluster;
 mod leaf;
 mod parse;
 mod ws;
@@ -139,6 +140,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             }
             "accounts" => auth::accounts(o, item)?,
             "leafnodes" | "leaf" => leaf::leafnodes(o, item)?,
+            "cluster" => o.cluster = Some(cluster::cluster(item)?),
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }
@@ -218,7 +220,7 @@ pub(super) fn string(item: &Item) -> Option<String> {
     }
 }
 
-fn int<T: TryFrom<i64>>(item: &Item) -> Option<T> {
+pub(super) fn int<T: TryFrom<i64>>(item: &Item) -> Option<T> {
     match item.value {
         Value::Int(n) => T::try_from(n).ok(),
         _ => None,
@@ -235,7 +237,7 @@ fn size(item: &Item, max: impl Into<i64>) -> Option<usize> {
 }
 
 /// `host:port`, `:port` or a bare port.
-fn listen(item: &Item) -> Option<(Option<String>, u16)> {
+pub(super) fn listen(item: &Item) -> Option<(Option<String>, u16)> {
     match &item.value {
         Value::Int(_) => Some((None, int(item)?)),
         Value::Str(s) => {

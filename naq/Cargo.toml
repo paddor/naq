@@ -36,6 +36,7 @@ sha1_smol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 zzq-tokio.workspace = true
+omq-tokio.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

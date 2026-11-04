@@ -215,6 +215,12 @@ Notable changes to naq. The format follows
   deltas of interest, beats, resync) and data batches (`peer::Batch` of
   `peer::Record`s), encoded into the caller's buffer and decoded as
   slices, with a fuzz target, `peer_frames`.
+- `naq`: clusters of naq servers (`Options::cluster`, `Cluster`; `cluster {
+  name, listen, routes }`). Lane 0 binds the cluster port, which
+  `Server::cluster_addr` gives, dials every route over OMQ and greets the
+  server there; each lane binds a data socket. `/routez` shows the routes
+  to servers that answered. A server of another cluster name is not met;
+  one that stops leaves the routes.
 
 ### Changed
 

@@ -93,6 +93,7 @@ pub struct Server {
     addr: SocketAddr,
     monitor: Option<SocketAddr>,
     websocket: Option<SocketAddr>,
+    cluster: Option<SocketAddr>,
 }
 
 impl Server {
@@ -158,12 +159,13 @@ impl Server {
             monitor: monitor.map(|(l, _)| l),
             ws: ws.map(|(l, _)| l),
         };
-        run(&ctx, &shared, rxs, ports)?;
+        let cluster = run(&ctx, &shared, rxs, ports)?;
         Ok(Server {
             _ctx: ctx,
             addr,
             monitor: monitor_addr,
             websocket: ws_addr,
+            cluster,
         })
     }
 
@@ -180,6 +182,11 @@ impl Server {
     /// Where WebSocket clients connect, if they may.
     pub const fn websocket_addr(&self) -> Option<SocketAddr> {
         self.websocket
+    }
+
+    /// Where the other servers of its cluster connect, if it has one.
+    pub const fn cluster_addr(&self) -> Option<SocketAddr> {
+        self.cluster
     }
 }
 
@@ -198,6 +205,7 @@ struct Setup {
 fn check(opts: &Options) -> Result<Setup, Error> {
     auth::validate(opts).map_err(Error::Options)?;
     crate::leaf::validate(opts).map_err(Error::Options)?;
+    crate::mesh::validate(opts).map_err(Error::Options)?;
     if let Some(w) = &opts.websocket {
         crate::ws::validate(w).map_err(Error::Options)?;
     }
@@ -233,7 +241,7 @@ fn run(
     shared: &Arc<Shared>,
     rxs: Vec<lane::LaneRx>,
     ports: Ports,
-) -> Result<(), Error> {
+) -> Result<Option<SocketAddr>, Error> {
     let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
     for (l, rx) in lanes.iter().zip(rxs) {
         let (s, index) = (shared.clone(), l.index());
@@ -259,11 +267,41 @@ fn run(
         lane.spawn(move || crate::leaf::run(s, at, index))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
+    let cluster = if shared.opts.cluster.is_some() {
+        let (ready, bound) = std::sync::mpsc::sync_channel(1);
+        let (l, s) = (lanes.clone(), shared.clone());
+        first
+            .spawn(move || crate::mesh::run(s, l, ready))
+            .map_err(|e| Error::Lanes(io(e)))?;
+        Some(cluster_bound(&bound, shared)?)
+    } else {
+        None
+    };
     let (c, s) = (ports.client, shared.clone());
     first
         .spawn(move || accept(c, lanes, s, Door::Client))
         .map_err(|e| Error::Lanes(io(e)))?;
-    Ok(())
+    Ok(cluster)
+}
+
+/// Where the cluster port was bound, once lane 0 tells it.
+fn cluster_bound(
+    bound: &std::sync::mpsc::Receiver<Result<SocketAddr, String>>,
+    shared: &Shared,
+) -> Result<SocketAddr, Error> {
+    let c = shared.opts.cluster.as_ref();
+    let addr = c
+        .map(|c| format!("{}:{}", c.host, c.port))
+        .unwrap_or_default();
+    let failed = |why: String| Error::Listen {
+        addr: addr.clone(),
+        source: std::io::Error::other(why),
+    };
+    match bound.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(at)) => Ok(at),
+        Ok(Err(why)) => Err(failed(why)),
+        Err(_) => Err(failed("lane 0 did not bind it".into())),
+    }
 }
 
 /// The lanes to run for `wanted`: 0 is one per core the process may run on.

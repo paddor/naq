@@ -1,5 +1,5 @@
 //! Monitoring over HTTP, as much of `nats-server`'s as tools and harnesses
-//! use: `/healthz`, `/varz`, `/connz` and `/leafz`, in its JSON.
+//! use: `/healthz`, `/varz`, `/connz`, `/routez` and `/leafz`, in its JSON.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -132,6 +132,41 @@ pub(crate) fn links(lane: &Lane) -> Vec<LeafInfo> {
         .collect()
 }
 
+/// One route of the cluster, as `/routez` shows it.
+#[derive(Debug, Serialize)]
+pub(crate) struct RouteInfo {
+    rid: usize,
+    remote_id: String,
+    remote_name: String,
+    did_solicit: bool,
+    is_configured: bool,
+    ip: String,
+    port: u16,
+}
+
+/// The routes of the cluster to servers that are up, as lane 0 knows
+/// them; none on other lanes.
+pub(crate) fn routes(lane: &Lane) -> Vec<RouteInfo> {
+    let Some(mesh) = lane.mesh.borrow().clone() else {
+        return Vec::new();
+    };
+    let peers = mesh.peers.borrow();
+    peers
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.up)
+        .map(|(i, p)| RouteInfo {
+            rid: i + 1,
+            remote_id: p.server_id.clone(),
+            remote_name: p.name.clone(),
+            did_solicit: true,
+            is_configured: true,
+            ip: p.host.clone(),
+            port: p.port,
+        })
+        .collect()
+}
+
 /// Serves monitoring on `listener` until it closes.
 pub(crate) async fn serve(mut listener: Listener, shared: Arc<Shared>) {
     loop {
@@ -205,6 +240,7 @@ async fn answer(shared: &Shared, target: &str) -> (&'static str, Vec<u8>) {
         "/varz" => varz(shared),
         "/connz" => connz(shared).await,
         "/leafz" => leafz(shared, wants_subs(query)).await,
+        "/routez" => routez(shared).await,
         _ => return ("404 Not Found", b"{\"error\":\"not found\"}".to_vec()),
     };
     // Cannot fail: plain values only.
@@ -299,6 +335,19 @@ fn wants_subs(query: &str) -> bool {
     query
         .split('&')
         .any(|kv| matches!(kv, "subs=1" | "subs=true"))
+}
+
+async fn routez(shared: &Shared) -> serde_json::Value {
+    let (answer, wait) = oneshot::channel();
+    shared.lanes[0].control(Control::Routes(answer));
+    // A lane that stopped has no routes to show.
+    let routes = wait.await.unwrap_or_default();
+    serde_json::json!({
+        "server_id": shared.server_id,
+        "now": rfc3339(SystemTime::now()),
+        "num_routes": routes.len(),
+        "routes": routes,
+    })
 }
 
 async fn leafz(shared: &Shared, subs: bool) -> serde_json::Value {
