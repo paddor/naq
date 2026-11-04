@@ -269,8 +269,26 @@ fn suite(dir: &std::path::Path, extra: &[&str]) -> (std::process::Output, Vec<se
         .unwrap()
         .local_addr()
         .unwrap()
-        .port()
-        .to_string();
+        .port();
+    suite_on(dir, port, extra)
+}
+
+/// `n` free ports in a row below the kernel's ephemeral ones, which other
+/// tests' sockets do not take meanwhile; the first.
+fn low_ports(n: u16) -> u16 {
+    let base = 20_000 + (std::process::id() % 1_000) as u16 * 10;
+    (base..base + 10 - n)
+        .find(|&p| (p..p + n).all(|q| TcpListener::bind(("127.0.0.1", q)).is_ok()))
+        .unwrap()
+}
+
+/// The suite with client ports from `port` on.
+fn suite_on(
+    dir: &std::path::Path,
+    port: u16,
+    extra: &[&str],
+) -> (std::process::Output, Vec<serde_json::Value>) {
+    let port = port.to_string();
     let record = dir.join(format!("runs-{port}.jsonl"));
     let out = Command::new(SUITE)
         .arg("--nats-server")
@@ -354,8 +372,9 @@ fn suite_starts_a_cluster_for_each_run_of_a_cluster_workload() {
     std::fs::create_dir_all(&dir).unwrap();
     // Sinks are not a cluster, but a queue group with a member on the
     // publisher's server still takes every message.
-    let (out, runs) = suite(
+    let (out, runs) = suite_on(
         &dir,
+        low_ports(3),
         &[
             "--workload",
             "cluster-queue-3",
