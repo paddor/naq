@@ -210,6 +210,11 @@ Notable changes to naq. The format follows
   message of a hub whose `$JS.ACK.` reply ends in `@` and a subject reaches
   clients with that subject and the reply before the `@`, as `nats-server`
   hands it on; links get it as it came.
+- `naq-proto`: `peer`, the wire of naq servers of one cluster over OMQ.
+  Control messages (`peer::Control`: `Hello`, snapshot and numbered
+  deltas of interest, beats, resync) and data batches (`peer::Batch` of
+  `peer::Record`s), encoded into the caller's buffer and decoded as
+  slices, with a fuzz target, `peer_frames`.
 
 ### Changed
 

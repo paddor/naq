@@ -36,6 +36,7 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
             "x\n*\n>\nx.y\n",
         ],
         "websocket" => return websocket(),
+        "peer_frames" => return peer_frames(),
         _ => &[],
     };
     list.iter().map(|s| s.as_bytes().to_vec()).collect()
@@ -59,4 +60,55 @@ fn websocket() -> Vec<Vec<u8>> {
     seeds.push(b"POST /mqtt HTTP/1.1\r\nHost: a\r\n\r\n".to_vec());
     seeds.push(b"\x16\x03\x01\x02\x00\x01\n".to_vec());
     seeds
+}
+
+/// Peer control messages of every kind, and a batch.
+fn peer_frames() -> Vec<Vec<u8>> {
+    use naq_proto::peer::{self, Control, Hello, Interest, Record};
+    let i = Interest {
+        account: b"$G",
+        subject: b"a.*",
+        queue: Some(b"q"),
+        weight: 2,
+    };
+    let controls = [
+        Control::Hello(Hello {
+            epoch: 1,
+            server_id: b"N1",
+            name: b"a",
+            cluster: b"c",
+            data: b"tcp://127.0.0.1:1",
+            client_urls: b"127.0.0.1:4222",
+        }),
+        Control::SnapshotStart { epoch: 1, seq: 0 },
+        Control::Entry(i),
+        Control::SnapshotEnd { epoch: 1 },
+        Control::Delta {
+            epoch: 1,
+            seq: 1,
+            interest: i,
+        },
+        Control::Beat { epoch: 1, seq: 1 },
+        Control::Resync,
+    ];
+    let mut all: Vec<Vec<u8>> = controls
+        .iter()
+        .map(|c| {
+            let mut out = Vec::new();
+            c.encode(&mut out);
+            out
+        })
+        .collect();
+    let mut batch = Vec::new();
+    peer::batch(&mut batch, b"$G");
+    Record {
+        subject: b"a.b",
+        reply: Some(b"r"),
+        headers: Some(b"NATS/1.0\r\n\r\n"),
+        payload: b"hi",
+        queue: Some(b"q"),
+    }
+    .encode(&mut batch);
+    all.push(batch);
+    all
 }

@@ -6,15 +6,17 @@ pub mod seeds;
 use naq_proto::client::{self, ClientOp, Limits, Parsed};
 use naq_proto::encode::Msg;
 use naq_proto::leaf::{self, LeafOp};
+use naq_proto::peer;
 
 /// A fuzz target body.
 pub type Target = fn(&[u8]);
 
 /// Every target, by name.
-pub const TARGETS: [(&str, Target); 5] = [
+pub const TARGETS: [(&str, Target); 6] = [
     ("client_wire", client_wire),
     ("config", config),
     ("leaf_wire", leaf_wire),
+    ("peer_frames", peer_frames),
     ("subjects", subjects),
     ("websocket", websocket),
 ];
@@ -150,4 +152,27 @@ pub fn subjects(data: &[u8]) {
 /// trip.
 pub fn websocket(data: &[u8]) {
     naq::fuzzing::websocket(data);
+}
+
+/// Decodes the input as a peer control message and as a batch. What
+/// decodes encodes back to the same bytes.
+///
+/// # Panics
+///
+/// When the codec breaks that rule.
+pub fn peer_frames(data: &[u8]) {
+    if let Ok(c) = peer::decode(data) {
+        let mut out = Vec::new();
+        c.encode(&mut out);
+        assert_eq!(out, data, "control re-encoded");
+    }
+    if let Ok(b) = peer::Batch::parse(data) {
+        let mut out = Vec::new();
+        peer::batch(&mut out, b.account);
+        for r in b.records() {
+            let Ok(r) = r else { return };
+            r.encode(&mut out);
+        }
+        assert_eq!(out, data, "batch re-encoded");
+    }
 }
