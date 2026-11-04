@@ -88,6 +88,10 @@ struct Terms {
 struct Connect<'a> {
     version: &'a str,
     name: &'a str,
+    /// The cluster of this server, if one: the hub keeps interest and
+    /// messages of a cluster from its other servers' links.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cluster: Option<&'a str>,
     headers: bool,
     remote_account: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -389,6 +393,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         let connect = Connect {
             version: env!("CARGO_PKG_VERSION"),
             name: &opts.server_name,
+            cluster: opts.cluster.as_ref().map(|c| c.name.as_str()),
             headers: info.headers,
             remote_account: account,
             user: url.user.as_deref(),

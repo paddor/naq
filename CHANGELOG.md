@@ -243,6 +243,9 @@ Notable changes to naq. The format follows
   gone closes the data links to it: a publisher waiting on one goes on.
 - `naq`: a client of a cluster server gets `connect_urls` in `INFO`: its
   server's client address, then those of the other servers that are up.
+- `naq`: a server of a cluster names it in its leaf `CONNECT`, so a Go hub
+  cluster keeps the interest and messages of one server of the cluster
+  from the links of the others.
 - `naq`: `/routez?subs=1` and `subs=detail` list each route's
   subscriptions, as `nats-server` does. A detail of a queue group adds its
   members at that server as `queue_weight`.

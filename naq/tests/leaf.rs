@@ -1251,6 +1251,76 @@ fn messages_cross_a_go_hub_cluster_both_ways() {
     assert_eq!(mine.line(), "job");
 }
 
+/// Two naq servers of cluster `s`, server `i` linked to the hub at
+/// `hubs[i]`.
+fn naq_cluster(hubs: [u16; 2]) -> Vec<Server> {
+    let ports = [free_port(), free_port()];
+    (0..2)
+        .map(|i| {
+            Server::start(&Options {
+                host: "127.0.0.1".into(),
+                port: 0,
+                lanes: 2,
+                http_port: Some(0),
+                server_name: format!("s{i}"),
+                cluster: Some(naq::Cluster {
+                    name: "s".into(),
+                    host: "127.0.0.1".into(),
+                    port: ports[i],
+                    routes: vec![format!("127.0.0.1:{}", ports[1 - i])],
+                }),
+                leaf_reconnect: Duration::from_millis(50),
+                remotes: vec![Remote {
+                    urls: vec![format!("nats-leaf://127.0.0.1:{}", hubs[i])],
+                    ..Remote::default()
+                }],
+                ..Options::default()
+            })
+            .unwrap()
+        })
+        .collect()
+}
+
+/// The subjects the hub of `s`'s only link has interest in.
+fn hub_subjects(s: &Server) -> Vec<serde_json::Value> {
+    let z = get(s.monitor_addr().unwrap().port(), "/leafz?subs=1");
+    z["leafs"][0]["subscriptions_list"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_go_hub_cluster_keeps_the_interest_of_a_naq_cluster_from_itself() {
+    let Some((_servers, [a, b])) = go_cluster() else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let naq = naq_cluster([a.leaf, b.leaf]);
+    leafz_until(a.http, |z| z["leafnodes"] == 1);
+    leafz_until(b.http, |z| z["leafnodes"] == 1);
+    let _sub = client(&naq[0], "SUB foo 1\r\n");
+    leafz_until(a.http, |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.contains(&"foo".into()))
+    });
+    // After foo on the same route: node b tells the link of server 1 of
+    // foo first, if it does.
+    let _go = go_client(a.client, "SUB bar 1\r\n");
+    let deadline = Instant::now() + WAIT;
+    while !hub_subjects(&naq[1]).contains(&"bar".into()) {
+        assert!(
+            Instant::now() < deadline,
+            "no bar: {:?}",
+            hub_subjects(&naq[1])
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Server 1 sends foo to server 0 itself, not through the hubs too.
+    assert!(!hub_subjects(&naq[1]).contains(&"foo".into()));
+}
+
 #[test]
 fn the_hub_hears_of_the_denies_and_the_isolation_asked_for() {
     let json = connect_of(
