@@ -1546,3 +1546,129 @@ fn clients_on_any_lane_get_jetstream_messages_of_the_hub_as_go_leafs_hand_them_o
     });
     assert_eq!(picked.iter().filter(|&&g| g).count(), 1, "one member of q");
 }
+
+/// A TCP proxy to `to` that can cut every connection through it.
+struct Proxy {
+    port: u16,
+    cut: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    conns: std::sync::Arc<std::sync::Mutex<Vec<TcpStream>>>,
+}
+
+impl Proxy {
+    fn new(to: u16) -> Proxy {
+        use std::sync::atomic::Ordering;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cut = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let conns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (c, k) = (cut.clone(), conns.clone());
+        std::thread::spawn(move || {
+            for down in listener.incoming() {
+                let Ok(down) = down else { return };
+                let Ok(up) = TcpStream::connect(("127.0.0.1", to)) else {
+                    continue;
+                };
+                // Relaxed: a flag the test sets before it cuts.
+                if c.load(Ordering::Relaxed) {
+                    return;
+                }
+                let mut k = k.lock().unwrap();
+                for (mut from, mut to) in [
+                    (down.try_clone().unwrap(), up.try_clone().unwrap()),
+                    (up.try_clone().unwrap(), down.try_clone().unwrap()),
+                ] {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from, &mut to);
+                        let _ = to.shutdown(std::net::Shutdown::Both);
+                    });
+                }
+                k.extend([down, up]);
+            }
+        });
+        Proxy { port, cut, conns }
+    }
+
+    /// Cuts every connection through the proxy so far.
+    fn cut_all(&self) {
+        for c in self.conns.lock().unwrap().drain(..) {
+            let _ = c.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        // Relaxed: see `Proxy::new`.
+        self.cut.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cut_all();
+    }
+}
+
+#[test]
+fn a_link_cut_on_the_way_comes_back_with_its_interest() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!("port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n");
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let proxy = Proxy::new(leafport);
+    let mut sub = go_client(port, "SUB s 1\r\n");
+    let leaf = leaf(&format!("nats-leaf://127.0.0.1:{}", proxy.port));
+    let mut mine = client(&leaf, "SUB back 1\r\n");
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    published_to_go(&leaf, &mut sub);
+    let first = get(http, "/leafz")["leafs"][0]["id"].clone();
+    proxy.cut_all();
+    // A new link, with the interest of both sides told again.
+    leafz_until(http, |z| {
+        z["leafnodes"] == 1 && z["leafs"][0]["id"] != first
+    });
+    published_to_go(&leaf, &mut sub);
+    leafz_until(http, |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|s| s == "back"))
+    });
+    let mut go = go_client(port, "");
+    go.send("PUB back 2\r\nhi\r\n");
+    assert_eq!(lines(&mut mine, 2), ["MSG back 1 2", "hi"]);
+}
+
+#[test]
+fn a_client_of_the_leaf_that_reads_nothing_does_not_hold_up_the_link() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!("port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n");
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        max_pending: 1 << 20,
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://127.0.0.1:{leafport}")],
+            ..Remote::default()
+        }],
+        ..Options::default()
+    })
+    .unwrap();
+    // It reads its PONG, then nothing.
+    let _slow = client(&leaf, "SUB flood 1\r\n");
+    let mut quick = client(&leaf, "SUB ok 1\r\n");
+    leafz_until(http, |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|s| s == "ok") && l.iter().any(|s| s == "flood"))
+    });
+    let mut go = go_client(port, "");
+    let big = "x".repeat(32 << 10);
+    let flood = format!("PUB flood {}\r\n{big}\r\n", big.len()).repeat(256);
+    // 8 MiB for a client that takes 1 MiB, then one for the quick one.
+    go.send(&flood);
+    go.send("PUB ok 2\r\nhi\r\n");
+    assert_eq!(lines(&mut quick, 2), ["MSG ok 1 2", "hi"]);
+    assert_eq!(get(http, "/leafz")["leafnodes"], 1, "the link held");
+}
