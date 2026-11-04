@@ -691,11 +691,12 @@ fn go(conf: &str) -> Option<GoServer> {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("hub.conf");
     std::fs::write(&path, conf).unwrap();
+    let log = std::fs::File::create(dir.join("hub.log")).unwrap();
     let child = Command::new(bin)
         .arg("-c")
         .arg(&path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(log)
         .spawn()
         .unwrap();
     Some(GoServer { child, dir })
@@ -718,6 +719,12 @@ impl Drop for GoServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // A failing test shows what the hub said.
+        if std::thread::panicking()
+            && let Ok(log) = std::fs::read_to_string(self.dir.join("hub.log"))
+        {
+            eprintln!("hub log:\n{log}");
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
