@@ -1293,37 +1293,43 @@ fn a_request_crosses_a_go_hub_and_its_reply_comes_back() {
     assert_eq!(lines(&mut c, 2), ["MSG _INBOX.r 7 6", "answer"]);
 }
 
-#[test]
-fn the_interest_of_one_hub_is_told_to_another() {
-    let (one, two) = (Hub::new(), Hub::new());
-    let remote = |h: &Hub| Remote {
-        urls: vec![format!("127.0.0.1:{}", h.port())],
-        ..Remote::default()
-    };
-    let _leaf = Server::start(&Options {
+/// A naq leaf of one lane that dials each of `urls`, so what it tells
+/// one hub keeps the order of what it learns.
+fn leaf_of_one_lane(urls: &[String]) -> Server {
+    Server::start(&Options {
         host: "127.0.0.1".into(),
         port: 0,
-        lanes: 2,
+        lanes: 1,
+        http_port: Some(0),
         server_name: "naq-leaf".into(),
-        remotes: vec![remote(&one), remote(&two)],
+        remotes: urls
+            .iter()
+            .map(|u| Remote {
+                urls: vec![u.clone()],
+                ..Remote::default()
+            })
+            .collect(),
         ..Options::default()
     })
-    .unwrap();
-    let (mut p1, mut p2) = (linked(&one), linked(&two));
-    p2.send("LS+ m\r\nLS+ m q 2\r\nLS+ m q 3\r\n");
-    // Not told back to the hub it came from, which hears of no LS+.
-    p2.send("PING\r\n");
-    assert_eq!(p2.line(), "PONG");
-    told(&mut p1, &["LS+ m", "LS+ m q 3"]);
-    p2.send("LS- m q\r\nLS- m\r\n");
-    told(&mut p1, &["LS- m q", "LS- m"]);
-    drop(p2);
-    p1.send("PING\r\n");
-    assert_eq!(p1.line(), "PONG");
+    .unwrap()
 }
 
 #[test]
-fn a_naq_leaf_bridges_two_go_hubs() {
+fn only_the_loop_detection_of_one_hub_is_told_to_another() {
+    let (one, two) = (Hub::new(), Hub::new());
+    let url = |h: &Hub| format!("127.0.0.1:{}", h.port());
+    let _leaf = leaf_of_one_lane(&[url(&one), url(&two)]);
+    let (mut p1, mut p2) = (linked(&one), linked(&two));
+    p2.send("LS+ m\r\nLS+ m q 2\r\nLS+ $LDS.two\r\n");
+    // Interest at a hub stays with it, as in `nats-server`.
+    assert_eq!(lines_until(&mut p1, "LS+ $LDS.two"), ["LS+ $LDS.two"]);
+    p2.send("LS- $LDS.two\r\nPING\r\n");
+    assert_eq!(p2.line(), "PONG", "not told back to its own hub");
+    assert_eq!(p1.line(), "LS- $LDS.two");
+}
+
+#[test]
+fn a_naq_leaf_does_not_bridge_two_go_hubs() {
     let hubs: Vec<[u16; 3]> = (0..2)
         .map(|_| [free_port(), free_port(), free_port()])
         .collect();
@@ -1335,29 +1341,34 @@ fn a_naq_leaf_bridges_two_go_hubs() {
         return;
     };
     let _b = go(&conf(hubs[1])).unwrap();
-    let mut sub = go_client(hubs[0][0], "SUB x 1\r\n");
-    let remote = |h: [u16; 3]| Remote {
-        urls: vec![format!("nats-leaf://127.0.0.1:{}", h[1])],
-        ..Remote::default()
-    };
-    let _leaf = Server::start(&Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
-        server_name: "naq-bridge".into(),
-        remotes: vec![remote(hubs[0]), remote(hubs[1])],
-        ..Options::default()
-    })
-    .unwrap();
-    // Hub b hears of the interest at hub a through the leaf.
-    leafz_until(hubs[1][2], |z| {
+    let _sub = go_client(hubs[0][0], "SUB x 1\r\n");
+    let url = |h: [u16; 3]| format!("nats-leaf://127.0.0.1:{}", h[1]);
+    let leaf = leaf_of_one_lane(&[url(hubs[0]), url(hubs[1])]);
+    let mine = leaf.monitor_addr().unwrap().port();
+    until(mine, "/leafz?subs=1", |z| {
+        z["leafs"].as_array().is_some_and(|l| {
+            l.iter().any(|l| {
+                l["subscriptions_list"]
+                    .as_array()
+                    .is_some_and(|s| s.iter().any(|s| s == "x"))
+            })
+        })
+    });
+    // Told to hub b after anything hub a told before.
+    let _marker = client(&leaf, "SUB z 1\r\n");
+    let b = until(hubs[1][2], "/leafz?subs=1", |z| {
         z["leafs"][0]["subscriptions_list"]
             .as_array()
-            .is_some_and(|l| l.iter().any(|s| s == "x"))
+            .is_some_and(|l| l.iter().any(|s| s == "z"))
     });
-    let mut publisher = go_client(hubs[1][0], "");
-    publisher.send("PUB x 6\r\nbridge\r\n");
-    assert_eq!(lines(&mut sub, 2), ["MSG x 1 6", "bridge"]);
+    let subs = b["leafs"][0]["subscriptions_list"].as_array().unwrap();
+    assert!(!subs.iter().any(|s| s == "x"), "{subs:?}");
+    // The loop detection subjects of naq and of hub a.
+    let lds = subs
+        .iter()
+        .filter(|s| s.as_str().unwrap().starts_with("$LDS."))
+        .count();
+    assert_eq!(lds, 2, "{subs:?}");
 }
 
 #[test]

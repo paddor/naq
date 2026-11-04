@@ -185,12 +185,12 @@ impl LinkSide {
             if denied(filter) || !self.tells(filter) {
                 return;
             }
-            if i.plain.told(self.id) > 0 {
+            if i.plain.told(filter, self.id) > 0 {
                 leaf::sub(&mut *out, filter, None);
                 told.insert((filter.into(), None), 1);
             }
             for (q, g) in &i.queues {
-                let n = members(g.told(self.id));
+                let n = members(g.told(filter, self.id));
                 if n > 0 {
                     leaf::sub(&mut *out, filter, Some((q, n)));
                     told.insert((filter.into(), Some(q.clone())), n);

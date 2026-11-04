@@ -97,8 +97,12 @@ impl Group {
     }
 
     /// Members as link `link` tells its hub of them: the clients', and
-    /// those at the hubs of other links.
-    pub(crate) fn told(&self, link: u64) -> u64 {
+    /// for the loop detection subject `filter`, those at the hubs of other
+    /// links, as `nats-server` tells them.
+    pub(crate) fn told(&self, filter: &[u8], link: u64) -> u64 {
+        if !filter.starts_with(b"$LDS.") {
+            return self.weight();
+        }
         let others = self.peers.iter().filter(|p| p.link != link);
         self.weight() + others.map(|p| u64::from(p.weight)).sum::<u64>()
     }
@@ -291,8 +295,8 @@ impl Index {
     }
 
     /// Members of the plain subscriptions of `filter`, or of its queue
-    /// group `queue`, as link `link` tells its hub of them: clients on any
-    /// lane, and those at the hubs of other links.
+    /// group `queue`, as link `link` tells its hub of them: see
+    /// [`Group::told`].
     pub(crate) fn count(&self, filter: &[u8], queue: Option<&[u8]>, link: u64) -> u32 {
         let interest = if subject::is_literal(filter) {
             self.literal.get(filter)
@@ -303,7 +307,9 @@ impl Index {
             None => Some(&i.plain),
             Some(q) => i.queues.iter().find(|(n, _)| **n == *q).map(|(_, g)| g),
         });
-        group.map_or(0, |g| u32::try_from(g.told(link)).unwrap_or(u32::MAX))
+        group.map_or(0, |g| {
+            u32::try_from(g.told(filter, link)).unwrap_or(u32::MAX)
+        })
     }
 
     /// Calls `f` with every filter and its interest.
@@ -427,11 +433,14 @@ mod tests {
         };
         assert_eq!(groups.len(), 2);
         assert_eq!(
-            idx.count(b"a.*", Some(b"q"), 7),
+            idx.count(b"a.*", Some(b"q"), 8),
             0,
-            "a link is not told of its own hub's members"
+            "links are told of client members"
         );
-        assert_eq!(idx.count(b"a.*", Some(b"q"), 8), 5, "other links are");
+        idx.peer(b"$LDS.x", None, Peer { weight: 1, ..p });
+        assert_eq!(idx.count(b"$LDS.x", None, 8), 1, "and of loop detection");
+        assert_eq!(idx.count(b"$LDS.x", None, 7), 0, "of other links only");
+        idx.peer(b"$LDS.x", None, Peer { weight: 0, ..p });
         let Some(Found::Many(f)) = idx.matches(b"a.c") else {
             panic!("a.* matches")
         };
