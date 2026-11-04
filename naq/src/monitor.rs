@@ -142,6 +142,7 @@ pub(crate) struct RouteInfo {
     is_configured: bool,
     ip: String,
     port: u16,
+    subscriptions: usize,
 }
 
 /// The routes of the cluster to servers that are up, as lane 0 knows
@@ -163,6 +164,7 @@ pub(crate) fn routes(lane: &Lane) -> Vec<RouteInfo> {
             is_configured: true,
             ip: p.host.clone(),
             port: p.port,
+            subscriptions: p.subscriptions,
         })
         .collect()
 }

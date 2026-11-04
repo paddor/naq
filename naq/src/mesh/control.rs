@@ -1,15 +1,22 @@
-//! Control between the servers of the mesh: who they are, for now.
+//! Control between the servers of the mesh: who they are, and their
+//! interest.
 
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use naq_proto::peer::{self, Control, Hello};
 use omq_tokio::{Message, MonitorEvent, Socket, SocketType};
 
+use super::interest::{Change, Heard};
 use super::{Mesh, Peer, endpoint, route, socket_options};
 use crate::Cluster;
-use crate::lane::Lane;
+use crate::lane::Control as LaneControl;
 use crate::server::Shared;
+
+/// How often the deltas sent so far are told.
+const BEAT: Duration = Duration::from_secs(1);
 
 /// What this server tells the others of itself.
 #[derive(Debug)]
@@ -22,17 +29,14 @@ pub(super) struct Me {
 }
 
 impl Me {
-    /// The `Hello` of `shared`'s server in cluster `c`, with the data
-    /// endpoints of its lanes.
-    pub(super) fn new(shared: &Shared, c: &Cluster, data: &[String]) -> Me {
-        let mut epoch = [0u8; 8];
-        // An epoch of 0 on failure still tells a start apart from none.
-        let _ = getrandom::getrandom(&mut epoch);
+    /// The `Hello` of `shared`'s server of start `epoch` in cluster `c`,
+    /// with the data endpoints of its lanes.
+    pub(super) fn new(shared: &Shared, c: &Cluster, data: &[String], epoch: u64) -> Me {
         let data = data.join(" ");
         let urls = shared.addr.to_string();
         let mut hello = Vec::new();
         Control::Hello(Hello {
-            epoch: u64::from_le_bytes(epoch),
+            epoch,
             server_id: shared.server_id.as_bytes(),
             name: shared.opts.server_name.as_bytes(),
             cluster: c.name.as_bytes(),
@@ -50,7 +54,13 @@ impl Me {
 
 /// Serves the control of the mesh on lane 0: dials every route of `c`,
 /// noting the servers in `mesh`, and answers those that dial `router`.
-pub(super) async fn serve(_lane: &Rc<Lane>, mesh: &Rc<Mesh>, me: Me, c: &Cluster, router: Socket) {
+pub(super) async fn serve(
+    shared: &Arc<Shared>,
+    mesh: &Rc<Mesh>,
+    me: Me,
+    c: &Cluster,
+    router: Socket,
+) {
     let me = Rc::new(me);
     {
         let mut peers = mesh.peers.borrow_mut();
@@ -65,34 +75,70 @@ pub(super) async fn serve(_lane: &Rc<Lane>, mesh: &Rc<Mesh>, me: Me, c: &Cluster
         }
     }
     for i in 0..c.routes.len() {
-        tokio::task::spawn_local(dial(mesh.clone(), me.clone(), i));
+        tokio::task::spawn_local(dial(shared.clone(), mesh.clone(), me.clone(), i));
     }
-    answer(router, &me).await;
+    answer(router, &me, mesh).await;
 }
 
-/// Answers each server that dials this one with this one's `Hello`.
-async fn answer(router: Socket, me: &Me) {
+/// Answers each server that dials this one: with this one's `Hello` and a
+/// snapshot of its interest, then the deltas and beats of it.
+async fn answer(router: Socket, me: &Me, mesh: &Mesh) {
     let Ok(ids) = router.identity_routing() else {
         return;
     };
+    // The servers that dialed this one, by routing identity.
+    let mut others: Vec<Bytes> = Vec::new();
+    let mut beat = tokio::time::interval(BEAT);
     loop {
-        let Ok((who, msg)) = ids.recv_from().await else {
-            return;
-        };
-        let Ok(bytes) = msg.into_bytes() else {
-            continue;
-        };
-        if let Ok(Control::Hello(h)) = peer::decode(&bytes)
-            && h.cluster == me.cluster.as_bytes()
-        {
-            let _ = ids.send_to(who, Message::single(me.hello.clone())).await;
+        // Cancel-safe: a dropped receive takes no message, a dropped
+        // `notified` keeps its permit, and the interval keeps its deadline.
+        tokio::select! {
+            got = ids.recv_from() => {
+                let Ok((who, msg)) = got else { return };
+                let Ok(bytes) = msg.into_bytes() else { continue };
+                let who = who.to_bytes();
+                match peer::decode(&bytes) {
+                    Ok(Control::Hello(h)) if h.cluster == me.cluster.as_bytes() => {
+                        if !others.contains(&who) {
+                            others.push(who.clone());
+                        }
+                        let _ = ids.send_to(&who, Message::single(me.hello.clone())).await;
+                        snapshot(&ids, &who, mesh).await;
+                    }
+                    Ok(Control::Resync) if others.contains(&who) => {
+                        snapshot(&ids, &who, mesh).await;
+                    }
+                    _ => {}
+                }
+            }
+            () = mesh.told.wake.notified() => {
+                for delta in mesh.told.take() {
+                    for who in &others {
+                        let _ = ids.send_to(who, Message::single(delta.clone())).await;
+                    }
+                }
+            }
+            _ = beat.tick() => {
+                let b = mesh.told.beat();
+                for who in &others {
+                    let _ = ids.send_to(who, Message::single(b.clone())).await;
+                }
+            }
         }
     }
 }
 
+/// Sends `who` a snapshot of this server's interest.
+async fn snapshot(ids: &omq_tokio::IdentitySocket, who: &Bytes, mesh: &Mesh) {
+    for part in mesh.told.snapshot() {
+        let _ = ids.send_to(who, Message::single(part)).await;
+    }
+}
+
 /// Dials route `i` of `mesh` and keeps track of the server there: says
-/// `Hello` on each connection, and notes the one it answers with.
-async fn dial(mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
+/// `Hello` on each connection, notes the one it answers with, and applies
+/// its interest on every lane.
+async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
     let ctx = omq_tokio::Context::current();
     let s = ctx.socket(SocketType::Dealer, socket_options(me.id.clone()));
     let mut events = s.monitor();
@@ -103,6 +149,8 @@ async fn dial(mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
     if s.connect(endpoint(&host, port)).await.is_err() {
         return;
     }
+    let mut heard = Heard::default();
+    let mut apply = |c: Change<'_>| server_interest(&shared, i, c);
     loop {
         // Cancel-safe: a dropped receive takes no message or event.
         tokio::select! {
@@ -110,26 +158,59 @@ async fn dial(mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                 Ok(MonitorEvent::HandshakeSucceeded { .. }) | Err(omq_tokio::MonitorRecvError::Lagged(_)) => {
                     let _ = s.send(Message::single(me.hello.clone())).await;
                 }
-                Ok(MonitorEvent::Disconnected { .. }) => mesh.peers.borrow_mut()[i].up = false,
+                Ok(MonitorEvent::Disconnected { .. }) => {
+                    heard.forget(&mut apply);
+                    let mut peers = mesh.peers.borrow_mut();
+                    peers[i].up = false;
+                    peers[i].subscriptions = 0;
+                }
                 Ok(_) => {}
                 Err(_) => return,
             },
             msg = s.recv() => {
                 let Ok(msg) = msg else { return };
                 let Ok(bytes) = msg.into_bytes() else { continue };
-                if let Ok(Control::Hello(h)) = peer::decode(&bytes) {
-                    met(&mesh, i, &h, &me);
+                let Ok(c) = peer::decode(&bytes) else { continue };
+                if let Control::Hello(h) = &c
+                    && !met(&mesh, i, h, &me)
+                {
+                    continue;
                 }
+                if heard.take(&c, &mut apply) {
+                    let mut out = Vec::new();
+                    Control::Resync.encode(&mut out);
+                    let _ = s.send(Message::single(Bytes::from(out))).await;
+                }
+                mesh.peers.borrow_mut()[i].subscriptions = heard.len();
             }
         }
     }
 }
 
-/// Notes the server of route `i` as its `Hello` `h` tells, if it is of
-/// this cluster.
-fn met(mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) {
-    if h.cluster != me.cluster.as_bytes() {
+/// Sets the interest of the server of route `i` on every lane, as change
+/// `c` says, if its account is one of this server's.
+fn server_interest(shared: &Shared, i: usize, (account, subject, queue, weight): Change<'_>) {
+    let Some(account) = shared.accounts.iter().position(|a| a.as_bytes() == account) else {
         return;
+    };
+    // Routes are few: their count fits.
+    let server = i as u16;
+    for tx in &*shared.lanes {
+        tx.control(LaneControl::Server {
+            account: account as u32,
+            subject: subject.into(),
+            queue: queue.map(Into::into),
+            server,
+            weight,
+        });
+    }
+}
+
+/// Notes the server of route `i` as its `Hello` `h` tells. Returns whether
+/// it is of this cluster.
+fn met(mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
+    if h.cluster != me.cluster.as_bytes() {
+        return false;
     }
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let mut peers = mesh.peers.borrow_mut();
@@ -139,4 +220,5 @@ fn met(mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) {
     p.name = text(h.name);
     p.epoch = h.epoch;
     p.data = peer::words(h.data).map(text).collect();
+    true
 }

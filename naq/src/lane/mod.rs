@@ -62,6 +62,15 @@ pub(crate) enum Control {
     Fence(oneshot::Sender<()>),
     /// Answered with the lane's clients, for monitoring.
     Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
+    /// Server `server` of the cluster, by route, has `weight` members in
+    /// `subject` of `account`, in `queue` if given; 0 for none.
+    Server {
+        account: u32,
+        subject: Box<[u8]>,
+        queue: Option<Box<[u8]>>,
+        server: u16,
+        weight: u32,
+    },
     /// Answered with the lane's leaf node links, for monitoring.
     Links(oneshot::Sender<Vec<crate::monitor::LeafInfo>>),
     /// Answered by lane 0 with the routes of the cluster, for monitoring.
@@ -174,6 +183,10 @@ impl Lane {
     /// Tells the links on this lane that interest in `filter` of `account`,
     /// in `queue` if given, changed: of a client or of a link's hub.
     pub(crate) fn changed(&self, account: u32, filter: &[u8], queue: Option<&[u8]>) {
+        if let Some(mesh) = self.mesh.borrow().as_ref() {
+            let index = self.index(account).borrow();
+            mesh.told.update(&index, account, filter, queue);
+        }
         let links = self.links.borrow();
         if links.is_empty() {
             return;
@@ -252,6 +265,17 @@ impl Lane {
             }
             Control::Clients(answer) => {
                 let _ = answer.send(crate::monitor::conns(self));
+            }
+            Control::Server {
+                account,
+                subject,
+                queue,
+                server,
+                weight,
+            } => {
+                self.index(account)
+                    .borrow_mut()
+                    .server(&subject, queue.as_deref(), server, weight);
             }
             Control::Links(answer) => {
                 let _ = answer.send(crate::monitor::links(self));

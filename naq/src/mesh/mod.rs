@@ -6,6 +6,9 @@
 //! the others. See `tmp/nats/MESH.md`.
 
 mod control;
+mod interest;
+
+pub(crate) use interest::Told;
 
 use std::cell::RefCell;
 use std::net::SocketAddr;
@@ -84,10 +87,21 @@ fn endpoint(host: &str, port: u16) -> String {
     }
 }
 
-/// What lane 0 knows of the other servers, by route.
-#[derive(Debug, Default)]
+/// What lane 0 knows of the other servers, by route, and what it told
+/// them.
+#[derive(Debug)]
 pub(crate) struct Mesh {
     pub(crate) peers: RefCell<Vec<Peer>>,
+    pub(crate) told: Told,
+}
+
+impl Mesh {
+    fn new(epoch: u64, accounts: Box<[String]>) -> Mesh {
+        Mesh {
+            peers: RefCell::default(),
+            told: Told::new(epoch, accounts),
+        }
+    }
 }
 
 /// Another server of the cluster, as its route shows it.
@@ -102,6 +116,8 @@ pub(crate) struct Peer {
     pub(crate) epoch: u64,
     /// The data endpoint of each of its lanes.
     pub(crate) data: Vec<String>,
+    /// Entries of its interest, as applied.
+    pub(crate) subscriptions: usize,
 }
 
 /// Options of every socket of the mesh: heartbeats find a peer gone.
@@ -129,6 +145,14 @@ pub(crate) async fn run(
     let Some(lane) = crate::lane::get(shared.id, 0) else {
         return;
     };
+    let mut epoch = [0u8; 8];
+    // An epoch of 0 on failure still tells a start apart from none.
+    let _ = getrandom::getrandom(&mut epoch);
+    let epoch = u64::from_le_bytes(epoch);
+    // In place before the server serves clients: none of their interest
+    // goes untold.
+    let mesh = std::rc::Rc::new(Mesh::new(epoch, shared.accounts.clone()));
+    *lane.mesh.borrow_mut() = Some(mesh.clone());
     let ctx = omq_tokio::Context::current();
     let router = ctx.socket(SocketType::Router, socket_options(Bytes::new()));
     let bound = match router.bind(endpoint(&c.host, c.port)).await {
@@ -144,10 +168,8 @@ pub(crate) async fn run(
     };
     let _ = ready.send(Ok(addr));
     let data = bind_data(&lanes, &c).await;
-    let mesh = std::rc::Rc::new(Mesh::default());
-    *lane.mesh.borrow_mut() = Some(mesh.clone());
-    let me = control::Me::new(&shared, &c, &data);
-    control::serve(&lane, &mesh, me, &c, router).await;
+    let me = control::Me::new(&shared, &c, &data, epoch);
+    control::serve(&shared, &mesh, me, &c, router).await;
 }
 
 /// Binds a data socket on each of `lanes`, and returns their endpoints in

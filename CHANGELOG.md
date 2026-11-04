@@ -221,6 +221,11 @@ Notable changes to naq. The format follows
   server there; each lane binds a data socket. `/routez` shows the routes
   to servers that answered. A server of another cluster name is not met;
   one that stops leaves the routes.
+- `naq`: the servers of a cluster tell each other of their clients'
+  interest: a snapshot on each connection, then numbered deltas and beats;
+  a server that sees a gap asks for a snapshot again. Plain interest is
+  told once, a queue group with its member count. A server gone takes its
+  interest with it. `/routez` counts each route's subscriptions.
 
 ### Changed
 

@@ -159,3 +159,71 @@ fn a_server_that_stops_leaves_the_routes_of_the_others() {
     let z = until(&servers[0], "/routez", |z| z["num_routes"] == 1);
     assert_eq!(z["routes"][0]["remote_name"], "n1");
 }
+
+/// A client of `s` that sent `ops` and got its `PONG`.
+fn client(s: &Server, ops: &str) -> std::io::BufReader<TcpStream> {
+    use std::io::BufRead;
+    let mut c = TcpStream::connect(s.addr()).unwrap();
+    c.set_read_timeout(Some(WAIT)).unwrap();
+    write!(c, "CONNECT {{\"verbose\":false}}\r\n{ops}PING\r\n").unwrap();
+    let mut r = std::io::BufReader::new(c);
+    let mut l = String::new();
+    while l != "PONG\r\n" {
+        l.clear();
+        r.read_line(&mut l).unwrap();
+    }
+    r
+}
+
+/// The subscriptions route `rid` shows on `s`, once it is up.
+fn route_subs(z: &serde_json::Value, name: &str) -> Option<u64> {
+    z["routes"]
+        .as_array()?
+        .iter()
+        .find(|r| r["remote_name"] == name)?["subscriptions"]
+        .as_u64()
+}
+
+#[test]
+fn the_others_hear_of_the_interest_of_a_servers_clients() {
+    let servers = cluster(3);
+    for s in &servers {
+        until(s, "/routez", |z| z["num_routes"] == 2);
+    }
+    let mut c = client(&servers[1], "SUB a 1\r\nSUB a 2\r\nSUB w.* q 3\r\n");
+    for s in [&servers[0], &servers[2]] {
+        until(s, "/routez", |z| route_subs(z, "n1") == Some(2));
+    }
+    c.get_mut()
+        .write_all(b"UNSUB 1\r\nUNSUB 3\r\nPING\r\n")
+        .unwrap();
+    // One subscription to a stays: the others hear of no change for it.
+    until(&servers[0], "/routez", |z| route_subs(z, "n1") == Some(1));
+    drop(c);
+    until(&servers[2], "/routez", |z| route_subs(z, "n1") == Some(0));
+}
+
+#[test]
+fn a_server_that_starts_late_hears_of_what_was_there() {
+    let ports: Vec<u16> = (0..2).map(|_| free_port()).collect();
+    let start = |i: usize| {
+        Server::start(&Options {
+            host: "127.0.0.1".into(),
+            port: 0,
+            http_port: Some(0),
+            server_name: format!("n{i}"),
+            cluster: Some(Cluster {
+                name: "c".into(),
+                host: "127.0.0.1".into(),
+                port: ports[i],
+                routes: vec![format!("127.0.0.1:{}", ports[1 - i])],
+            }),
+            ..Options::default()
+        })
+        .unwrap()
+    };
+    let first = start(0);
+    let _c = client(&first, "SUB a 1\r\nSUB b q 2\r\n");
+    let late = start(1);
+    until(&late, "/routez", |z| route_subs(z, "n0") == Some(2));
+}

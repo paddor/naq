@@ -67,11 +67,30 @@ pub(crate) struct Group {
     /// Links whose hubs have subscriptions. A queue group's message goes
     /// to one only when no client here or on another lane takes it.
     pub(crate) peers: Vec<Peer>,
+    /// Other servers of the cluster with subscriptions, by route, and how
+    /// many each has.
+    pub(crate) servers: Vec<(u16, u32)>,
 }
 
 impl Group {
     const fn is_empty(&self) -> bool {
-        self.local.is_empty() && self.lanes.is_empty() && self.peers.is_empty()
+        self.local.is_empty()
+            && self.lanes.is_empty()
+            && self.peers.is_empty()
+            && self.servers.is_empty()
+    }
+
+    /// Sets the members at server `server`; 0 removes it.
+    fn set_server(&mut self, server: u16, weight: u32) {
+        let at = self.servers.iter().position(|&(s, _)| s == server);
+        match (at, weight) {
+            (Some(at), 0) => {
+                self.servers.swap_remove(at);
+            }
+            (Some(at), w) => self.servers[at].1 = w,
+            (None, 0) => {}
+            (None, w) => self.servers.push((server, w)),
+        }
     }
 
     /// Adds `peer`, or its new weight; with weight 0, removes it.
@@ -271,6 +290,34 @@ impl Index {
         }
     }
 
+    /// Sets the members server `server` has in `filter`, in `queue` if
+    /// given; 0 removes them.
+    pub(crate) fn server(&mut self, filter: &[u8], queue: Option<&[u8]>, server: u16, weight: u32) {
+        if weight > 0 {
+            self.interest(filter)
+                .group(queue)
+                .set_server(server, weight);
+        } else {
+            self.change(filter, queue, |g| g.set_server(server, 0));
+        }
+    }
+
+    /// Client members of the plain subscriptions of `filter`, or of its
+    /// queue group `queue`, on any lane: as the other servers of the
+    /// cluster hear of them.
+    pub(crate) fn clients(&self, filter: &[u8], queue: Option<&[u8]>) -> u32 {
+        let interest = if subject::is_literal(filter) {
+            self.literal.get(filter)
+        } else {
+            self.wild.get(filter)
+        };
+        let group = interest.and_then(|i| match queue {
+            None => Some(&i.plain),
+            Some(q) => i.queues.iter().find(|(n, _)| **n == *q).map(|(_, g)| g),
+        });
+        group.map_or(0, |g| u32::try_from(g.weight()).unwrap_or(u32::MAX))
+    }
+
     /// Subscription `sid` of client `id`.
     pub(crate) fn find(
         &self,
@@ -450,6 +497,28 @@ mod tests {
         idx.peer(b"a.b", None, Peer { weight: 0, ..p });
         idx.peer(b"a.b", None, Peer { weight: 0, ..p });
         assert!(idx.matches(b"a.b").is_none(), "forgotten");
+        assert!(idx.wild.is_empty() && idx.literal.is_empty());
+    }
+
+    #[test]
+    fn servers_of_the_cluster_are_members_apart_from_clients() {
+        let mut idx = Index::default();
+        idx.server(b"a.*", None, 2, 1);
+        idx.server(b"a.*", Some(b"q"), 2, 3);
+        idx.server(b"a.*", Some(b"q"), 2, 5);
+        idx.server(b"lit", None, 0, 1);
+        let Some(Found::Many(f)) = idx.matches(b"a.b") else {
+            panic!("a.* matches")
+        };
+        let i = f.iter().next().unwrap();
+        assert_eq!(i.plain.servers, [(2, 1)]);
+        assert_eq!(i.queues[0].1.servers, [(2, 5)]);
+        assert_eq!(idx.clients(b"a.*", Some(b"q")), 0, "no client members");
+        idx.server(b"a.*", None, 2, 0);
+        idx.server(b"a.*", Some(b"q"), 2, 0);
+        idx.server(b"lit", None, 0, 0);
+        idx.server(b"lit", None, 0, 0);
+        assert!(idx.matches(b"a.b").is_none() && idx.matches(b"lit").is_none());
         assert!(idx.wild.is_empty() && idx.literal.is_empty());
     }
 
