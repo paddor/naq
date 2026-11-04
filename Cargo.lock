@@ -700,6 +700,7 @@ name = "naq-bench"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "naq",
  "naq-proto",
  "omq-tokio",
  "rustc-hash",

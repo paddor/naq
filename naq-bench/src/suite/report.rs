@@ -135,8 +135,15 @@ fn size(bytes: usize) -> String {
 
 /// The rows as a table for people: millions of messages per second.
 pub fn table(rows: &[Row]) -> String {
-    let mut t = String::from(
-        "workload    payload  rival msgs/s  naq msgs/s      x  spread  floor  target  status\n",
+    let w = rows
+        .iter()
+        .map(|r| r.cell.workload.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(10);
+    let mut t = format!(
+        "{:<w$}  payload  rival msgs/s  naq msgs/s      x  spread  floor  target  status\n",
+        "workload"
     );
     for r in rows {
         let (floor, target) = r.gate().map_or_else(
@@ -152,7 +159,7 @@ pub fn table(rows: &[Row]) -> String {
         };
         let _ = writeln!(
             t,
-            "{:<10}  {:>7}  {:>11.3}M  {:>9.3}M  {:>5.2}  {:>5.1}%  {floor:>5}  {target:>6}  {status}",
+            "{:<w$}  {:>7}  {:>11.3}M  {:>9.3}M  {:>5.2}  {:>5.1}%  {floor:>5}  {target:>6}  {status}",
             r.cell.workload.name,
             size(r.cell.payload),
             r.rival.median / 1e6,
@@ -288,6 +295,20 @@ mod tests {
         );
         assert!(lines[2].contains("1 KiB") && lines[2].ends_with("below floor"));
         assert!(lines[3].starts_with("fan-out-4") && lines[3].ends_with("-       -  -"));
+        let wide = table(&[row(all[0], 1e6, 1e6, 0.0), row(all[9], 1e6, 1e6, 0.0)]);
+        let lines: Vec<&str> = wide.lines().collect();
+        assert!(
+            lines[0].starts_with("workload            payload"),
+            "{wide}"
+        );
+        assert!(
+            lines[1].starts_with("one-to-one             16 B"),
+            "{wide}"
+        );
+        assert!(
+            lines[2].starts_with("cluster-one-to-one     16 B"),
+            "{wide}"
+        );
     }
 
     #[test]

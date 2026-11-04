@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::Sender;
 use std::thread;
 
-use super::{Config, Ready, Shared, backoff};
+use super::{Config, PROBE_EVERY, Ready, Shared, backoff};
 use crate::conn::{self, ConnError, FrameReader, lossy};
 use crate::wire::{self, Op};
 
-/// Connects, then publishes from `go` until `stop`.
+/// Connects, probes until `go`, then publishes until `stop`.
 pub(super) fn run(cfg: &Config, id: u32, shared: &Arc<Shared>, ready: &Sender<Ready>) {
     let setup = || -> Result<_, ConnError> {
         let (mut r, info) = conn::handshake(cfg.addr, "naq-load-pub")?;
@@ -33,10 +33,8 @@ pub(super) fn run(cfg: &Config, id: u32, shared: &Arc<Shared>, ready: &Sender<Re
         thread::spawn(move || watch(r, &owed, &shared))
     };
     let _ = ready.send(Ok(info.version));
-    while !shared.go.load(Relaxed) && !shared.halted() {
-        thread::park();
-    }
-    if let Err(e) = publish(cfg, id, shared, &owed, &mut w)
+    if let Err(e) =
+        probe(cfg, id, shared, &mut w).and_then(|()| publish(cfg, id, shared, &owed, &mut w))
         && !shared.closing()
     {
         shared.fail(format!("publisher {id}: {e}"));
@@ -44,6 +42,26 @@ pub(super) fn run(cfg: &Config, id: u32, shared: &Arc<Shared>, ready: &Sender<Re
     shared.pubs_done.fetch_add(1, Relaxed);
     // The watcher reads until the run shuts the stream down.
     let _ = watcher.join();
+}
+
+/// Until `go`, publishes a probe every [`PROBE_EVERY`]: a payload one
+/// stamp longer than the load's, stamped with `id`. Subscribers note it
+/// and do not count it. Without subscribers, only waits.
+fn probe(cfg: &Config, id: u32, shared: &Shared, w: &mut TcpStream) -> std::io::Result<()> {
+    let frame = (cfg.subs > 0).then(|| {
+        let mut payload = wire::filler(cfg.payload + wire::STAMP_LEN);
+        wire::stamp(&mut payload, id, 0);
+        let mut f = Vec::new();
+        wire::write_pub(&mut f, cfg.subject.as_bytes(), &payload);
+        f
+    });
+    while !shared.go.load(Relaxed) && !shared.halted() {
+        if let Some(f) = &frame {
+            w.write_all(f)?;
+        }
+        thread::park_timeout(PROBE_EVERY);
+    }
+    Ok(())
 }
 
 /// Writes batches of stamped `PUB` frames while the window has room.

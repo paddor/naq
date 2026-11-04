@@ -349,6 +349,57 @@ fn suite_runs_both_servers_in_turn_and_tables_the_cells() {
 }
 
 #[test]
+fn suite_starts_a_cluster_for_each_run_of_a_cluster_workload() {
+    let dir = std::env::temp_dir().join(format!("naq-suite-cluster-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Sinks are not a cluster, but a queue group with a member on the
+    // publisher's server still takes every message.
+    let (out, runs) = suite(
+        &dir,
+        &[
+            "--workload",
+            "cluster-queue-3",
+            "--reps",
+            "1",
+            "--cluster-port",
+            "7100",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(runs.len(), 4);
+    for i in 0..3 {
+        let log = dir.join(format!("logs/naq-cluster-queue-3-1024-0-n{i}.log"));
+        assert!(log.exists(), "{}", log.display());
+    }
+    let conf =
+        std::fs::read_to_string(dir.join("logs/nats-server-cluster-queue-3-16-0-n2.conf")).unwrap();
+    assert!(
+        conf.starts_with(
+            "server_name: n2
+"
+        ) && conf.contains(
+            "listen: 127.0.0.1:7102
+"
+        ) && conf.contains(
+            "nats-route://127.0.0.1:7100
+    nats-route://127.0.0.1:7101
+"
+        ),
+        "{conf}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(" --sub-addr "), "{stdout}");
+    assert!(
+        stdout.contains(
+            "
+cluster-queue-3     16 B"
+        ),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn suite_stops_when_a_server_does_not_start() {
     let dir = std::env::temp_dir().join(format!("naq-suite-bad-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

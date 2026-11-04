@@ -262,6 +262,14 @@ Notable changes to naq. The format follows
   nearer. Only the leaf dials: its data goes over DEALERs to a ROUTER on
   every lane of the hub. Up to 64 routes, hubs and leafs. A leaf gone
   takes its interest; `/leafz` shows naq links.
+- `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
+  `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
+  per run, from the same configuration file for `nats-server` and naq
+  (`--cluster-port`), the publisher on the first, subscribers on the
+  others first. `naq_load` takes `--sub-addr` for the subscribers'
+  servers and sums the CPU of each `--server-pid`; before the run, each
+  publisher sends probes until they reach the subscribers, so their
+  interest has reached its server.
 
 ### Changed
 

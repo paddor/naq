@@ -1,10 +1,10 @@
 //! The benchmark suite: the same load against `nats-server` and naq.
 //!
-//! Every run gets a fresh server on the server CPUs and a `naq_load`
-//! process on the load CPUs. Repetitions alternate which server goes first
-//! (A B, then B A), so a machine that drifts hurts both alike. The gate
-//! compares naq with the rival measured in the same session: the ratio of
-//! the medians must not fall below a floor.
+//! Every run gets fresh servers on the server CPUs, one or a cluster, and
+//! a `naq_load` process on the load CPUs. Repetitions alternate which
+//! server goes first (A B, then B A), so a machine that drifts hurts both
+//! alike. The gate compares naq with the rival measured in the same
+//! session: the ratio of the medians must not fall below a floor.
 
 mod host;
 mod report;
@@ -27,17 +27,23 @@ pub struct Workload {
     pub subs: usize,
     /// Queue group the subscribers join.
     pub queue: Option<&'static str>,
+    /// Servers, in one cluster if more than one. Publishers connect to the
+    /// first; subscriber `i` to server `(i + 1) % nodes`, so the others
+    /// come first.
+    pub nodes: usize,
     /// Payload sizes measured.
     pub payloads: &'static [usize],
 }
 
-/// The workloads, as in the baseline.
-pub const WORKLOADS: [Workload; 4] = [
+/// The workloads: on one server as in the baseline, then across a
+/// cluster of three.
+pub const WORKLOADS: [Workload; 7] = [
     Workload {
         name: "one-to-one",
         pubs: 1,
         subs: 1,
         queue: None,
+        nodes: 1,
         payloads: &[16, 64, 1024],
     },
     Workload {
@@ -45,6 +51,7 @@ pub const WORKLOADS: [Workload; 4] = [
         pubs: 1,
         subs: 4,
         queue: None,
+        nodes: 1,
         payloads: &[16, 1024],
     },
     Workload {
@@ -52,6 +59,7 @@ pub const WORKLOADS: [Workload; 4] = [
         pubs: 1,
         subs: 4,
         queue: Some("q"),
+        nodes: 1,
         payloads: &[16, 1024],
     },
     Workload {
@@ -59,6 +67,31 @@ pub const WORKLOADS: [Workload; 4] = [
         pubs: 1,
         subs: 0,
         queue: None,
+        nodes: 1,
+        payloads: &[16, 1024],
+    },
+    Workload {
+        name: "cluster-one-to-one",
+        pubs: 1,
+        subs: 1,
+        queue: None,
+        nodes: 3,
+        payloads: &[16, 1024],
+    },
+    Workload {
+        name: "cluster-fan-out-3",
+        pubs: 1,
+        subs: 3,
+        queue: None,
+        nodes: 3,
+        payloads: &[16, 1024],
+    },
+    Workload {
+        name: "cluster-queue-3",
+        pubs: 1,
+        subs: 3,
+        queue: Some("q"),
+        nodes: 3,
         payloads: &[16, 1024],
     },
 ];
@@ -157,7 +190,8 @@ pub fn cells(names: &[String], gated: bool) -> Result<Vec<Cell>, String> {
     Ok(cells)
 }
 
-/// A server under test, started as `program -a 127.0.0.1 -p PORT args..`.
+/// A server under test, started as `program -a 127.0.0.1 -p PORT args..`,
+/// with `-c FILE` before the args in a cluster.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Server {
     /// Label in records, logs and the table.
@@ -191,8 +225,12 @@ pub struct Timing {
 /// Where the processes run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
-    /// Client port of the servers.
+    /// Client port of the servers: of the first in a cluster, the next
+    /// ones for the others.
     pub port: u16,
+    /// Cluster port of the first server of a cluster, the next ones for
+    /// the others.
+    pub cluster_port: u16,
     /// `taskset` CPU list for the servers. Empty: no pinning.
     pub server_cpus: String,
     /// `taskset` CPU list for `naq_load`. Empty: no pinning.
@@ -239,13 +277,18 @@ impl Plan {
         }
     }
 
-    /// `naq_load` arguments for one run.
-    fn load_args(&self, cell: &Cell, side: Side, pid: u32, rep: usize) -> Vec<String> {
+    /// The client address of server `node` of a cluster.
+    fn addr(&self, node: usize) -> String {
+        format!("127.0.0.1:{}", usize::from(self.host.port) + node)
+    }
+
+    /// `naq_load` arguments for one run on servers `pids`.
+    fn load_args(&self, cell: &Cell, side: Side, pids: &[u32], rep: usize) -> Vec<String> {
         let server = self.server(side);
         let w = &cell.workload;
         let mut a: Vec<String> = [
             "--addr",
-            &format!("127.0.0.1:{}", self.host.port),
+            &self.addr(0),
             "--pubs",
             &w.pubs.to_string(),
             "--subs",
@@ -258,15 +301,20 @@ impl Plan {
             &self.timing.duration.as_secs_f64().to_string(),
             "--server",
             &server.name,
-            "--server-pid",
-            &pid.to_string(),
-            "--workload",
-            w.name,
         ]
         .map(str::to_owned)
         .into();
+        for p in pids {
+            a.extend(["--server-pid".into(), p.to_string()]);
+        }
+        a.extend(["--workload".into(), w.name.into()]);
         if let Some(q) = w.queue {
             a.extend(["--queue".into(), q.into()]);
+        }
+        if w.nodes > 1 {
+            for i in 1..=w.nodes {
+                a.extend(["--sub-addr".into(), self.addr(i % w.nodes)]);
+            }
         }
         let mut tags = self.out.tags.clone();
         tags.insert("rep".into(), rep.to_string());
@@ -312,6 +360,9 @@ pub enum SuiteError {
     /// The client port is taken before the server starts.
     #[error("port {0} is in use")]
     PortInUse(u16),
+    /// A cluster's ports do not fit in 16 bits.
+    #[error("ports of {0} servers past 65535")]
+    Ports(usize),
     /// A server did not come up.
     #[error("{name}: {why}, see {}", log.display())]
     Server {
@@ -366,7 +417,7 @@ pub fn run(plan: &Plan, out: &mut dyn Write) -> Result<Vec<Sample>, SuiteError> 
     Ok(samples)
 }
 
-/// One run on a fresh server.
+/// One run on fresh servers.
 fn measure(
     plan: &Plan,
     cell: &Cell,
@@ -375,12 +426,12 @@ fn measure(
     out: &mut dyn Write,
 ) -> Result<f64, SuiteError> {
     let server = plan.server(side);
-    let log = plan.out.logs.join(format!(
-        "{}-{}-{}-{rep}.log",
+    let base = plan.out.logs.join(format!(
+        "{}-{}-{}-{rep}",
         server.name, cell.workload.name, cell.payload
     ));
-    let running = host::Running::start(&plan.host, server, &log)?;
-    let args = plan.load_args(cell, side, running.pid(), rep);
+    let running = host::Cluster::start(&plan.host, server, cell.workload.nodes, &base)?;
+    let args = plan.load_args(cell, side, &running.pids(), rep);
     let rec = host::load(
         &plan.host.load_cpus,
         &plan.load,
@@ -416,6 +467,7 @@ mod tests {
             },
             host: Host {
                 port: 4999,
+                cluster_port: 6999,
                 server_cpus: "0-3".into(),
                 load_cpus: "4-5".into(),
                 idle_check: true,
@@ -431,7 +483,7 @@ mod tests {
     #[test]
     fn cells_follow_the_workloads_and_the_gate() {
         let all = cells(&[], false).unwrap();
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 15);
         assert_eq!((all[0].workload.name, all[0].payload), ("one-to-one", 16));
         let gated = cells(&[], true).unwrap();
         assert_eq!(
@@ -468,7 +520,7 @@ mod tests {
     fn load_arguments_carry_the_cell_the_server_and_the_labels() {
         let p = plan();
         let queue = p.cells.iter().find(|c| c.workload.queue.is_some()).unwrap();
-        let a = p.load_args(queue, Side::Naq, 42, 1).join(" ");
+        let a = p.load_args(queue, Side::Naq, &[42], 1).join(" ");
         assert!(
             a.starts_with(
                 "--addr 127.0.0.1:4999 --pubs 1 --subs 4 --payload 16 --warmup 0.5 \
@@ -485,8 +537,23 @@ mod tests {
         );
         let mut bare = p.clone();
         bare.out.record = None;
-        let a = bare.load_args(&bare.cells[0], Side::Rival, 1, 0);
+        let a = bare.load_args(&bare.cells[0], Side::Rival, &[1], 0);
         assert!(!a.contains(&"--record".to_owned()) && !a.contains(&"--queue".to_owned()));
+        assert!(!a.contains(&"--sub-addr".to_owned()));
+        let fan = p
+            .cells
+            .iter()
+            .find(|c| c.workload.name == "cluster-fan-out-3")
+            .unwrap();
+        let a = p.load_args(fan, Side::Naq, &[7, 8, 9], 0).join(" ");
+        assert!(
+            a.contains(
+                "--server naq --server-pid 7 --server-pid 8 --server-pid 9 \
+                 --workload cluster-fan-out-3 --sub-addr 127.0.0.1:5000 \
+                 --sub-addr 127.0.0.1:5001 --sub-addr 127.0.0.1:4999 --tag"
+            ),
+            "{a}"
+        );
         assert_eq!(p.server(Side::Rival).name, "nats-server");
         assert_eq!(p.load_limit(), Duration::from_millis(40_500));
     }

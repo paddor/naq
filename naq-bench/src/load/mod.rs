@@ -4,6 +4,10 @@
 //! Subscribers count and check the order. A shared window bounds the
 //! messages in flight, so every message is delivered at the rate the
 //! server sustains (PUSH/PULL-like), without slow consumer drops.
+//!
+//! Before the run, each publisher sends probes until they reach the
+//! subscribers: then its server, and its lane there, knows their
+//! interest, even across a cluster.
 
 mod publisher;
 mod subscriber;
@@ -24,8 +28,11 @@ use crate::wire::MAX_PAYLOAD;
 /// One load run.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Server address.
+    /// Server of the publishers, and of the subscribers unless
+    /// `sub_addrs` names others.
     pub addr: SocketAddr,
+    /// Servers of the subscribers, in turn. Empty: `addr`.
+    pub sub_addrs: Vec<SocketAddr>,
     /// Publisher connections. Zero measures subscribers alone, against a
     /// source.
     pub pubs: usize,
@@ -47,14 +54,25 @@ pub struct Config {
     pub duration: Duration,
     /// Time allowed for delivering the rest after publishing stops.
     pub drain: Duration,
-    /// Server process, for its CPU time.
-    pub server_pid: Option<u32>,
+    /// Server processes, for their CPU time, summed.
+    pub server_pids: Vec<u32>,
+}
+
+impl Config {
+    /// The server subscriber `idx` connects to.
+    fn sub_addr(&self, idx: usize) -> SocketAddr {
+        match self.sub_addrs.len() {
+            0 => self.addr,
+            n => self.sub_addrs[idx % n],
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
             addr: SocketAddr::from(([127, 0, 0, 1], 4222)),
+            sub_addrs: Vec::new(),
             pubs: 1,
             subs: 1,
             queue: None,
@@ -65,7 +83,7 @@ impl Default for Config {
             warmup: Duration::from_secs(2),
             duration: Duration::from_secs(10),
             drain: Duration::from_secs(10),
-            server_pid: None,
+            server_pids: Vec::new(),
         }
     }
 }
@@ -107,7 +125,8 @@ pub struct Report {
     pub out_of_order: u64,
     /// Deliveries with a wrong size or an unknown publisher.
     pub corrupt: u64,
-    /// Server CPU in percent of one core, while measuring.
+    /// Server CPU in percent of one core, while measuring, summed over
+    /// the servers.
     pub server_cpu_pct: Option<f64>,
     /// Load generator CPU in percent of one core, while measuring.
     pub load_cpu_pct: Option<f64>,
@@ -132,6 +151,13 @@ pub enum LoadError {
     Failed(String),
 }
 
+/// Longest wait for the subscribers' interest to reach the publishers'
+/// servers: a cluster may still be linking.
+const INTEREST_LIMIT: Duration = Duration::from_secs(10);
+
+/// Between probes of a publisher.
+const PROBE_EVERY: Duration = Duration::from_millis(5);
+
 /// A counter on its own cache line.
 #[derive(Debug, Default)]
 #[repr(align(128))]
@@ -144,6 +170,10 @@ struct Shared {
     sent: Counter,
     /// Messages received, per subscriber.
     received: Box<[Counter]>,
+    /// Whether a probe of publisher `p` reached subscriber `s`, at
+    /// `s * pubs + p`.
+    probed: Box<[AtomicBool]>,
+    pubs: usize,
     queue: bool,
     go: AtomicBool,
     stop: AtomicBool,
@@ -158,10 +188,12 @@ struct Shared {
 // is published through them, so `Relaxed` is enough. Thread joins order
 // the final reads.
 impl Shared {
-    fn new(subs: usize, queue: bool) -> Shared {
+    fn new(pubs: usize, subs: usize, queue: bool) -> Shared {
         Shared {
             sent: Counter::default(),
             received: (0..subs).map(|_| Counter::default()).collect(),
+            probed: (0..subs * pubs).map(|_| AtomicBool::new(false)).collect(),
+            pubs,
             queue,
             go: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -181,6 +213,29 @@ impl Shared {
         } else {
             counts.min().unwrap_or(0)
         }
+    }
+
+    /// Which publishers' probes reached subscriber `sub`.
+    fn probed(&self, sub: usize) -> &[AtomicBool] {
+        &self.probed[sub * self.pubs..(sub + 1) * self.pubs]
+    }
+
+    /// Whether the probes of every publisher reached every subscriber, or
+    /// for a queue group, one member.
+    fn heard(&self) -> bool {
+        (0..self.pubs).all(|p| {
+            let mut got = self
+                .probed
+                .iter()
+                .skip(p)
+                .step_by(self.pubs)
+                .map(|b| b.load(Relaxed));
+            if self.queue {
+                got.any(|b| b)
+            } else {
+                got.all(|b| b)
+            }
+        })
     }
 
     fn delivered(&self) -> u64 {
@@ -249,15 +304,23 @@ struct Sample {
 }
 
 impl Sample {
-    fn take(shared: &Shared, server_pid: Option<u32>) -> Sample {
+    fn take(shared: &Shared, server_pids: &[u32]) -> Sample {
         Sample {
             at: Instant::now(),
             sent: shared.sent.0.load(Relaxed),
             delivered: shared.delivered(),
-            server: server_pid.and_then(cpu::process_time),
+            server: servers_time(server_pids),
             own: cpu::own_time(),
         }
     }
+}
+
+/// The CPU time of all `pids`; `None` without one, or if one is gone.
+fn servers_time(pids: &[u32]) -> Option<Duration> {
+    if pids.is_empty() {
+        return None;
+    }
+    pids.iter().map(|&p| cpu::process_time(p)).sum()
 }
 
 /// Runs the load and reports it.
@@ -269,7 +332,7 @@ impl Sample {
 pub fn run(cfg: &Config) -> Result<Report, LoadError> {
     check(cfg)?;
     let cfg = Arc::new(cfg.clone());
-    let shared = Arc::new(Shared::new(cfg.subs, cfg.queue.is_some()));
+    let shared = Arc::new(Shared::new(cfg.pubs, cfg.subs, cfg.queue.is_some()));
     let (tx, rx) = mpsc::channel();
     let mut subs = Vec::with_capacity(cfg.subs);
     let mut pubs = Vec::with_capacity(cfg.pubs);
@@ -282,6 +345,7 @@ pub fn run(cfg: &Config) -> Result<Report, LoadError> {
             pubs.push(spawn_pub(&cfg, i, &shared, &tx));
         }
         version = wait_ready(&rx, cfg.pubs)?.or(version);
+        wait_heard(&shared)?;
         shared.go.store(true, Relaxed);
         for p in &pubs {
             p.thread().unpark();
@@ -365,6 +429,17 @@ fn wait_ready(rx: &Receiver<Ready>, n: usize) -> Result<Option<String>, LoadErro
     Ok(version)
 }
 
+/// Waits until the publishers' probes reach the subscribers.
+fn wait_heard(shared: &Shared) -> Result<(), LoadError> {
+    if wait_until(shared, Instant::now() + INTEREST_LIMIT, || shared.heard())? {
+        Ok(())
+    } else {
+        Err(LoadError::Failed(
+            "the subscribers' interest did not reach the publishers".into(),
+        ))
+    }
+}
+
 /// Warms up, measures, stops the publishers and drains.
 fn measure(
     cfg: &Config,
@@ -372,9 +447,9 @@ fn measure(
     server_version: Option<String>,
 ) -> Result<Report, LoadError> {
     pause(shared, cfg.warmup)?;
-    let a = Sample::take(shared, cfg.server_pid);
+    let a = Sample::take(shared, &cfg.server_pids);
     pause(shared, cfg.duration)?;
-    let b = Sample::take(shared, cfg.server_pid);
+    let b = Sample::take(shared, &cfg.server_pids);
     shared.stop.store(true, Relaxed);
     let deadline = Instant::now() + cfg.drain;
     let pubs_done = || shared.pubs_done.load(Relaxed) == cfg.pubs;

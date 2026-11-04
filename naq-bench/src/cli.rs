@@ -16,6 +16,8 @@ use crate::{codec, hop, index};
 pub const LOAD_USAGE: &str = "\
 usage: naq_load [options]
   --addr HOST:PORT     server (127.0.0.1:4222)
+  --sub-addr HOST:PORT server of the subscribers, in turn; repeatable
+                       (--addr)
   --pubs N             publisher connections (1)
   --subs N             subscriber connections (1)
   --queue NAME         subscribers join this queue group
@@ -26,7 +28,7 @@ usage: naq_load [options]
   --warmup SECS        before measuring (2)
   --duration SECS      measured (10)
   --drain SECS         to deliver the rest after publishing (10)
-  --server-pid PID     server process, for its CPU time
+  --server-pid PID     server process, for its CPU time; repeatable
   --server NAME        label for the record
   --workload NAME      label for the record
   --tag KEY=VALUE      extra label, repeatable
@@ -251,6 +253,7 @@ pub fn load_args(args: &[String]) -> Result<LoadArgs, String> {
         let c = &mut a.cfg;
         match flag.as_str() {
             "--addr" => c.addr = parse(flag, val()?)?,
+            "--sub-addr" => c.sub_addrs.push(parse(flag, val()?)?),
             "--pubs" => c.pubs = parse(flag, val()?)?,
             "--subs" => c.subs = parse(flag, val()?)?,
             "--queue" => c.queue = Some(val()?.clone()),
@@ -261,7 +264,7 @@ pub fn load_args(args: &[String]) -> Result<LoadArgs, String> {
             "--warmup" => c.warmup = secs(flag, val()?)?,
             "--duration" => c.duration = secs(flag, val()?)?,
             "--drain" => c.drain = secs(flag, val()?)?,
-            "--server-pid" => c.server_pid = Some(parse(flag, val()?)?),
+            "--server-pid" => c.server_pids.push(parse(flag, val()?)?),
             "--server" => a.server = Some(val()?.clone()),
             "--workload" => a.workload = Some(val()?.clone()),
             "--tag" => tag(&mut a.tags, val()?)?,
@@ -275,11 +278,13 @@ pub fn load_args(args: &[String]) -> Result<LoadArgs, String> {
 /// Usage of `naq_suite`.
 pub const SUITE_USAGE: &str = "\
 usage: naq_suite [options]
-  The same load against nats-server and naq, a fresh server per run. The
-  gate fails when naq's rate over nats-server's falls below a floor.
+  The same load against nats-server and naq, fresh servers per run: one,
+  or a cluster of three for the cluster workloads. The gate fails when
+  naq's rate over nats-server's falls below a floor.
   --gate               only the gated cells
   --workload NAME      only this workload, repeatable: one-to-one,
-                       fan-out-4, queue-4, pub-only (all)
+                       fan-out-4, queue-4, pub-only, cluster-one-to-one,
+                       cluster-fan-out-3, cluster-queue-3 (all)
   --nats-server PATH   the rival ($NAQ_GO, else nats-server on PATH)
   --naq PATH           naq (next to naq_suite)
   --load PATH          naq_load (next to naq_suite)
@@ -287,7 +292,10 @@ usage: naq_suite [options]
   --reps N             runs per server and cell (3)
   --warmup SECS        before measuring (2)
   --duration SECS      measured (10)
-  --port PORT          client port of the servers (4222)
+  --port PORT          client port of the servers (4222), the next ones
+                       for the other servers of a cluster
+  --cluster-port PORT  cluster port of the first server of a cluster
+                       (6222), the next ones for the others
   --server-cpus LIST   taskset CPUs for the servers (0-3); empty: unpinned
   --load-cpus LIST     taskset CPUs for naq_load (4-5); empty: unpinned
   --busy-ok            skip the idle check, for smoke runs
@@ -315,6 +323,7 @@ fn suite_plan(bins: &Path, go: Option<PathBuf>) -> Plan {
         },
         host: Host {
             port: 4222,
+            cluster_port: 6222,
             server_cpus: "0-3".into(),
             load_cpus: "4-5".into(),
             idle_check: true,
@@ -354,6 +363,7 @@ pub fn suite_args(args: &[String], bins: &Path, go: Option<PathBuf>) -> Result<P
             "--warmup" => p.timing.warmup = secs(flag, val()?)?,
             "--duration" => p.timing.duration = secs(flag, val()?)?,
             "--port" => p.host.port = parse(flag, val()?)?,
+            "--cluster-port" => p.host.cluster_port = parse(flag, val()?)?,
             "--server-cpus" => p.host.server_cpus.clone_from(val()?),
             "--load-cpus" => p.host.load_cpus.clone_from(val()?),
             "--logs" => p.out.logs = val()?.into(),
@@ -362,8 +372,8 @@ pub fn suite_args(args: &[String], bins: &Path, go: Option<PathBuf>) -> Result<P
             _ => return Err(format!("unknown argument {flag:?}")),
         }
     }
-    if p.timing.reps == 0 || p.host.port == 0 {
-        return Err("--reps and --port must not be 0".into());
+    if p.timing.reps == 0 || p.host.port == 0 || p.host.cluster_port == 0 {
+        return Err("--reps, --port and --cluster-port must not be 0".into());
     }
     p.cells = suite::cells(&names, gated)?;
     Ok(p)
@@ -481,6 +491,7 @@ mod tests {
         let a = load_args(&strings(
             "--addr 127.0.0.1:5000 --pubs 2 --subs 4 --queue q --subject a.b --payload 1k \
              --window 8m --batch 32K --warmup 0.5 --duration 3 --drain 1 --server-pid 7 \
+             --sub-addr 127.0.0.1:5001 --server-pid 8 --sub-addr 127.0.0.1:5002 \
              --server nats --workload fanout --tag rep=1 --tag cpus=0-3 --record /tmp/x.jsonl",
         ))
         .unwrap();
@@ -494,7 +505,14 @@ mod tests {
             (c.duration, c.drain),
             (Duration::from_secs(3), Duration::from_secs(1))
         );
-        assert_eq!(c.server_pid, Some(7));
+        assert_eq!(c.server_pids, [7, 8]);
+        assert_eq!(
+            c.sub_addrs,
+            [
+                "127.0.0.1:5001".parse().unwrap(),
+                "127.0.0.1:5002".parse().unwrap()
+            ]
+        );
         assert_eq!(
             (a.server.as_deref(), a.workload.as_deref()),
             (Some("nats"), Some("fanout"))
@@ -616,13 +634,14 @@ mod tests {
             (p.naq.program.as_path(), p.load.as_path()),
             (Path::new("/b/naq"), Path::new("/b/naq_load"))
         );
-        assert_eq!((p.cells.len(), p.timing.reps, p.host.port), (9, 3, 4222));
+        assert_eq!((p.cells.len(), p.timing.reps, p.host.port), (15, 3, 4222));
+        assert_eq!(p.host.cluster_port, 6222);
         assert!(p.host.idle_check && p.naq.args.is_empty());
         let p = suite_args(
             &strings(
                 "--gate --busy-ok --workload one-to-one --nats-server /g --naq /n --load /l \
                  --lanes 2 --reps 5 --warmup 0.5 --duration 3 --port 5000 --server-cpus 0-1 \
-                 --load-cpus 2 --logs /logs --record /r.jsonl --tag k=v",
+                 --load-cpus 2 --logs /logs --record /r.jsonl --tag k=v --cluster-port 7000",
             ),
             bins,
             Some("/go".into()),
@@ -647,6 +666,7 @@ mod tests {
             ),
             (5000, "0-1", "2")
         );
+        assert_eq!(p.host.cluster_port, 7000);
         assert!(!p.host.idle_check);
         assert_eq!(p.out.logs, Path::new("/logs"));
         assert_eq!(p.out.record, Some("/r.jsonl".into()));
@@ -656,6 +676,7 @@ mod tests {
         for bad in [
             "--reps 0",
             "--port 0",
+            "--cluster-port 0",
             "--port 70000",
             "--lanes x",
             "--workload nope",

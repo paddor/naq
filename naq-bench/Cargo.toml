@@ -23,3 +23,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 zzq-proto = { version = "=0.6.0", default-features = false, features = ["std"] }
 zzq-tokio.workspace = true
+
+[dev-dependencies]
+naq.workspace = true

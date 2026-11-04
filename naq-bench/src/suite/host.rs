@@ -1,9 +1,12 @@
-//! Processes on the host: the idle check, servers and load runs.
+//! Processes on the host: the idle check, servers, clusters and load
+//! runs.
 
+use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -100,24 +103,103 @@ fn pinned(cpus: &str, program: &Path) -> Command {
     c
 }
 
+/// Started servers, killed on drop.
+#[derive(Debug)]
+pub(super) struct Cluster(Vec<Running>);
+
+impl Cluster {
+    /// Starts `nodes` servers of `server`, in one cluster if more than
+    /// one, and waits for their client ports. A lone server logs to
+    /// `base.log`; server `i` of a cluster to `base-n{i}.log`, with its
+    /// configuration in `base-n{i}.conf`.
+    pub(super) fn start(
+        host: &Host,
+        server: &Server,
+        nodes: usize,
+        base: &Path,
+    ) -> Result<Cluster, SuiteError> {
+        if nodes <= 1 {
+            let log = suffixed(base, ".log");
+            let one = Running::start(&host.server_cpus, host.port, server, &[], &log)?;
+            return Ok(Cluster(vec![one]));
+        }
+        let fits = |first: u16| u16::try_from(usize::from(first) + nodes - 1).is_ok();
+        if !fits(host.port) || !fits(host.cluster_port) {
+            return Err(SuiteError::Ports(nodes));
+        }
+        let mut all = Vec::with_capacity(nodes);
+        for i in 0..nodes {
+            let conf = suffixed(base, &format!("-n{i}.conf"));
+            std::fs::write(&conf, node_conf(host.cluster_port, i, nodes))?;
+            let args = ["-c".into(), conf.display().to_string()];
+            let log = suffixed(base, &format!("-n{i}.log"));
+            let port = host.port + i as u16;
+            all.push(Running::start(
+                &host.server_cpus,
+                port,
+                server,
+                &args,
+                &log,
+            )?);
+        }
+        Ok(Cluster(all))
+    }
+
+    /// The servers' process IDs, in order.
+    pub(super) fn pids(&self) -> Vec<u32> {
+        self.0.iter().map(Running::pid).collect()
+    }
+}
+
+/// `base` with `suffix` appended to its file name.
+fn suffixed(base: &Path, suffix: &str) -> PathBuf {
+    let mut s = OsString::from(base);
+    s.push(suffix);
+    s.into()
+}
+
+/// The configuration of server `node` of a cluster of `nodes`, whose
+/// cluster ports start at `first` and fit: a name of its own and routes
+/// to all the others. `nats-server` and naq read it alike.
+fn node_conf(first: u16, node: usize, nodes: usize) -> String {
+    let port = |i: usize| first + i as u16;
+    let mut c = format!(
+        "server_name: n{node}\ncluster {{\n  name: naq-bench\n  listen: 127.0.0.1:{}\n  routes: [\n",
+        port(node)
+    );
+    for i in (0..nodes).filter(|&i| i != node) {
+        let _ = writeln!(c, "    nats-route://127.0.0.1:{}", port(i));
+    }
+    c.push_str("  ]\n}\n");
+    c
+}
+
 /// A started server, killed on drop.
 #[derive(Debug)]
 pub(super) struct Running(Child);
 
 impl Running {
-    /// Starts `server` and waits for its port.
-    pub(super) fn start(host: &Host, server: &Server, log: &Path) -> Result<Running, SuiteError> {
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, host.port));
+    /// Starts `server` on CPUs `cpus` with client port `port`, `extra`
+    /// before its args, and waits for its port.
+    pub(super) fn start(
+        cpus: &str,
+        port: u16,
+        server: &Server,
+        extra: &[String],
+        log: &Path,
+    ) -> Result<Running, SuiteError> {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         // A server already there would answer for the new one.
-        TcpListener::bind(addr).map_err(|_| SuiteError::PortInUse(host.port))?;
+        TcpListener::bind(addr).map_err(|_| SuiteError::PortInUse(port))?;
         let f = File::create(log)?;
         let fail = |why: String| SuiteError::Server {
             name: server.name.clone(),
             why,
             log: log.to_owned(),
         };
-        let child = pinned(&host.server_cpus, &server.program)
-            .args(["-a", "127.0.0.1", "-p", &host.port.to_string()])
+        let child = pinned(cpus, &server.program)
+            .args(["-a", "127.0.0.1", "-p", &port.to_string()])
+            .args(extra)
             .args(&server.args)
             .stdin(Stdio::null())
             .stdout(f.try_clone()?)
@@ -203,15 +285,6 @@ pub(super) fn load(
 mod tests {
     use super::*;
 
-    fn host(port: u16) -> Host {
-        Host {
-            port,
-            server_cpus: String::new(),
-            load_cpus: String::new(),
-            idle_check: false,
-        }
-    }
-
     /// A server that runs `body` as a shell script, whatever its arguments.
     fn script(dir: &Path, body: &str) -> Server {
         use std::os::unix::fs::PermissionsExt;
@@ -277,8 +350,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("s.log");
         let port = free_port();
-        let e = Running::start(&host(port), &script(&dir, "echo \"$@\" >&2; exit 3"), &log)
-            .unwrap_err();
+        let e = Running::start(
+            "",
+            port,
+            &script(&dir, "echo \"$@\" >&2; exit 3"),
+            &[],
+            &log,
+        )
+        .unwrap_err();
         assert!(e.to_string().starts_with("sh: exited at start"), "{e}");
         assert!(e.to_string().ends_with("s.log"), "{e}");
         let said = std::fs::read_to_string(&log).unwrap();
@@ -287,12 +366,72 @@ mod tests {
             program: dir.join("missing"),
             ..script(&dir, "")
         };
-        let e = Running::start(&host(port), &missing, &log).unwrap_err();
+        let e = Running::start("", port, &missing, &[], &log).unwrap_err();
         assert!(e.to_string().contains("cannot start"), "{e}");
         let taken = TcpListener::bind("127.0.0.1:0").unwrap();
-        let busy = host(taken.local_addr().unwrap().port());
-        let e = Running::start(&busy, &script(&dir, ""), &log).unwrap_err();
+        let busy = taken.local_addr().unwrap().port();
+        let e = Running::start("", busy, &script(&dir, ""), &[], &log).unwrap_err();
         assert!(matches!(e, SuiteError::PortInUse(_)), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn each_server_of_a_cluster_routes_to_all_the_others() {
+        assert_eq!(
+            node_conf(6222, 1, 3),
+            "server_name: n1\ncluster {\n  name: naq-bench\n  listen: 127.0.0.1:6223\n  \
+             routes: [\n    nats-route://127.0.0.1:6222\n    nats-route://127.0.0.1:6224\n  ]\n}\n"
+        );
+        assert_eq!(
+            suffixed(Path::new("/l/naq-x-16-0"), "-n2.log"),
+            Path::new("/l/naq-x-16-0-n2.log")
+        );
+    }
+
+    /// A free port below the kernel's ephemeral ones: one that tests that
+    /// release a port they bound to port 0 do not take again.
+    fn low_port() -> u16 {
+        let base = 20_000 + (std::process::id() % 1_000) as u16 * 10;
+        (base..base + 10)
+            .find(|&p| TcpListener::bind((Ipv4Addr::LOCALHOST, p)).is_ok())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_cluster_that_does_not_come_up_names_the_log_of_its_server() {
+        let dir = std::env::temp_dir().join(format!("naq-suite-cluster-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("sh-x-16-0");
+        let mut h = Host {
+            port: low_port(),
+            cluster_port: 6222,
+            server_cpus: String::new(),
+            load_cpus: String::new(),
+            idle_check: false,
+        };
+        let failing = script(&dir, "echo \"$@\" >&2; exit 3");
+        let e = Cluster::start(&h, &failing, 3, &base).unwrap_err();
+        assert!(e.to_string().ends_with("sh-x-16-0-n0.log"), "{e}");
+        let said = std::fs::read_to_string(dir.join("sh-x-16-0-n0.log")).unwrap();
+        let conf = dir.join("sh-x-16-0-n0.conf");
+        assert_eq!(
+            said,
+            format!("-a 127.0.0.1 -p {} -c {} --x\n", h.port, conf.display())
+        );
+        assert!(
+            std::fs::read_to_string(&conf)
+                .unwrap()
+                .starts_with("server_name: n0\n")
+        );
+        let e = Cluster::start(&h, &failing, 1, &base).unwrap_err();
+        assert!(e.to_string().ends_with("sh-x-16-0.log"), "{e}");
+        h.port = 65534;
+        let e = Cluster::start(&h, &failing, 3, &base).unwrap_err();
+        assert!(matches!(e, SuiteError::Ports(3)), "{e}");
+        h.port = free_port();
+        h.cluster_port = 65535;
+        let e = Cluster::start(&h, &failing, 2, &base).unwrap_err();
+        assert!(matches!(e, SuiteError::Ports(2)), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
