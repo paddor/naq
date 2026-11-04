@@ -172,7 +172,7 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                 let Ok(bytes) = msg.into_bytes() else { continue };
                 let Ok(c) = peer::decode(&bytes) else { continue };
                 if let Control::Hello(h) = &c
-                    && !met(&mesh, i, h, &me)
+                    && !met(&shared, &mesh, i, h, &me)
                 {
                     continue;
                 }
@@ -206,9 +206,10 @@ fn server_interest(shared: &Shared, i: usize, (account, subject, queue, weight):
     }
 }
 
-/// Notes the server of route `i` as its `Hello` `h` tells. Returns whether
-/// it is of this cluster.
-fn met(mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
+/// Notes the server of route `i` as its `Hello` `h` tells, and tells the
+/// lanes where it takes data, if that changed. Returns whether it is of
+/// this cluster.
+fn met(shared: &Shared, mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
     if h.cluster != me.cluster.as_bytes() {
         return false;
     }
@@ -219,6 +220,42 @@ fn met(mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
     p.server_id = text(h.server_id);
     p.name = text(h.name);
     p.epoch = h.epoch;
-    p.data = peer::words(h.data).map(text).collect();
+    let data: Vec<String> = peer::words(h.data).map(text).collect();
+    if data != p.data && !data.is_empty() {
+        for (lane, tx) in shared.lanes.iter().enumerate() {
+            tx.control(LaneControl::Push {
+                // Routes are few: their count fits.
+                server: i as u16,
+                endpoint: reachable(&data[lane % data.len()], &p.host),
+            });
+        }
+        p.data = data;
+    }
     true
+}
+
+/// Data endpoint `at` of a server dialed at `host`: on that host, where it
+/// listens on every address.
+fn reachable(at: &str, host: &str) -> String {
+    let any = at
+        .strip_prefix("tcp://")
+        .and_then(|rest| rest.rsplit_once(':'))
+        .filter(|(h, _)| matches!(*h, "0.0.0.0" | "[::]" | "*"));
+    match any.and_then(|(_, port)| port.parse().ok()) {
+        Some(port) => endpoint(host, port),
+        None => at.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_on_every_address_is_reached_on_its_route_host() {
+        assert_eq!(reachable("tcp://0.0.0.0:7", "h"), "tcp://h:7");
+        assert_eq!(reachable("tcp://[::]:7", "::1"), "tcp://[::1]:7");
+        assert_eq!(reachable("tcp://10.0.0.1:7", "h"), "tcp://10.0.0.1:7");
+        assert_eq!(reachable("bogus", "h"), "bogus");
+    }
 }

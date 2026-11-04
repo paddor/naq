@@ -18,7 +18,7 @@ use tokio::time::{Instant, timeout};
 use super::{Ended, Facts, HubUrl, LinkSide, Told, creds, side};
 use crate::Rules;
 use crate::conn::{self, Client};
-use crate::lane::{Lane, Origin, Out, Routing};
+use crate::lane::{Lane, Outs, Routing};
 use crate::perms::Perms;
 use crate::ws;
 
@@ -128,7 +128,7 @@ struct Link<'l, R> {
     buf: BytesMut,
     limits: Limits,
     /// Messages of the hub for each other lane, from the last read.
-    fwd: Box<[Out]>,
+    out: Outs,
     /// A subscriber past the stall mark.
     stalled: Option<Rc<Client>>,
     /// The link as a client of the lane: its output to the hub.
@@ -304,7 +304,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             io,
             buf,
             limits: limits(lane),
-            fwd: (0..lane.lanes()).map(|_| Out::default()).collect(),
+            out: Outs::new(lane),
             stalled: None,
             client: Rc::new(Client::new(lane.shared.next_client())),
             told: d.told,
@@ -325,7 +325,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             io,
             buf,
             limits,
-            fwd,
+            out,
             stalled,
             client,
             told,
@@ -336,7 +336,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             io,
             buf,
             limits,
-            fwd,
+            out,
             stalled,
             client,
             told,
@@ -439,7 +439,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             io: r,
             buf: self.buf,
             limits: self.limits,
-            fwd: self.fwd,
+            out: self.out,
             stalled: self.stalled,
             client: self.client,
             told: self.told,
@@ -467,6 +467,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         let account = shared.accounts.iter().position(|a| a == name).unwrap_or(0) as u32;
         let client = self.client.clone();
         client.account.set(account);
+        self.out.account = account;
         let mut writer: JoinHandle<()> = tokio::task::spawn_local(crate::conn::writer(
             client.clone(),
             w,
@@ -508,11 +509,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             let (at, stop) = self.parse(&buf, side, lds, &mut st);
             lane.flush();
             lane.expire();
-            let from = Origin {
-                account: side.account,
-                link: true,
-            };
-            lane.ship_reads(&mut self.fwd, &mut buf, at, from).await;
+            lane.ship_reads(&mut self.out, &mut buf, at, true).await;
             let need = match stop {
                 Ok(need) => need,
                 Err(end) => return end,
@@ -640,7 +637,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         };
         let d = super::for_clients(&p);
         let d = d.as_ref().unwrap_or(&p);
-        let mut r = Routing::new(lane, &mut self.fwd, &p, buf, side.id).by_link(m, d);
+        let mut r = Routing::new(lane, &mut self.out, &p, buf, side.id).by_link(m.queues, d);
         r.route(&found);
         if let Some(s) = r.stalled {
             self.stalled = Some(s);

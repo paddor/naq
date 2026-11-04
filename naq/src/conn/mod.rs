@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use zzq_tokio::transport::{Driver, Stream};
 
 use crate::auth::Creds;
-use crate::lane::{self, Lane, Out};
+use crate::lane::{self, Lane, Outs};
 use crate::perms::Held;
 use crate::server::Shared;
 use crate::stats::{Events, Tally};
@@ -225,7 +225,7 @@ struct Conn {
     /// A subscriber this connection fed is past the stall mark.
     stalled: Option<Rc<Client>>,
     /// Publishes for other lanes from the current read, by lane.
-    fwd: Vec<Out>,
+    out: Outs,
     /// Subscriptions changed since the last `PING`: the next waits until
     /// every lane applied them.
     unfenced: bool,
@@ -343,14 +343,14 @@ where
     let ws_ping = via.ws.then(|| lane.shared.ws.as_ref()?.opts.ping_interval);
     let ping = ping::Pinger::new(now, ws_ping.flatten().unwrap_or(opts.ping_interval));
     let auth_by = lane.shared.auth_for(via.ws).map(|a| now + a.timeout);
-    let fwd = (0..lane.lanes()).map(|_| Out::default()).collect();
+    let out = Outs::new(&lane);
     let ip = client.meta.borrow().ip.clone();
     let mut conn = Conn {
         lane,
         client,
         opts: handshake::ClientOpts::default(),
         stalled: None,
-        fwd,
+        out,
         unfenced: false,
         ip,
         stage: Stage::Fresh,

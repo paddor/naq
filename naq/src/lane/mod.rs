@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-pub(crate) use data::{Batch, Origin, Out};
+pub(crate) use data::{Batch, Outs};
 pub(crate) use publish::Routing;
 pub(crate) use route::{Queue, Queued};
 
@@ -71,6 +71,8 @@ pub(crate) enum Control {
         server: u16,
         weight: u32,
     },
+    /// Server `server` of the cluster takes this lane's data at `endpoint`.
+    Push { server: u16, endpoint: String },
     /// Answered with the lane's leaf node links, for monitoring.
     Links(oneshot::Sender<Vec<crate::monitor::LeafInfo>>),
     /// Answered by lane 0 with the routes of the cluster, for monitoring.
@@ -141,6 +143,9 @@ pub(crate) struct Lane {
     hits: peer::Hits,
     /// The other servers of the cluster, on lane 0 with a cluster.
     pub(crate) mesh: RefCell<Option<Rc<crate::mesh::Mesh>>>,
+    /// This lane's data link to each other server of the cluster, by route,
+    /// once it said where.
+    pub(crate) pushes: RefCell<Vec<Option<omq_tokio::Socket>>>,
 }
 
 impl Lane {
@@ -148,6 +153,11 @@ impl Lane {
     #[inline]
     pub(crate) fn index(&self, account: u32) -> &RefCell<Index> {
         &self.indexes[account as usize]
+    }
+
+    /// Number of other servers of the cluster.
+    pub(crate) fn servers(&self) -> usize {
+        routes(&self.shared)
     }
 
     /// Number of lanes of the server.
@@ -277,6 +287,7 @@ impl Lane {
                     .borrow_mut()
                     .server(&subject, queue.as_deref(), server, weight);
             }
+            Control::Push { server, endpoint } => crate::mesh::push(self, server, &endpoint),
             Control::Links(answer) => {
                 let _ = answer.send(crate::monitor::links(self));
             }
@@ -291,6 +302,7 @@ impl Lane {
 /// tasks that take its mailboxes.
 pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
     let key = (shared.id, id);
+    let servers = routes(&shared);
     let lane = Rc::new(Lane {
         id,
         indexes: (0..shared.accounts.len())
@@ -306,6 +318,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         links: RefCell::default(),
         hits: peer::Hits::default(),
         mesh: RefCell::default(),
+        pushes: RefCell::new(vec![None; servers]),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;
@@ -334,4 +347,9 @@ fn seed() -> u64 {
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u8(0);
     h.finish()
+}
+
+/// Routes of `shared`'s cluster.
+fn routes(shared: &Shared) -> usize {
+    shared.opts.cluster.as_ref().map_or(0, |c| c.routes.len())
 }

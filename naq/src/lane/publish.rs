@@ -1,20 +1,21 @@
 //! Routing a message from the lane it came in on: delivered here,
-//! forwarded once to each other lane with interest, and handed to links.
+//! forwarded once to each other lane and each other server with interest,
+//! and handed to links.
 
 use std::rc::Rc;
 
 use naq_proto::client::Pub;
-use naq_proto::leaf;
+use naq_proto::peer;
 
-use super::{Lane, Out, Queue, Queued};
+use super::{Lane, Outs, Queue, Queued};
 use crate::conn::Client;
 use crate::index::{Few, Found, Interest, Peer};
 
 /// A message being routed on the lane it came in on.
 pub(crate) struct Routing<'a, 'p> {
     lane: &'a Lane,
-    /// Messages for each other lane.
-    fwd: &'a mut [Out],
+    /// Messages for each other lane and server.
+    out: &'a mut Outs,
     p: &'a Pub<'p>,
     /// The message as clients get it: `p` but for some of a hub.
     d: &'a Pub<'p>,
@@ -23,9 +24,13 @@ pub(crate) struct Routing<'a, 'p> {
     /// Who gets nothing: a client without echo, or the link a message
     /// came from; 0 for nobody.
     skip: u64,
-    /// From a link: the message whose list names the queue groups that get
-    /// a pick. Without one, every group does.
-    from: Option<&'a leaf::Msg<'p>>,
+    /// The queue groups that get a pick, separated by blanks, as a link or
+    /// another server named them; `None` for every group.
+    listed: Option<&'a [u8]>,
+    /// It goes to other servers with interest: not when one sent it.
+    servers: bool,
+    /// Servers it went to already, as bits by route.
+    sent: u64,
     /// A subscriber past the stall mark.
     pub(crate) stalled: Option<Rc<Client>>,
     /// Some subscription got it, here, on another lane or at a hub.
@@ -33,34 +38,49 @@ pub(crate) struct Routing<'a, 'p> {
 }
 
 impl<'a, 'p> Routing<'a, 'p> {
-    /// Routes `p`, which lies in `buf`, on `lane`, with `fwd` for the other
-    /// lanes, to all but client or link `skip`.
+    /// Routes `p`, which lies in `buf`, on `lane`, with `out` for the other
+    /// lanes and servers, to all but client or link `skip`.
     #[inline]
     pub(crate) const fn new(
         lane: &'a Lane,
-        fwd: &'a mut [Out],
+        out: &'a mut Outs,
         p: &'a Pub<'p>,
         buf: &'a [u8],
         skip: u64,
     ) -> Self {
         Routing {
             lane,
-            fwd,
+            out,
             p,
             d: p,
             buf,
             skip,
-            from: None,
+            listed: None,
+            servers: true,
+            sent: 0,
             stalled: None,
             delivered: false,
         }
     }
 
-    /// The message is `m` of a link, which clients get as `d`: only the
-    /// queue groups it lists get a pick.
-    pub(crate) const fn by_link(mut self, m: &'a leaf::Msg<'p>, d: &'a Pub<'p>) -> Self {
-        self.from = Some(m);
+    /// The message came from a link, listing `queues`, separated by blanks:
+    /// only those get a pick. Clients get it as `d`. Other servers do not:
+    /// they have links to the hub of their own, as in `nats-server`.
+    pub(crate) const fn by_link(mut self, queues: &'a [u8], d: &'a Pub<'p>) -> Self {
+        self.listed = Some(queues);
         self.d = d;
+        self.servers = false;
+        self
+    }
+
+    /// The message came from another server, for one member of `queue` if
+    /// given, else for plain subscriptions: it goes to no other server.
+    pub(crate) const fn by_server(mut self, queue: Option<&'a [u8]>) -> Self {
+        self.listed = Some(match queue {
+            Some(q) => q,
+            None => b"",
+        });
+        self.servers = false;
         self
     }
 
@@ -86,7 +106,8 @@ impl<'a, 'p> Routing<'a, 'p> {
     /// Whether queue group `name` gets a pick.
     #[inline]
     fn picks(&self, name: &[u8]) -> bool {
-        self.from.is_none_or(|m| m.queue_names().any(|n| n == name))
+        self.listed
+            .is_none_or(|l| peer::words(l).any(|n| n == name))
     }
 
     /// Delivers to the plain subscriptions of `i` here, and forwards to
@@ -102,11 +123,27 @@ impl<'a, 'p> Routing<'a, 'p> {
             .lane
             .deliver(&i.plain.local, self.d, self.skip, &mut self.stalled);
         for &(to, _) in &i.plain.lanes {
-            self.fwd[to].plain(self.buf, self.p, once);
+            self.out.lanes[to].plain(self.buf, self.p, once);
             self.delivered = true;
         }
         if !i.plain.peers.is_empty() {
             self.peers(&i.plain.peers);
+        }
+        if self.servers && !i.plain.servers.is_empty() {
+            self.send_servers(&i.plain.servers);
+        }
+    }
+
+    /// Sends the message once to each server with plain interest.
+    #[inline(never)]
+    fn send_servers(&mut self, servers: &[(u16, u32)]) {
+        for &(s, _) in servers {
+            let bit = 1u64 << (s % 64);
+            if self.sent & bit == 0 {
+                self.sent |= bit;
+                self.out.server(&self.lane.shared.accounts, s, self.p, None);
+                self.delivered = true;
+            }
         }
     }
 
@@ -116,7 +153,7 @@ impl<'a, 'p> Routing<'a, 'p> {
     fn peers(&mut self, peers: &[Peer]) {
         for p in peers {
             if p.lane != self.lane.id {
-                self.fwd[p.lane].plain(self.buf, self.p, true);
+                self.out.lanes[p.lane].plain(self.buf, self.p, true);
             } else if p.link != self.skip {
                 self.lane.hit_link(p.link, None);
             } else {
@@ -148,6 +185,7 @@ impl<'a, 'p> Routing<'a, 'p> {
         let q = Queue {
             name,
             groups: found.queue_groups(k, name),
+            servers: self.servers,
         };
         match self
             .lane
@@ -155,7 +193,12 @@ impl<'a, 'p> Routing<'a, 'p> {
         {
             Queued::Here => self.delivered = true,
             Queued::Lane(to) => {
-                self.fwd[to].queue(self.buf, self.p, name);
+                self.out.lanes[to].queue(self.buf, self.p, name);
+                self.delivered = true;
+            }
+            Queued::Server(s) => {
+                self.out
+                    .server(&self.lane.shared.accounts, s, self.p, Some(name));
                 self.delivered = true;
             }
             Queued::Nowhere => {}

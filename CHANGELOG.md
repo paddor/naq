@@ -226,6 +226,13 @@ Notable changes to naq. The format follows
   a server that sees a gap asks for a snapshot again. Plain interest is
   told once, a queue group with its member count. A server gone takes its
   interest with it. `/routez` counts each route's subscriptions.
+- `naq`: messages cross the cluster. A message goes once to each other
+  server with plain interest, on the publishing lane's data link to it, as
+  a batch per read; a queue group gets one pick at the source across
+  members here and at other servers, each counted as its weight. The
+  receiving server delivers to its clients, lanes and links, and to no
+  other server. A message of a hub stays with the server linked to it, as
+  in `nats-server`: every server links to the hub of its own.
 
 ### Changed
 

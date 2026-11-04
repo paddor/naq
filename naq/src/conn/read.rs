@@ -15,7 +15,7 @@ use super::ping::Tick;
 use super::{Client, Close, Conn, Stage};
 use crate::auth::{Check, Creds, Grant, Pending};
 use crate::index::{Entry, Found, Index, Interest};
-use crate::lane::{Origin, Routing};
+use crate::lane::Routing;
 use crate::perms::{Held, quoted};
 
 /// Bytes a read may fill at least. With less room, the buffer takes back
@@ -156,11 +156,7 @@ impl Conn {
     /// Drops the `at` bytes parsed from `buf`, handing those that publishes
     /// for other lanes refer to over to those lanes.
     async fn ship(&mut self, buf: &mut BytesMut, at: usize) {
-        let from = Origin {
-            account: self.client.account.get(),
-            link: false,
-        };
-        self.lane.ship_reads(&mut self.fwd, buf, at, from).await;
+        self.lane.ship_reads(&mut self.out, buf, at, false).await;
     }
 
     // Inlined into the parse loop; what is rare stays out of line, so it
@@ -223,7 +219,7 @@ impl Conn {
             return;
         };
         let skip = if self.opts.echo { 0 } else { self.client.id };
-        let mut r = Routing::new(&self.lane, &mut self.fwd, p, buf, skip);
+        let mut r = Routing::new(&self.lane, &mut self.out, p, buf, skip);
         r.route(&found);
         if let Some(s) = r.stalled {
             self.stalled = Some(s);
@@ -309,6 +305,7 @@ impl Conn {
     /// dropped, as a new `CONNECT` drops them in `nats-server`.
     fn bind(&mut self, grant: Grant) {
         self.auth_by = None;
+        self.out.account = grant.account;
         let held = grant.perms.map(|p| Rc::new(Held::new(p)));
         self.client.guarded.set(held.is_some());
         *self.client.held.borrow_mut() = held;

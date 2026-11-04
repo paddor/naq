@@ -6,8 +6,10 @@
 //! the others. See `tmp/nats/MESH.md`.
 
 mod control;
+mod data;
 mod interest;
 
+pub(crate) use data::push;
 pub(crate) use interest::Told;
 
 use std::cell::RefCell;
@@ -30,6 +32,9 @@ pub(crate) fn validate(opts: &ServerOptions) -> Result<(), String> {
     let Some(c) = &opts.cluster else {
         return Ok(());
     };
+    if c.routes.len() > 64 {
+        return Err("cluster: more than 64 routes".into());
+    }
     for r in &c.routes {
         route(r)?;
     }
@@ -167,27 +172,27 @@ pub(crate) async fn run(
         return;
     };
     let _ = ready.send(Ok(addr));
-    let data = bind_data(&lanes, &c).await;
+    let data = bind_data(shared.id, &lanes, &c).await;
     let me = control::Me::new(&shared, &c, &data, epoch);
     control::serve(&shared, &mesh, me, &c, router).await;
 }
 
 /// Binds a data socket on each of `lanes`, and returns their endpoints in
 /// lane order. One that cannot bind gives an empty endpoint.
-async fn bind_data(lanes: &[LaneHandle], c: &Cluster) -> Vec<String> {
+async fn bind_data(server: u64, lanes: &[LaneHandle], c: &Cluster) -> Vec<String> {
     let mut waits = Vec::with_capacity(lanes.len());
     for l in lanes {
         let (tx, rx) = oneshot::channel();
         let host = c.host.clone();
+        let index = l.index();
         let spawned = l.spawn(move || async move {
             let ctx = omq_tokio::Context::current();
             let pull = ctx.socket(SocketType::Pull, socket_options(Bytes::new()));
             let at = pull.bind(endpoint(&host, 0)).await.map(|e| e.to_string());
             let ok = at.is_ok();
             let _ = tx.send(at.unwrap_or_default());
-            if ok {
-                // Data comes with the routing of it; until then, drained.
-                while pull.recv().await.is_ok() {}
+            if ok && let Some(lane) = crate::lane::get(server, index) {
+                data::receive(lane, pull).await;
             }
         });
         if spawned.is_ok() {

@@ -4,6 +4,8 @@ use std::rc::Rc;
 
 use bytes::{Buf, Bytes, BytesMut};
 use naq_proto::client::Pub;
+use naq_proto::peer;
+use omq_tokio::Message;
 
 use super::Lane;
 use crate::index::Found;
@@ -87,6 +89,56 @@ pub(crate) struct Origin {
     /// A link: messages of a hub, which clients may get otherwise, see
     /// [`crate::leaf::for_clients`].
     pub(crate) link: bool,
+}
+
+/// What one read leaves for others: publishes for each other lane, and
+/// records for each other server of the cluster.
+#[derive(Debug)]
+pub(crate) struct Outs {
+    pub(crate) lanes: Box<[Out]>,
+    /// A batch for each server, by route, empty if none.
+    servers: Box<[Vec<u8>]>,
+    /// The publisher's account, which the batches are of.
+    pub(crate) account: u32,
+}
+
+impl Outs {
+    /// Room for every other lane and server of `lane`'s server.
+    pub(crate) fn new(lane: &Lane) -> Outs {
+        Outs {
+            lanes: (0..lane.lanes()).map(|_| Out::default()).collect(),
+            servers: (0..lane.servers()).map(|_| Vec::new()).collect(),
+            account: 0,
+        }
+    }
+
+    /// Appends `p` to the batch for server `s`, for its plain
+    /// subscriptions, or for one member of queue group `queue`.
+    pub(crate) fn server(
+        &mut self,
+        accounts: &[String],
+        s: u16,
+        p: &Pub<'_>,
+        queue: Option<&[u8]>,
+    ) {
+        let Some(batch) = self.servers.get_mut(usize::from(s)) else {
+            return;
+        };
+        if batch.is_empty() {
+            let name = accounts
+                .get(self.account as usize)
+                .map_or("$G", String::as_str);
+            peer::batch(batch, name.as_bytes());
+        }
+        peer::Record {
+            subject: p.subject,
+            reply: p.reply,
+            headers: p.headers,
+            payload: p.payload,
+            queue,
+        }
+        .encode(batch);
+    }
 }
 
 /// The publishes of one read for one other lane.
@@ -179,21 +231,32 @@ fn pub_of<'b>(b: &'b Batch, f: &Fwd) -> Pub<'b> {
 
 impl Lane {
     /// Drops the `at` bytes parsed from `buf`, handing those that the
-    /// messages in `fwd` refer to over to their lanes, as batches `from`
-    /// there.
+    /// messages in `out` refer to over to their lanes, as batches of a link
+    /// if `link`, and sends the batches for other servers.
     pub(crate) async fn ship_reads(
         &self,
-        fwd: &mut [Out],
+        out: &mut Outs,
         buf: &mut BytesMut,
         at: usize,
-        from: Origin,
+        link: bool,
     ) {
-        if fwd.iter().all(Out::is_empty) {
+        self.ship_servers(out).await;
+        if out.lanes.iter().all(Out::is_empty) {
             buf.advance(at);
             return;
         }
         let chunk = buf.split_to(at).freeze();
-        for (to, out) in fwd.iter_mut().enumerate() {
+        self.ship_chunk(out, chunk, link).await;
+    }
+
+    /// Hands `chunk`, which the messages in `out` refer to, over to their
+    /// lanes, as batches of a link if `link`.
+    pub(crate) async fn ship_chunk(&self, out: &mut Outs, chunk: Bytes, link: bool) {
+        let from = Origin {
+            account: out.account,
+            link,
+        };
+        for (to, out) in out.lanes.iter_mut().enumerate() {
             if !out.is_empty() {
                 let batch = Batch {
                     chunk: chunk.clone(),
@@ -205,12 +268,46 @@ impl Lane {
         }
     }
 
-    /// Notes the links on this lane among `peers`.
-    #[inline]
+    /// Sends the batch for each server that has one, on this lane's link
+    /// to it; without a link, it is dropped, as Core may drop.
+    async fn ship_servers(&self, out: &mut Outs) {
+        for (s, batch) in out.servers.iter_mut().enumerate() {
+            if batch.is_empty() {
+                continue;
+            }
+            let batch = std::mem::take(batch);
+            let push = self.pushes.borrow().get(s).cloned().flatten();
+            if let Some(push) = push {
+                let _ = push.send(Message::single(Bytes::from(batch))).await;
+            }
+        }
+    }
+
+    /// Notes the links on this lane among `peers`. Out of line, as most
+    /// interest has none: the loop of [`run`] stays small.
+    #[inline(never)]
     fn peers_here(&self, peers: &[crate::index::Peer]) {
         for p in peers.iter().filter(|p| p.lane == self.id) {
             self.hit_link(p.link, None);
         }
+    }
+
+    /// Delivers `m`, forwarded for one member of queue group `name` of
+    /// `found`, to one member on this lane, else to a link here.
+    #[inline(never)]
+    fn deliver_fwd_queue(
+        &self,
+        found: &Found<'_>,
+        name: &[u8],
+        m: &Pub<'_>,
+        stalled: &mut Option<Rc<crate::conn::Client>>,
+    ) {
+        let q = super::Queue {
+            name,
+            groups: found.queue_groups(0, name),
+            servers: false,
+        };
+        self.deliver_any(&q, m, true, stalled);
     }
 
     /// Delivers forward `f` of batch `b` to the subscriptions on this lane.
@@ -231,21 +328,19 @@ impl Lane {
         match (&found, f.queue.get_some(&b.out.names)) {
             (Found::One(i), None) => {
                 self.deliver(&i.plain.local, to_clients, 0, stalled);
-                self.peers_here(&i.plain.peers);
+                if !i.plain.peers.is_empty() {
+                    self.peers_here(&i.plain.peers);
+                }
             }
             (Found::Many(all), None) => {
                 for i in all.iter() {
                     self.deliver(&i.plain.local, to_clients, 0, stalled);
-                    self.peers_here(&i.plain.peers);
+                    if !i.plain.peers.is_empty() {
+                        self.peers_here(&i.plain.peers);
+                    }
                 }
             }
-            (_, Some(name)) => {
-                let q = super::Queue {
-                    name,
-                    groups: found.queue_groups(0, name),
-                };
-                self.deliver_any(&q, to_clients, true, stalled);
-            }
+            (_, Some(name)) => self.deliver_fwd_queue(&found, name, to_clients, stalled),
         }
     }
 }

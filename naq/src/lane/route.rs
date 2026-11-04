@@ -17,6 +17,8 @@ pub(crate) enum Queued {
     Here,
     /// To be forwarded to a member on this lane.
     Lane(usize),
+    /// To be sent to a member at this server of the cluster, by route.
+    Server(u16),
     /// No member took it.
     Nowhere,
 }
@@ -27,6 +29,8 @@ pub(crate) enum Queued {
 pub(crate) struct Queue<'a> {
     pub(crate) name: &'a [u8],
     pub(crate) groups: Few<'a, Group>,
+    /// Members at other servers may get it: not when one sent it.
+    pub(crate) servers: bool,
 }
 
 /// Where a queue group's pick went.
@@ -36,6 +40,8 @@ enum Pick {
     Local(usize),
     /// A member on another lane.
     Lane(usize),
+    /// A member at another server, by route.
+    Server(u16),
 }
 
 /// Members on this lane, across `groups`.
@@ -142,8 +148,17 @@ impl Lane {
 
     /// Picks the member of the queue group made of `groups` that gets the
     /// next message: each member on any lane as likely as the others.
-    fn pick(&self, groups: &Few<'_, Group>) -> Option<Pick> {
-        let total: u64 = groups.iter().map(Group::weight).sum();
+    /// With `servers`, the members at other servers count too, each as many
+    /// as its weight, as in `nats-server`.
+    fn pick(&self, groups: &Few<'_, Group>, servers: bool) -> Option<Pick> {
+        let remote = |g: &Group| -> u64 {
+            if servers {
+                g.servers.iter().map(|&(_, w)| u64::from(w)).sum()
+            } else {
+                0
+            }
+        };
+        let total: u64 = groups.iter().map(|g| g.weight() + remote(g)).sum();
         if total == 0 {
             return None;
         }
@@ -158,6 +173,12 @@ impl Lane {
                 return Some(Pick::Lane(lane));
             }
             n -= u64::from(count);
+        }
+        for &(s, w) in groups.iter().flat_map(|g| &g.servers) {
+            if n < u64::from(w) {
+                return Some(Pick::Server(s));
+            }
+            n -= u64::from(w);
         }
         None
     }
@@ -174,8 +195,9 @@ impl Lane {
         stalled: &mut Option<Rc<Client>>,
     ) -> Queued {
         let groups = &q.groups;
-        let lane = match self.pick(groups) {
+        let lane = match self.pick(groups, q.servers) {
             None => None,
+            Some(Pick::Server(s)) => return Queued::Server(s),
             Some(Pick::Lane(l)) => Some(l),
             Some(Pick::Local(n)) => {
                 if first_taker(groups, n, |e| self.deliver_to(e, m, skip, stalled)) {
