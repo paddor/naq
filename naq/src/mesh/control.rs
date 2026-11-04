@@ -160,9 +160,12 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                 }
                 Ok(MonitorEvent::Disconnected { .. }) => {
                     heard.forget(&mut apply);
-                    let mut peers = mesh.peers.borrow_mut();
-                    peers[i].up = false;
-                    peers[i].subscriptions = 0;
+                    {
+                        let mut peers = mesh.peers.borrow_mut();
+                        peers[i].up = false;
+                        peers[i].subscriptions = 0;
+                    }
+                    connect_urls(&shared, &mesh);
                 }
                 Ok(_) => {}
                 Err(_) => return,
@@ -231,7 +234,39 @@ fn met(shared: &Shared, mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
         }
         p.data = data;
     }
+    p.client_urls = peer::words(h.client_urls)
+        .map(|u| reachable_url(&text(u), &p.host))
+        .collect();
+    drop(peers);
+    connect_urls(shared, mesh);
     true
+}
+
+/// Notes where the clients of the servers that are up connect, for the
+/// `INFO` of this server's clients.
+fn connect_urls(shared: &Shared, mesh: &Mesh) {
+    let urls: Vec<String> = mesh
+        .peers
+        .borrow()
+        .iter()
+        .filter(|p| p.up)
+        .flat_map(|p| p.client_urls.iter().cloned())
+        .collect();
+    // A poisoned lock still holds the list.
+    *shared
+        .connect_urls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = urls;
+}
+
+/// Client URL `url`, `host:port`, of a server dialed at `host`: on that
+/// host, where it listens on every address.
+fn reachable_url(url: &str, host: &str) -> String {
+    match url.rsplit_once(':') {
+        Some(("0.0.0.0" | "[::]", port)) if host.contains(':') => format!("[{host}]:{port}"),
+        Some(("0.0.0.0" | "[::]", port)) => format!("{host}:{port}"),
+        _ => url.to_owned(),
+    }
 }
 
 /// Data endpoint `at` of a server dialed at `host`: on that host, where it
@@ -257,5 +292,8 @@ mod tests {
         assert_eq!(reachable("tcp://[::]:7", "::1"), "tcp://[::1]:7");
         assert_eq!(reachable("tcp://10.0.0.1:7", "h"), "tcp://10.0.0.1:7");
         assert_eq!(reachable("bogus", "h"), "bogus");
+        assert_eq!(reachable_url("0.0.0.0:4222", "h"), "h:4222");
+        assert_eq!(reachable_url("[::]:4222", "::1"), "[::1]:4222");
+        assert_eq!(reachable_url("10.0.0.1:4222", "h"), "10.0.0.1:4222");
     }
 }

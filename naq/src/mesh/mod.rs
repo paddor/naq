@@ -123,6 +123,8 @@ pub(crate) struct Peer {
     pub(crate) data: Vec<String>,
     /// Entries of its interest, as applied.
     pub(crate) subscriptions: usize,
+    /// Where its clients connect.
+    pub(crate) client_urls: Vec<String>,
 }
 
 /// Options of every socket of the mesh: heartbeats find a peer gone.

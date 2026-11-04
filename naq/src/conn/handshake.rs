@@ -115,6 +115,9 @@ struct Info<'a> {
     bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_account: Option<&'a str>,
+    /// With a cluster: this server's client URL, then the others'.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    connect_urls: Vec<String>,
 }
 
 /// The client an `INFO` is for.
@@ -164,10 +167,27 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
             .is_some_and(|a| bound.is_some() || to.ws || !a.open()),
         bound: bound.is_some(),
         remote_account: bound,
+        connect_urls: connect_urls(shared),
     };
     // Cannot fail: no maps, no fallible serializers.
     let json = serde_json::to_vec(&info).unwrap_or_default();
     naq_proto::encode::info(out, &json);
+}
+
+/// The client URLs of the cluster, this server's first, as `nats-server`
+/// lists them; none without a cluster.
+fn connect_urls(shared: &Shared) -> Vec<String> {
+    if shared.opts.cluster.is_none() {
+        return Vec::new();
+    }
+    let mut all = vec![shared.addr.to_string()];
+    // A poisoned lock still holds the list.
+    let others = shared
+        .connect_urls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    all.extend(others.iter().cloned());
+    all
 }
 
 #[cfg(test)]

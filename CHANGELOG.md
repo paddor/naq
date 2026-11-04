@@ -233,6 +233,8 @@ Notable changes to naq. The format follows
   receiving server delivers to its clients, lanes and links, and to no
   other server. A message of a hub stays with the server linked to it, as
   in `nats-server`: every server links to the hub of its own.
+- `naq`: a client of a cluster server gets `connect_urls` in `INFO`: its
+  server's client address, then those of the other servers that are up.
 
 ### Changed
 

@@ -408,3 +408,26 @@ fn a_message_of_a_hub_stays_with_the_server_linked_to_it() {
     send(&mut near, "PUB x 5\r\nafter\r\n");
     assert_eq!([line(&mut far), line(&mut far)], ["MSG x 1 5", "after"]);
 }
+
+#[test]
+fn clients_hear_where_the_clients_of_the_others_connect() {
+    use std::io::BufRead;
+    let servers = met_cluster();
+    let c = TcpStream::connect(servers[0].addr()).unwrap();
+    c.set_read_timeout(Some(WAIT)).unwrap();
+    let mut l = String::new();
+    std::io::BufReader::new(c).read_line(&mut l).unwrap();
+    let info: serde_json::Value = serde_json::from_str(l.strip_prefix("INFO ").unwrap()).unwrap();
+    let urls: Vec<String> = info["connect_urls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(urls[0], servers[0].addr().to_string(), "its own first");
+    let mut others = urls[1..].to_vec();
+    others.sort();
+    let mut want: Vec<String> = servers[1..].iter().map(|s| s.addr().to_string()).collect();
+    want.sort();
+    assert_eq!(others, want);
+}

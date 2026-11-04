@@ -53,6 +53,9 @@ pub(crate) struct Shared {
     pub(crate) ws: Option<crate::ws::Door>,
     /// TLS to the hub of each leaf node remote.
     pub(crate) leaf_tls: Box<[crate::leaf::Connector]>,
+    /// Where the clients of the other servers of the cluster connect, as
+    /// they told it.
+    pub(crate) connect_urls: std::sync::Mutex<Vec<String>>,
     next_client: AtomicU64,
 }
 
@@ -142,16 +145,9 @@ impl Server {
             started: std::time::SystemTime::now(),
             gone: AtomicU64::new(0),
             tls: setup.tls,
-            ws: opts
-                .websocket
-                .clone()
-                .zip(ws_addr)
-                .map(|(opts, addr)| crate::ws::Door {
-                    opts,
-                    tls: setup.ws_tls,
-                    addr,
-                }),
+            ws: door(opts, ws_addr, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
+            connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });
         let ports = Ports {
@@ -188,6 +184,20 @@ impl Server {
     pub const fn cluster_addr(&self) -> Option<SocketAddr> {
         self.cluster
     }
+}
+
+/// The WebSocket port of `opts`, bound at `addr`, with TLS `tls`.
+fn door(
+    opts: &Options,
+    addr: Option<SocketAddr>,
+    tls: Option<Acceptor>,
+) -> Option<crate::ws::Door> {
+    let opts = opts.websocket.clone()?;
+    Some(crate::ws::Door {
+        opts,
+        tls,
+        addr: addr?,
+    })
 }
 
 /// TLS as the options set it up, its files read.
