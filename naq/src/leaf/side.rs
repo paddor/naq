@@ -22,6 +22,19 @@ const DENIED: [&[u8]; 3] = [b"$JS.API.>", b"$KV.>", b"$OBJ.>"];
 /// interest, the member count for a queue group.
 type Told = FxHashMap<(Box<[u8]>, Option<Box<[u8]>>), u32>;
 
+/// What monitoring shows of a link.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Facts {
+    /// The hub's server name.
+    pub(crate) name: String,
+    /// Where it was dialed.
+    pub(crate) ip: String,
+    pub(crate) port: u16,
+    pub(crate) websocket: bool,
+    /// Isolation was asked for.
+    pub(crate) isolated: bool,
+}
+
 /// A link on its lane.
 #[derive(Debug)]
 pub(crate) struct LinkSide {
@@ -37,6 +50,7 @@ pub(crate) struct LinkSide {
     /// and its interest in literal subjects, `subscribe` for messages from
     /// it and the interest it is told of. `None` limits nothing.
     perms: Option<Perms>,
+    pub(crate) facts: Facts,
     told: RefCell<Told>,
     /// The hub's interest, as its `LS+` and `LS-` left it: the weight of
     /// each queue group, 1 for plain interest.
@@ -49,6 +63,7 @@ impl LinkSide {
         client: Rc<Client>,
         headers: bool,
         perms: Option<Perms>,
+        facts: Facts,
     ) -> LinkSide {
         LinkSide {
             id: client.id,
@@ -56,6 +71,7 @@ impl LinkSide {
             client,
             headers,
             perms,
+            facts,
             told: RefCell::default(),
             hub: RefCell::default(),
         }
@@ -83,6 +99,17 @@ impl LinkSide {
         }
         drop(hub);
         self.set_peer(lane, i.subject, i.queue, if add { weight } else { 0 });
+    }
+
+    /// The subjects the hub has interest in, once for each `LS+`.
+    pub(crate) fn hub_subjects(&self) -> Vec<String> {
+        let hub = self.hub.borrow();
+        let mut all: Vec<String> = hub
+            .keys()
+            .map(|(s, _)| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        all.sort_unstable();
+        all
     }
 
     /// Forgets the hub's interest on every lane, as the link ends.
@@ -282,7 +309,7 @@ mod tests {
 
     #[test]
     fn the_hub_hears_of_interest_once_and_of_queue_counts_always() {
-        let side = LinkSide::new(0, Rc::new(Client::new(9)), true, None);
+        let side = LinkSide::new(0, Rc::new(Client::new(9)), true, None, Facts::default());
         let mut idx = Index::default();
         let c = Rc::new(Client::new(1));
         idx.insert(b"a", None, Entry::new(c.clone(), b"1"));

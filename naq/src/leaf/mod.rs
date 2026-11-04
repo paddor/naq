@@ -7,7 +7,7 @@ mod side;
 mod tls;
 mod url;
 
-pub(crate) use side::LinkSide;
+pub(crate) use side::{Facts, LinkSide};
 pub(crate) use tls::Connector;
 pub(crate) use url::HubUrl;
 

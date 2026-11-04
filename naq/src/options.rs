@@ -54,7 +54,7 @@ pub struct Options {
     /// (`authorization { timeout }`).
     pub auth_timeout: Duration,
     /// Port for monitoring over HTTP (`http_port`): `/healthz`, `/varz`,
-    /// `/connz`. `None` serves none; 0 picks a free port.
+    /// `/connz`, `/leafz`. `None` serves none; 0 picks a free port.
     pub http_port: Option<u16>,
     /// Host for monitoring; `None` for [`Options::host`] (`http`).
     pub http_host: Option<String>,

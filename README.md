@@ -6,9 +6,11 @@ wakes and writes.
 
 The server runs core publish and subscribe: wildcards, queue groups,
 `UNSUB` maximums, accounts, users with passwords, tokens or NKeys,
-permissions, over TCP, TLS and WebSocket. It reads `nats-server`
+permissions, over TCP, TLS and WebSocket. It links to `nats-server` hubs
+as a leaf node, over TCP, TLS or WebSocket, with credentials, failover
+across a hub cluster and the hub's permissions. It reads `nats-server`
 configuration files (`naq -c FILE`), the keys it serves so far, and serves
-`/healthz`, `/varz` and `/connz` (`naq -m PORT`).
+`/healthz`, `/varz`, `/connz` and `/leafz` (`naq -m PORT`).
 
 | Crate | Role |
 | --- | --- |

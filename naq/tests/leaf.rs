@@ -1359,3 +1359,44 @@ fn a_naq_leaf_bridges_two_go_hubs() {
     publisher.send("PUB x 6\r\nbridge\r\n");
     assert_eq!(lines(&mut sub, 2), ["MSG x 1 6", "bridge"]);
 }
+
+#[test]
+fn leafz_shows_the_links_and_the_interest_of_their_hubs() {
+    let hub = Hub::new();
+    let naq = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        http_port: Some(0),
+        remotes: vec![Remote {
+            urls: vec![format!("127.0.0.1:{}", hub.port())],
+            ..Remote::default()
+        }],
+        ..Options::default()
+    })
+    .unwrap();
+    let http = naq.monitor_addr().unwrap().port();
+    let mut p = hub.accept();
+    p.send(&INFO.replace("\"client_id\"", "\"server_name\":\"hub1\",\"client_id\""));
+    p.line();
+    p.send("INFO {\"connect_info\":true}\r\n");
+    lines_until(&mut p, "LS+ $LDS.");
+    p.send("LS+ b q 2\r\nLS+ a\r\nPING\r\n");
+    assert_eq!(p.line(), "PONG");
+    let z = get(http, "/leafz");
+    assert_eq!(z["leafnodes"], 1, "{z}");
+    let l = &z["leafs"][0];
+    assert_eq!(
+        (&l["name"], &l["account"], &l["ip"]),
+        (&"hub1".into(), &"$G".into(), &"127.0.0.1".into())
+    );
+    assert_eq!(
+        (&l["port"], &l["subscriptions"], &l["is_spoke"]),
+        (&hub.port().into(), &2.into(), &true.into())
+    );
+    assert!(l.get("subscriptions_list").is_none(), "{l}");
+    let z = get(http, "/leafz?subs=1");
+    assert_eq!(
+        z["leafs"][0]["subscriptions_list"],
+        serde_json::json!(["a", "b"])
+    );
+}

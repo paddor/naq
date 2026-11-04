@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use super::{Ended, HubUrl, LinkSide, Told, creds, side};
+use super::{Ended, Facts, HubUrl, LinkSide, Told, creds, side};
 use crate::Rules;
 use crate::conn::{self, Client};
 use crate::lane::{Lane, Out, Routing};
@@ -49,6 +49,7 @@ struct HubInfo {
     info_on_connect: bool,
     connect_info: bool,
     nonce: String,
+    server_name: String,
     /// What the link may send to the hub, in `connect_info`.
     export: Option<Acl>,
     /// What it may take from the hub.
@@ -78,6 +79,7 @@ struct Terms {
     /// The link carries header blocks.
     headers: bool,
     perms: Option<Perms>,
+    facts: Facts,
 }
 
 /// The leaf's `CONNECT`. Without `compress_mode`, the hub stays
@@ -414,6 +416,13 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         Ok(Terms {
             headers: info.headers,
             perms: side::perms(answer.export.into(), answer.import.into(), r),
+            facts: Facts {
+                name: info.server_name,
+                ip: url.host.clone(),
+                port: url.port,
+                websocket: url.ws.is_some(),
+                isolated: r.request_isolation,
+            },
         })
     }
 
@@ -469,6 +478,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             client.clone(),
             terms.headers,
             terms.perms,
+            terms.facts,
         ));
         let lds = shared.lds[account as usize].as_bytes();
         side.snapshot(&self.lane.index(account).borrow(), lds);

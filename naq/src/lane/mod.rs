@@ -62,6 +62,8 @@ pub(crate) enum Control {
     Fence(oneshot::Sender<()>),
     /// Answered with the lane's clients, for monitoring.
     Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
+    /// Answered with the lane's leaf node links, for monitoring.
+    Links(oneshot::Sender<Vec<crate::monitor::LeafInfo>>),
 }
 
 /// The ways into a lane, for every lane.
@@ -246,6 +248,9 @@ impl Lane {
             }
             Control::Clients(answer) => {
                 let _ = answer.send(crate::monitor::conns(self));
+            }
+            Control::Links(answer) => {
+                let _ = answer.send(crate::monitor::links(self));
             }
         }
     }

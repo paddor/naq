@@ -202,6 +202,9 @@ Notable changes to naq. The format follows
   interest of one hub is told to the others, never back to it, with queue
   members counted across the hubs, so messages flow from one hub to
   another through the server.
+- `naq`: `/leafz` shows the server's leaf node links as `nats-server` does:
+  the hub's name and address, the link's account, its message counts, and
+  the subjects of the hub's interest with `subs=1`.
 
 ### Changed
 

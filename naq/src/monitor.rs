@@ -1,5 +1,5 @@
 //! Monitoring over HTTP, as much of `nats-server`'s as tools and harnesses
-//! use: `/healthz`, `/varz` and `/connz`, in its JSON.
+//! use: `/healthz`, `/varz`, `/connz` and `/leafz`, in its JSON.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -78,6 +78,60 @@ pub(crate) fn conns(lane: &Lane) -> Vec<ConnInfo> {
         .collect()
 }
 
+/// One leaf node link, as `/leafz` shows it.
+#[derive(Debug, Serialize)]
+pub(crate) struct LeafInfo {
+    id: u64,
+    name: String,
+    is_spoke: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_isolated: bool,
+    account: String,
+    ip: String,
+    port: u16,
+    in_msgs: u64,
+    out_msgs: u64,
+    in_bytes: u64,
+    out_bytes: u64,
+    subscriptions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscriptions_list: Option<Vec<String>>,
+    compression: &'static str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    websocket: bool,
+}
+
+/// The leaf node links of `lane`, with the subjects of their hubs'
+/// interest.
+pub(crate) fn links(lane: &Lane) -> Vec<LeafInfo> {
+    lane.links
+        .borrow()
+        .iter()
+        .map(|l| {
+            let t = l.client.tally.totals();
+            let subs = l.hub_subjects();
+            let f = &l.facts;
+            LeafInfo {
+                id: l.id,
+                name: f.name.clone(),
+                is_spoke: true,
+                is_isolated: f.isolated,
+                account: lane.shared.accounts[l.account as usize].clone(),
+                ip: f.ip.clone(),
+                port: f.port,
+                in_msgs: t.in_msgs,
+                out_msgs: t.out_msgs,
+                in_bytes: t.in_bytes,
+                out_bytes: t.out_bytes,
+                subscriptions: subs.len(),
+                subscriptions_list: Some(subs),
+                compression: "off",
+                websocket: f.websocket,
+            }
+        })
+        .collect()
+}
+
 /// Serves monitoring on `listener` until it closes.
 pub(crate) async fn serve(mut listener: Listener, shared: Arc<Shared>) {
     loop {
@@ -109,10 +163,10 @@ impl Driver for Http {
         W: tokio::io::AsyncWrite + Unpin + 'static,
     {
         {
-            let Ok(Some(path)) = tokio::time::timeout(READ_TIMEOUT, request(&mut r)).await else {
+            let Ok(Some(target)) = tokio::time::timeout(READ_TIMEOUT, request(&mut r)).await else {
                 return;
             };
-            let (status, body) = answer(&self.shared, &path).await;
+            let (status, body) = answer(&self.shared, &target).await;
             let head = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
@@ -124,7 +178,7 @@ impl Driver for Http {
     }
 }
 
-/// The path of a `GET`, once its head is in.
+/// The target of a `GET`, path and query, once its head is in.
 async fn request<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Option<String> {
     let mut buf = Vec::new();
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -141,14 +195,16 @@ async fn request<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Option<String> {
     let line = buf.split(|&b| b == b'\r').next()?;
     let mut parts = std::str::from_utf8(line).ok()?.split(' ');
     let (method, target) = (parts.next()?, parts.next()?);
-    (method == "GET").then(|| target.split('?').next().unwrap_or_default().to_owned())
+    (method == "GET").then(|| target.to_owned())
 }
 
-async fn answer(shared: &Shared, path: &str) -> (&'static str, Vec<u8>) {
+async fn answer(shared: &Shared, target: &str) -> (&'static str, Vec<u8>) {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let json = match path.trim_end_matches('/') {
         "/healthz" => serde_json::json!({ "status": "ok" }),
         "/varz" => varz(shared),
         "/connz" => connz(shared).await,
+        "/leafz" => leafz(shared, wants_subs(query)).await,
         _ => return ("404 Not Found", b"{\"error\":\"not found\"}".to_vec()),
     };
     // Cannot fail: plain values only.
@@ -235,6 +291,39 @@ async fn connz(shared: &Shared) -> serde_json::Value {
         "offset": 0,
         "limit": n.max(1024),
         "connections": conns,
+    })
+}
+
+/// Whether `query` asks for subscription lists, as `subs=1` or `subs=true`.
+fn wants_subs(query: &str) -> bool {
+    query
+        .split('&')
+        .any(|kv| matches!(kv, "subs=1" | "subs=true"))
+}
+
+async fn leafz(shared: &Shared, subs: bool) -> serde_json::Value {
+    let mut waits = Vec::with_capacity(shared.lanes.len());
+    for tx in &*shared.lanes {
+        let (answer, wait) = oneshot::channel();
+        tx.control(Control::Links(answer));
+        waits.push(wait);
+    }
+    let mut leafs = Vec::new();
+    for w in waits {
+        // A lane that stopped has no links to show.
+        leafs.extend(w.await.unwrap_or_default());
+    }
+    leafs.sort_by_key(|l| l.id);
+    if !subs {
+        for l in &mut leafs {
+            l.subscriptions_list = None;
+        }
+    }
+    serde_json::json!({
+        "server_id": shared.server_id,
+        "now": rfc3339(SystemTime::now()),
+        "leafnodes": leafs.len(),
+        "leafs": leafs,
     })
 }
 
