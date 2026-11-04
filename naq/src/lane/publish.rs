@@ -165,7 +165,7 @@ impl<'a, 'p> Routing<'a, 'p> {
             let bit = super::bit(s);
             if self.sent & bit == 0 {
                 self.sent |= bit;
-                self.out.server(&self.lane.shared.accounts, s, self.p, None);
+                self.out.server(self.lane, s, self.p, None);
                 self.delivered = true;
             }
         }
@@ -224,8 +224,7 @@ impl<'a, 'p> Routing<'a, 'p> {
                 self.delivered = true;
             }
             Queued::Server(s) => {
-                self.out
-                    .server(&self.lane.shared.accounts, s, self.p, Some(name));
+                self.out.server(self.lane, s, self.p, Some(name));
                 self.delivered = true;
             }
             Queued::Nowhere => {}

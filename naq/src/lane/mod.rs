@@ -164,6 +164,8 @@ pub(crate) struct Lane {
     pub(crate) clients: RefCell<FxHashMap<u64, Rc<Client>>>,
     /// Read buffers of its clients that batches may still refer to.
     pub(crate) reads: SpentReads,
+    /// Buffers of batches for other servers that may still be in flight.
+    pub(crate) batches: SpentReads,
     /// Leaf node links on this lane.
     pub(crate) links: RefCell<Vec<Rc<crate::leaf::LinkSide>>>,
     /// Links the message being routed reaches.
@@ -386,6 +388,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         tally: Tally::default(),
         clients: RefCell::default(),
         reads: SpentReads::default(),
+        batches: SpentReads::default(),
         links: RefCell::default(),
         hits: peer::Hits::default(),
         mesh: RefCell::default(),

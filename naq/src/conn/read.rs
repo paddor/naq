@@ -503,7 +503,7 @@ impl SpentReads {
     }
 
     /// Keeps `buf`, which batches on other lanes may still refer to.
-    fn retire(&self, mut buf: BytesMut) {
+    pub(crate) fn retire(&self, mut buf: BytesMut) {
         buf.clear();
         let mut spent = self.0.borrow_mut();
         if spent.len() == SPENT_MAX {

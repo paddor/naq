@@ -7,6 +7,7 @@ use naq_proto::client::Pub;
 use naq_proto::peer;
 
 use super::Lane;
+use crate::conn::SpentReads;
 use crate::index::Found;
 use crate::mailbox::Receiver;
 
@@ -104,14 +105,16 @@ pub(crate) enum Source {
     Leaf,
 }
 
+/// Least room a batch for a server takes.
+const SERVER_ROOM: usize = 16 << 10;
+
 /// What one read leaves for others: publishes for each other lane, and
 /// records for each server reached over OMQ.
 #[derive(Debug)]
 pub(crate) struct Outs {
     pub(crate) lanes: Box<[Out]>,
-    /// A batch for each server, by slot, empty if none. It grows to the
-    /// slots sent to.
-    servers: Vec<Vec<u8>>,
+    /// A batch for each server, by slot. It grows to the slots sent to.
+    servers: Vec<ServerBatch>,
     /// The publisher's account, which the batches are of.
     pub(crate) account: u32,
     /// The leaf cluster the publishes come from, with `from_leaf`.
@@ -124,7 +127,9 @@ impl Outs {
     pub(crate) fn new(lane: &Lane) -> Outs {
         Outs {
             lanes: (0..lane.lanes()).map(|_| Out::default()).collect(),
-            servers: (0..lane.servers()).map(|_| Vec::new()).collect(),
+            servers: (0..lane.servers())
+                .map(|_| ServerBatch::default())
+                .collect(),
             account: 0,
             origin: Vec::new(),
             from_leaf: false,
@@ -140,28 +145,26 @@ impl Outs {
     }
 
     /// Appends `p` to the batch for server `s`, for its plain
-    /// subscriptions, or for one member of queue group `queue`.
-    pub(crate) fn server(
-        &mut self,
-        accounts: &[String],
-        s: u16,
-        p: &Pub<'_>,
-        queue: Option<&[u8]>,
-    ) {
+    /// subscriptions, or for one member of queue group `queue`. A new
+    /// batch takes its buffer from `lane`'s spent batches.
+    pub(crate) fn server(&mut self, lane: &Lane, s: u16, p: &Pub<'_>, queue: Option<&[u8]>) {
         let at = usize::from(s);
         if at >= super::SLOTS {
             return;
         }
         if self.servers.len() <= at {
-            self.servers.resize_with(at + 1, Vec::new);
+            self.servers.resize_with(at + 1, ServerBatch::default);
         }
         let batch = &mut self.servers[at];
-        if batch.is_empty() {
-            let name = accounts
+        if batch.buf.is_empty() {
+            batch.open(&lane.batches);
+            let name = lane
+                .shared
+                .accounts
                 .get(self.account as usize)
                 .map_or("$G", String::as_str);
             let origin = self.from_leaf.then_some(&self.origin[..]);
-            peer::batch(batch, origin, name.as_bytes());
+            peer::batch(&mut batch.buf, origin, name.as_bytes());
         }
         peer::Record {
             subject: p.subject,
@@ -170,7 +173,38 @@ impl Outs {
             payload: p.payload,
             queue,
         }
-        .encode(batch);
+        .encode(&mut batch.buf);
+    }
+}
+
+/// The batch for one server, and the room the next one takes.
+#[derive(Debug, Default)]
+struct ServerBatch {
+    /// From the lane's spent batches; none between reads.
+    buf: BytesMut,
+    /// A bit more than the last batch took.
+    room: usize,
+}
+
+impl ServerBatch {
+    /// Gives a new batch a buffer from `spent`, unless it has one.
+    fn open(&mut self, spent: &SpentReads) {
+        if self.buf.capacity() == 0 {
+            self.buf = spent.take(self.room.max(SERVER_ROOM));
+        }
+    }
+
+    /// The batch so far, if any. Its buffer goes back to `spent`, to be
+    /// filled again once the batch is sent and dropped.
+    fn take(&mut self, spent: &SpentReads) -> Option<Bytes> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        let mut buf = std::mem::take(&mut self.buf);
+        self.room = buf.len() + buf.len() / 4;
+        let batch = buf.split().freeze();
+        spent.retire(buf);
+        Some(batch)
     }
 }
 
@@ -302,16 +336,17 @@ impl Lane {
     }
 
     /// Sends the batch for each server that has one, on this lane's link
-    /// to it; without a link, it is dropped, as Core may drop.
+    /// to it; without a link, it is dropped, as Core may drop. Its buffer
+    /// goes back to the lane's spent batches, to be filled again once the
+    /// batch is sent.
     pub(crate) async fn ship_servers(&self, out: &mut Outs) {
-        for (s, batch) in out.servers.iter_mut().enumerate() {
-            if batch.is_empty() {
+        for (s, b) in out.servers.iter_mut().enumerate() {
+            let Some(batch) = b.take(&self.batches) else {
                 continue;
-            }
-            let batch = std::mem::take(batch);
+            };
             let link = self.sends.borrow().get(s).cloned().flatten();
             if let Some(link) = link {
-                link.send(Bytes::from(batch)).await;
+                link.send(batch).await;
             }
         }
     }
@@ -405,5 +440,28 @@ mod tests {
         assert_eq!((taken.msgs.len(), &taken.names[..]), (6, &b"q"[..]));
         assert!(out.is_empty() && out.names.is_empty());
         assert!(out.msgs.capacity() >= 6 && out.names.capacity() >= 1);
+    }
+
+    #[test]
+    fn a_batch_for_a_server_fills_its_buffer_again_once_sent() {
+        let spent = SpentReads::default();
+        let mut b = ServerBatch::default();
+        assert!(b.take(&spent).is_none());
+        b.open(&spent);
+        b.buf.resize(20_000, 1);
+        let first = b.take(&spent).unwrap();
+        let at = first.as_ptr();
+        assert_eq!((first.len(), b.room, b.buf.capacity()), (20_000, 25_000, 0));
+        // In flight, its buffer is not filled again.
+        b.open(&spent);
+        assert_ne!(b.buf.as_ptr(), at);
+        assert!(b.buf.capacity() >= 25_000);
+        b.buf.extend_from_slice(&[2; 100]);
+        let second = b.take(&spent).unwrap();
+        assert_eq!((&second[..], b.room), (&[2; 100][..], 125));
+        drop(first);
+        b.open(&spent);
+        assert_eq!(b.buf.as_ptr(), at, "sent and dropped, it is filled again");
+        assert!(b.buf.capacity() >= SERVER_ROOM);
     }
 }
