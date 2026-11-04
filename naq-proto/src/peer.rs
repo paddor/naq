@@ -1,5 +1,6 @@
-//! The peer wire: what naq servers of one cluster send each other over OMQ,
-//! one message per OMQ message.
+//! The peer wire: what naq servers send each other over OMQ, one message
+//! per OMQ message: the servers of one cluster, and naq leafs and their
+//! naq hubs.
 //!
 //! Control messages carry interest. A [`Hello`] comes first on every
 //! connection, then a snapshot of the sender's interest and deltas to it,
@@ -15,7 +16,7 @@
 //! use naq_proto::peer::{self, Batch, Record};
 //!
 //! let mut out = Vec::new();
-//! peer::batch(&mut out, b"$G");
+//! peer::batch(&mut out, 0, None, b"$G");
 //! Record {
 //!     subject: b"orders",
 //!     reply: None,
@@ -48,6 +49,9 @@ const BATCH: u8 = 16;
 const REPLY: u8 = 1;
 const HEADERS: u8 = 2;
 const QUEUE: u8 = 4;
+
+const INTEREST_QUEUE: u8 = 1;
+const ORIGIN: u8 = 2;
 
 /// Why a message does not decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -110,9 +114,29 @@ pub enum Control<'a> {
     Resync,
 }
 
+/// What the sender of a [`Hello`] is to the receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Role {
+    /// Another server of its cluster.
+    Route,
+    /// A leaf node: it dialed the receiver as its hub.
+    Leaf,
+    /// The hub of the receiver, a leaf node.
+    Hub,
+}
+
 /// Who a server is, and where its lanes take data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hello<'a> {
+    /// What the sender is to the receiver.
+    pub role: Role,
+    /// The token the receiver puts on its batches to the sender, so that
+    /// it knows where they come from; 0 on a route.
+    pub token: u16,
+    /// The account the link binds at the sender, between a leaf and its
+    /// hub; empty on a route.
+    pub account: &'a [u8],
     /// Random for each start of the server: a new one means it restarted.
     pub epoch: u64,
     /// Its server ID.
@@ -140,6 +164,10 @@ pub struct Interest<'a> {
     pub queue: Option<&'a [u8]>,
     /// Members of the queue group; 1 for plain interest; 0 for none.
     pub weight: u32,
+    /// On a route, the leaf node cluster the interest is of: the cluster
+    /// of the leafs of the sender that have it, empty for leafs of none.
+    /// `None` for the sender's clients.
+    pub origin: Option<&'a [u8]>,
 }
 
 /// The words of `list`, a field of blank-separated words of [`Hello`].
@@ -154,8 +182,21 @@ impl Control<'_> {
             Control::Hello(h) => {
                 out.put_u8(HELLO);
                 out.put_u8(VERSION);
+                out.put_u8(match h.role {
+                    Role::Route => 0,
+                    Role::Leaf => 1,
+                    Role::Hub => 2,
+                });
+                out.put_u16_le(h.token);
                 out.put_u64_le(h.epoch);
-                for s in [h.server_id, h.name, h.cluster, h.data, h.client_urls] {
+                for s in [
+                    h.account,
+                    h.server_id,
+                    h.name,
+                    h.cluster,
+                    h.data,
+                    h.client_urls,
+                ] {
                     short(out, s);
                 }
             }
@@ -197,12 +238,12 @@ impl Interest<'_> {
         out.put_u32_le(self.weight);
         short(out, self.account);
         short(out, self.subject);
-        match self.queue {
-            Some(q) => {
-                out.put_u8(1);
-                short(out, q);
-            }
-            None => out.put_u8(0),
+        out.put_u8(
+            (u8::from(self.queue.is_some()) * INTEREST_QUEUE)
+                | (u8::from(self.origin.is_some()) * ORIGIN),
+        );
+        for s in [self.queue, self.origin].into_iter().flatten() {
+            short(out, s);
         }
     }
 }
@@ -221,8 +262,17 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
             if version != VERSION {
                 return Err(Error::Version(version));
             }
+            let role = match r.u8()? {
+                0 => Role::Route,
+                1 => Role::Leaf,
+                2 => Role::Hub,
+                t => return Err(Error::Flags(t)),
+            };
             Control::Hello(Hello {
+                role,
+                token: r.u16()?,
                 epoch: r.u64()?,
+                account: r.short()?,
                 server_id: r.short()?,
                 name: r.short()?,
                 cluster: r.short()?,
@@ -255,6 +305,12 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
 /// Publishes of one account, as a data message holds them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Batch<'a> {
+    /// Where it comes from: the token the receiver gave the sender in its
+    /// [`Hello`]; 0 from a route.
+    pub token: u16,
+    /// The leaf node cluster its publishes come from, if a leaf of the
+    /// sender sent them: empty for a leaf of none.
+    pub origin: Option<&'a [u8]>,
     /// Account name.
     pub account: &'a [u8],
     records: &'a [u8],
@@ -276,10 +332,18 @@ pub struct Record<'a> {
     pub queue: Option<&'a [u8]>,
 }
 
-/// Appends the head of a batch of `account`; [`Record::encode`] appends
-/// its publishes.
-pub fn batch(out: &mut impl BufMut, account: &[u8]) {
+/// Appends the head of a batch of `account`, with `token` and `origin`
+/// as [`Batch`] has them; [`Record::encode`] appends its publishes.
+pub fn batch(out: &mut impl BufMut, token: u16, origin: Option<&[u8]>, account: &[u8]) {
     out.put_u8(BATCH);
+    out.put_u16_le(token);
+    match origin {
+        Some(o) => {
+            out.put_u8(ORIGIN);
+            short(out, o);
+        }
+        None => out.put_u8(0),
+    }
     short(out, account);
 }
 
@@ -316,8 +380,16 @@ impl<'a> Batch<'a> {
             BATCH => {}
             k => return Err(Error::Kind(k)),
         }
+        let token = r.u16()?;
+        let origin = match r.u8()? {
+            0 => None,
+            ORIGIN => Some(r.short()?),
+            f => return Err(Error::Flags(f)),
+        };
         let account = r.short()?;
         Ok(Batch {
+            token,
+            origin,
             account,
             records: r.0,
         })
@@ -416,16 +488,20 @@ impl<'a> Reader<'a> {
         let weight = self.u32()?;
         let account = self.short()?;
         let subject = self.short()?;
-        let queue = match self.u8()? {
-            0 => None,
-            1 => Some(self.short()?),
-            t => return Err(Error::Flags(t)),
-        };
+        let flags = self.u8()?;
+        if flags & !(INTEREST_QUEUE | ORIGIN) != 0 {
+            return Err(Error::Flags(flags));
+        }
+        let queue = (flags & INTEREST_QUEUE != 0)
+            .then(|| self.short())
+            .transpose()?;
+        let origin = (flags & ORIGIN != 0).then(|| self.short()).transpose()?;
         Ok(Interest {
             account,
             subject,
             queue,
             weight,
+            origin,
         })
     }
 

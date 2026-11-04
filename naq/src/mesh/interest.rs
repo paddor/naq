@@ -73,6 +73,7 @@ impl Told {
                 subject: filter,
                 queue,
                 weight: n,
+                origin: None,
             },
         }
         .encode(&mut out);
@@ -104,6 +105,7 @@ impl Told {
                 subject,
                 queue: queue.as_deref(),
                 weight,
+                origin: None,
             }));
         }
         one(Control::SnapshotEnd { epoch: self.epoch });
@@ -270,7 +272,7 @@ fn key(i: &Interest<'_>) -> Key<Box<[u8]>> {
 mod tests {
     use std::rc::Rc;
 
-    use naq_proto::peer::{self, Hello};
+    use naq_proto::peer::{self, Hello, Role};
 
     use super::*;
     use crate::conn::Client;
@@ -278,6 +280,9 @@ mod tests {
 
     fn hello(epoch: u64) -> Control<'static> {
         Control::Hello(Hello {
+            role: Role::Route,
+            token: 0,
+            account: b"",
             epoch,
             server_id: b"N",
             name: b"n",
@@ -293,6 +298,7 @@ mod tests {
             subject,
             queue: None,
             weight,
+            origin: None,
         }
     }
 

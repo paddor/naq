@@ -168,7 +168,7 @@ pub fn peer_frames(data: &[u8]) {
     }
     if let Ok(b) = peer::Batch::parse(data) {
         let mut out = Vec::new();
-        peer::batch(&mut out, b.account);
+        peer::batch(&mut out, b.token, b.origin, b.account);
         for r in b.records() {
             let Ok(r) = r else { return };
             r.encode(&mut out);

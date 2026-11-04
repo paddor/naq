@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use naq_proto::peer::{self, Control};
+use naq_proto::peer::{self, Control, Role};
 use omq_tokio::{IdentitySocket, Message, Socket};
 use tokio::sync::Notify;
 
@@ -114,7 +114,7 @@ pub(super) async fn answer(router: Socket, cluster: &str, hello: &Bytes, mesh: &
                 let Ok(bytes) = msg.into_bytes() else { continue };
                 let who = who.to_bytes();
                 match peer::decode(&bytes) {
-                    Ok(Control::Hello(h)) if h.cluster == cluster.as_bytes() => {
+                    Ok(Control::Hello(h)) if h.role == Role::Route && h.cluster == cluster.as_bytes() => {
                         if let Some(o) = other(&ids, &others.0, who, mesh) {
                             o.greet(hello.clone());
                         }

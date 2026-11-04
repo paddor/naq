@@ -65,15 +65,19 @@ fn websocket() -> Vec<Vec<u8>> {
 
 /// Peer control messages of every kind, and a batch.
 fn peer_frames() -> Vec<Vec<u8>> {
-    use naq_proto::peer::{self, Control, Hello, Interest, Record};
+    use naq_proto::peer::{self, Control, Hello, Interest, Record, Role};
     let i = Interest {
         account: b"$G",
         subject: b"a.*",
         queue: Some(b"q"),
         weight: 2,
+        origin: Some(b"o"),
     };
     let controls = [
         Control::Hello(Hello {
+            role: Role::Leaf,
+            token: 1,
+            account: b"A",
             epoch: 1,
             server_id: b"N1",
             name: b"a",
@@ -101,7 +105,7 @@ fn peer_frames() -> Vec<Vec<u8>> {
         })
         .collect();
     let mut batch = Vec::new();
-    peer::batch(&mut batch, b"$G");
+    peer::batch(&mut batch, 1, Some(b"o"), b"$G");
     Record {
         subject: b"a.b",
         reply: Some(b"r"),

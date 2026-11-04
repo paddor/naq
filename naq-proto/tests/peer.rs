@@ -1,7 +1,7 @@
 //! The peer wire: every message decodes to what was encoded, and broken
 //! input is an error, never a panic.
 
-use naq_proto::peer::{self, Batch, Control, Error, Hello, Interest, Record};
+use naq_proto::peer::{self, Batch, Control, Error, Hello, Interest, Record, Role};
 
 fn controls() -> Vec<Control<'static>> {
     let i = Interest {
@@ -9,21 +9,46 @@ fn controls() -> Vec<Control<'static>> {
         subject: b"orders.*",
         queue: Some(b"workers"),
         weight: 3,
+        origin: None,
+    };
+    let hello = Hello {
+        role: Role::Route,
+        token: 0,
+        account: b"",
+        epoch: 7,
+        server_id: b"NABC",
+        name: b"a",
+        cluster: b"c",
+        data: b"tcp://127.0.0.1:1 tcp://127.0.0.1:2",
+        client_urls: b"127.0.0.1:4222",
     };
     vec![
+        Control::Hello(hello),
         Control::Hello(Hello {
-            epoch: 7,
-            server_id: b"NABC",
-            name: b"a",
-            cluster: b"c",
-            data: b"tcp://127.0.0.1:1 tcp://127.0.0.1:2",
-            client_urls: b"127.0.0.1:4222",
+            role: Role::Leaf,
+            token: 3,
+            account: b"A",
+            ..hello
+        }),
+        Control::Hello(Hello {
+            role: Role::Hub,
+            token: u16::MAX,
+            ..hello
         }),
         Control::SnapshotStart { epoch: 7, seq: 41 },
         Control::Entry(i),
         Control::Entry(Interest {
             queue: None,
             weight: 1,
+            ..i
+        }),
+        Control::Entry(Interest {
+            origin: Some(b"spokes"),
+            ..i
+        }),
+        Control::Entry(Interest {
+            queue: None,
+            origin: Some(b""),
             ..i
         }),
         Control::SnapshotEnd { epoch: 7 },
@@ -68,11 +93,13 @@ fn broken_control_messages_are_errors() {
         subject: b"s",
         queue: None,
         weight: 1,
+        origin: None,
     })
     .encode(&mut tag);
-    *tag.last_mut().unwrap() = 2;
-    assert_eq!(peer::decode(&tag), Err(Error::Flags(2)));
+    *tag.last_mut().unwrap() = 4;
+    assert_eq!(peer::decode(&tag), Err(Error::Flags(4)));
     assert_eq!(peer::decode(&[1, 2]), Err(Error::Version(2)));
+    assert_eq!(peer::decode(&[1, 1, 3]), Err(Error::Flags(3)));
 }
 
 #[test]
@@ -110,24 +137,29 @@ const fn records() -> [Record<'static>; 3] {
 
 #[test]
 fn a_batch_gives_its_publishes_back_in_order() {
-    let mut out = Vec::new();
-    peer::batch(&mut out, b"acct");
-    for r in records() {
-        r.encode(&mut out);
+    for (token, origin) in [(0, None), (9, Some(&b"spokes"[..])), (1, Some(b""))] {
+        let mut out = Vec::new();
+        peer::batch(&mut out, token, origin, b"acct");
+        for r in records() {
+            r.encode(&mut out);
+        }
+        let b = Batch::parse(&out).unwrap();
+        assert_eq!(
+            (b.token, b.origin, b.account),
+            (token, origin, &b"acct"[..])
+        );
+        let got: Vec<_> = b.records().map(Result::unwrap).collect();
+        assert_eq!(got, records());
     }
-    let b = Batch::parse(&out).unwrap();
-    assert_eq!(b.account, b"acct");
-    let got: Vec<_> = b.records().map(Result::unwrap).collect();
-    assert_eq!(got, records());
     let mut empty = Vec::new();
-    peer::batch(&mut empty, b"");
+    peer::batch(&mut empty, 0, None, b"");
     assert_eq!(Batch::parse(&empty).unwrap().records().count(), 0);
 }
 
 #[test]
 fn a_broken_batch_ends_in_an_error() {
     let mut out = Vec::new();
-    peer::batch(&mut out, b"acct");
+    peer::batch(&mut out, 2, Some(b"o"), b"acct");
     let head = out.len();
     for r in records() {
         r.encode(&mut out);
@@ -142,6 +174,7 @@ fn a_broken_batch_ends_in_an_error() {
         assert_eq!(Batch::parse(&out[..cut]), Err(Error::Short), "{cut}");
     }
     assert_eq!(Batch::parse(&[1]), Err(Error::Kind(1)));
+    assert_eq!(Batch::parse(&[16, 0, 0, 1]), Err(Error::Flags(1)));
     let mut broken = out[..head].to_vec();
     broken.extend_from_slice(&[0, 9, 0]);
     let all: Vec<_> = Batch::parse(&broken).unwrap().records().collect();

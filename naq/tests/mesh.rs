@@ -981,7 +981,7 @@ fn a_server_that_stops_reading_is_let_go() {
 #[test]
 fn a_server_that_asks_again_gets_a_snapshot_again() {
     use bytes::Bytes;
-    use naq_proto::peer::{self, Control, Hello};
+    use naq_proto::peer::{self, Control, Hello, Role};
     use omq_tokio::{Message, Socket};
     // The subjects of the next snapshot `d` gets, past beats.
     async fn snapshot(d: &Socket) -> Vec<String> {
@@ -1019,6 +1019,9 @@ fn a_server_that_asks_again_gets_a_snapshot_again() {
             .await
             .unwrap();
         let hello = Control::Hello(Hello {
+            role: Role::Route,
+            token: 0,
+            account: b"",
             epoch: 1,
             server_id: b"FAKE",
             name: b"fake",

@@ -140,7 +140,8 @@ impl Outs {
             let name = accounts
                 .get(self.account as usize)
                 .map_or("$G", String::as_str);
-            peer::batch(batch, name.as_bytes());
+            // A route needs no token: its batches go to no other server.
+            peer::batch(batch, 0, None, name.as_bytes());
         }
         peer::Record {
             subject: p.subject,

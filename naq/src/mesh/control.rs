@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use naq_proto::peer::{self, Control, Hello};
+use naq_proto::peer::{self, Control, Hello, Role};
 use omq_tokio::{Message, MonitorEvent, Socket, SocketType};
 
 use super::interest::Change;
@@ -32,6 +32,9 @@ impl Me {
         let urls = shared.addr.to_string();
         let mut hello = Vec::new();
         Control::Hello(Hello {
+            role: Role::Route,
+            token: 0,
+            account: b"",
             epoch,
             server_id: shared.server_id.as_bytes(),
             name: shared.opts.server_name.as_bytes(),
@@ -158,7 +161,7 @@ fn server_interest(shared: &Shared, i: usize, (account, subject, queue, weight):
 /// lanes where it takes data, if that changed. Returns whether it is of
 /// this cluster.
 fn met(shared: &Shared, mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
-    if h.cluster != me.cluster.as_bytes() {
+    if h.role != Role::Route || h.cluster != me.cluster.as_bytes() {
         return false;
     }
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
