@@ -221,7 +221,8 @@ Notable changes to naq. The format follows
   server there; each lane binds a data socket. `/routez` shows the routes
   to servers that answered. A server of another cluster name is not met;
   one that stops leaves the routes. A route that does not greet in 3 s is
-  dialed again.
+  dialed again. A server that stops reading and sending is let go after
+  3 s of silence, even while what it is told backs up.
 - `naq`: the servers of a cluster tell each other of their clients'
   interest: a snapshot on each connection, then numbered deltas and beats;
   a server that sees a gap, or a snapshot cut short, asks for a snapshot

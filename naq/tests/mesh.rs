@@ -575,6 +575,9 @@ const BLACKHOLE: u8 = 2;
 const STOPPED: u8 = 3;
 /// Reads nothing: what is sent backs up.
 const STALLED: u8 = 4;
+/// Open until the dialing side sends more after a heartbeat, then
+/// [`STALLED`].
+const STALLING: u8 = 5;
 
 impl Proxy {
     fn to(port: u16) -> Proxy {
@@ -604,30 +607,12 @@ impl Proxy {
                     .lock()
                     .unwrap()
                     .extend([c.try_clone().unwrap(), up.try_clone().unwrap()]);
-                for (mut from, mut to) in
-                    [(c.try_clone().unwrap(), up.try_clone().unwrap()), (up, c)]
-                {
+                for (from, to, dialer) in [
+                    (c.try_clone().unwrap(), up.try_clone().unwrap(), true),
+                    (up, c, false),
+                ] {
                     let state = state.clone();
-                    std::thread::spawn(move || {
-                        let mut buf = [0; 16 << 10];
-                        loop {
-                            while state.load(Ordering::Relaxed) == STALLED {
-                                std::thread::sleep(Duration::from_millis(5));
-                            }
-                            let Ok(n @ 1..) = from.read(&mut buf) else {
-                                break;
-                            };
-                            if state.load(Ordering::Relaxed) == OPEN
-                                && to.write_all(&buf[..n]).is_err()
-                            {
-                                break;
-                            }
-                        }
-                        // A blackhole tells of no end either.
-                        if state.load(Ordering::Relaxed) != BLACKHOLE {
-                            let _ = to.shutdown(std::net::Shutdown::Both);
-                        }
-                    });
+                    std::thread::spawn(move || forward(from, to, &state, dialer));
                 }
             }
         });
@@ -649,6 +634,45 @@ impl Proxy {
     fn set(&self, state: u8) {
         self.state
             .store(state, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Copies `from` to `to` as `state` says. Only the `dialer` side, from the
+/// server that connects, turns [`STALLING`] into [`STALLED`].
+fn forward(
+    mut from: TcpStream,
+    mut to: TcpStream,
+    state: &std::sync::atomic::AtomicU8,
+    dialer: bool,
+) {
+    use std::sync::atomic::Ordering;
+    // Whether this link carried a heartbeat yet.
+    let mut pinged = false;
+    let mut buf = [0; 16 << 10];
+    loop {
+        // Relaxed: a test switch, nothing else hangs on it.
+        while state.load(Ordering::Relaxed) == STALLED {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let Ok(n @ 1..) = from.read(&mut buf) else {
+            break;
+        };
+        let now = state.load(Ordering::Relaxed);
+        if matches!(now, OPEN | STALLING) && to.write_all(&buf[..n]).is_err() {
+            break;
+        }
+        if dialer {
+            // ZMTP command names come length first.
+            let ping = buf[..n].windows(5).any(|w| w == b"\x04PING");
+            if now == STALLING && pinged && !ping {
+                state.store(STALLED, Ordering::Relaxed);
+            }
+            pinged |= ping;
+        }
+    }
+    // A blackhole tells of no end either.
+    if state.load(Ordering::Relaxed) != BLACKHOLE {
+        let _ = to.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -808,6 +832,85 @@ fn a_server_that_falls_behind_holds_up_no_other() {
     until(&servers[2], "/routez", |z| {
         route_subs(z, "n1") == Some(N as u64)
     });
+}
+
+/// Remote port, state and unsent bytes of each TCP socket on local
+/// `port`, as the kernel tells them.
+#[cfg(target_os = "linux")]
+fn sockets(port: u16) -> Vec<(u16, u8, u32)> {
+    let port_of = |a: &str| u16::from_str_radix(a.rsplit(':').next().unwrap(), 16).unwrap();
+    std::fs::read_to_string("/proc/net/tcp")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (port_of(f[1]) == port).then(|| {
+                let unsent = f[4].split(':').next().unwrap();
+                (
+                    port_of(f[2]),
+                    u8::from_str_radix(f[3], 16).unwrap(),
+                    u32::from_str_radix(unsent, 16).unwrap(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// What server 1 tells a server that stops reading and sending backs up;
+/// server 1 still lets the link go.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_server_that_stops_reading_is_let_go() {
+    use std::fmt::Write as _;
+    const ESTABLISHED: u8 = 1;
+    // More than the kernel buffers on both ends hold.
+    const N: usize = 50_000;
+    let (servers, proxies) = proxied();
+    let up: Vec<Option<&Server>> = servers.iter().map(Some).collect();
+    quiet(&up, together, &[Vec::new(), Vec::new(), Vec::new()]);
+    // Server 2 reads nothing more from server 1, and sends it nothing. Its
+    // last heartbeat told how long it may stay silent, and more input came
+    // after it, so only that heartbeat can find it gone.
+    let proxy = proxies[2][1].as_ref().unwrap();
+    proxy.set(STALLING);
+    let deadline = Instant::now() + WAIT;
+    // Relaxed: the proxy's own switch.
+    while proxy.state.load(std::sync::atomic::Ordering::Relaxed) != STALLED {
+        assert!(Instant::now() < deadline, "no heartbeat");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pad = "x".repeat(200);
+    let subs = (0..N).fold(String::new(), |mut all, i| {
+        write!(all, "SUB s.{i}.{pad} {i}\r\n").unwrap();
+        all
+    });
+    let _c = client(&servers[1], &subs);
+    let port = servers[1].cluster_addr().unwrap().port();
+    let deadline = Instant::now() + 4 * WAIT;
+    let stuck = loop {
+        let now = sockets(port);
+        if let Some(&(to, ..)) = now
+            .iter()
+            .find(|&&(_, state, unsent)| state == ESTABLISHED && unsent >= 1 << 20)
+        {
+            break to;
+        }
+        assert!(Instant::now() < deadline, "nothing backs up: {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let deadline = Instant::now() + 4 * WAIT;
+    loop {
+        let now = sockets(port);
+        if !now
+            .iter()
+            .any(|&(to, state, _)| to == stuck && state == ESTABLISHED)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "still up: {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
