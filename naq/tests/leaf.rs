@@ -1156,38 +1156,92 @@ fn a_hub_named_in_an_info_is_dialed_next_with_the_credentials_configured() {
     );
 }
 
-#[test]
-fn a_leaf_fails_over_to_another_node_of_a_go_hub_cluster() {
-    let ports: Vec<[u16; 3]> = (0..2)
-        .map(|_| [free_port(), free_port(), free_port()])
-        .collect();
+/// The ports of one node of a Go hub cluster.
+#[derive(Debug, Clone, Copy)]
+struct Node {
+    client: u16,
+    route: u16,
+    leaf: u16,
+    http: u16,
+}
+
+/// A Go hub cluster of two nodes, `None` without `NAQ_GO`, once the
+/// route between them is up.
+fn go_cluster() -> Option<(Vec<GoServer>, [Node; 2])> {
+    let node = || Node {
+        client: free_port(),
+        route: free_port(),
+        leaf: free_port(),
+        http: free_port(),
+    };
+    let nodes = [node(), node()];
     // Only node b dials the route: routes dialed both ways race, and the
     // hub tells its leafs of the cluster without node b for a moment.
     let conf = |me: usize| {
-        let [route, leafport, http] = ports[me];
+        let n = nodes[me];
         let routes = if me == 1 {
-            format!("routes: [\"nats-route://127.0.0.1:{}\"]", ports[0][0])
+            format!("routes: [\"nats-route://127.0.0.1:{}\"]", nodes[0].route)
         } else {
             String::new()
         };
         format!(
-            "port: -1\nhttp_port: {http}\ncluster {{ name: c, listen: \"127.0.0.1:{route}\", {routes} }}\nleafnodes {{ listen: \"127.0.0.1:{leafport}\" }}\n"
+            "port: {}\nhttp_port: {}\ncluster {{ name: c, listen: \"127.0.0.1:{}\", {routes} }}\nleafnodes {{ listen: \"127.0.0.1:{}\" }}\n",
+            n.client, n.http, n.route, n.leaf
         )
     };
-    let Some(a) = go(&conf(0)) else {
+    let servers = vec![go(&conf(0))?, go(&conf(1)).unwrap()];
+    // A route pool: several routes to the one peer. Once it is up, node a
+    // tells of node b in its first INFO.
+    until(nodes[0].http, "/routez", |z| {
+        z["num_routes"].as_u64() > Some(0)
+    });
+    Some((servers, nodes))
+}
+
+#[test]
+fn a_leaf_fails_over_to_another_node_of_a_go_hub_cluster() {
+    let Some((mut servers, [a, b])) = go_cluster() else {
         eprintln!("skipped: NAQ_GO is not set");
         return;
     };
-    let _b = go(&conf(1)).unwrap();
-    // Once the cluster is up, node a tells of node b in its first INFO.
-    // A route pool: several routes to the one peer.
-    until(ports[0][2], "/routez", |z| {
-        z["num_routes"].as_u64() > Some(0)
-    });
-    let _leaf = leaf(&format!("nats-leaf://127.0.0.1:{}", ports[0][1]));
-    leafz_until(ports[0][2], |z| z["leafnodes"] == 1);
-    drop(a);
-    leafz_until(ports[1][2], |z| z["leafnodes"] == 1);
+    let _leaf = leaf(&format!("nats-leaf://127.0.0.1:{}", a.leaf));
+    leafz_until(a.http, |z| z["leafnodes"] == 1);
+    drop(servers.remove(0));
+    leafz_until(b.http, |z| z["leafnodes"] == 1);
+}
+
+#[test]
+fn messages_cross_a_go_hub_cluster_both_ways() {
+    let Some((_servers, [a, b])) = go_cluster() else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    // Clients of node b, the leaf on node a.
+    let mut sub = go_client(b.client, "SUB s 1\r\n");
+    let leaf = leaf(&format!("nats-leaf://127.0.0.1:{}", a.leaf));
+    leafz_until(a.http, |z| z["leafnodes"] == 1);
+    published_to_go(&leaf, &mut sub);
+    let mut mine = client(&leaf, "SUB back 1\r\nSUB jobs q 2\r\n");
+    // Node b hears of the leaf's interest through node a.
+    let mut go = go_client(b.client, "");
+    let deadline = Instant::now() + WAIT;
+    mine.w
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        go.send("PUB back 4\r\nwait\r\n");
+        let mut l = String::new();
+        if mine.r.read_line(&mut l).is_ok() && l.starts_with("MSG back 1 4") {
+            mine.line();
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing came back");
+    }
+    mine.w.set_read_timeout(Some(WAIT)).unwrap();
+    // No member in the cluster: the leaf's queue member gets the job.
+    go.send("PUB jobs 3\r\njob\r\n");
+    lines_until(&mut mine, "MSG jobs 2 3");
+    assert_eq!(mine.line(), "job");
 }
 
 #[test]
