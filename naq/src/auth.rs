@@ -13,7 +13,7 @@ use crate::{Login, Options};
 pub(crate) const GLOBAL: u32 = 0;
 
 /// The users and token clients must authenticate with.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Auth {
     /// By user name: the password or its hash, and the account id.
     users: FxHashMap<String, (String, Grant)>,
@@ -135,6 +135,20 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
     {
         return Err(format!("no_auth_user {n:?} is not a user"));
     }
+    let Some(ws) = opts.websocket.as_ref().map(|w| &w.auth) else {
+        return Ok(());
+    };
+    if ws.user.is_some() && ws.token.is_some() {
+        return Err("websocket: a token cannot go with a user".into());
+    }
+    if let Some(n) = &ws.no_auth_user {
+        if ws.user.is_some() || ws.token.is_some() {
+            return Err("websocket: no_auth_user cannot go with a user or token of its own".into());
+        }
+        if !seen.contains(&n) {
+            return Err(format!("websocket: no_auth_user {n:?} is not a user"));
+        }
+    }
     Ok(())
 }
 
@@ -204,6 +218,42 @@ impl Auth {
             no_auth_user: opts.no_auth_user.clone(),
             timeout: opts.auth_timeout,
         })
+    }
+
+    /// What WebSocket clients authenticate with, where it is not
+    /// `general`, the others': a user or token of their own, which stand
+    /// alone, or their own `no_auth_user` or timeout.
+    pub(crate) fn websocket(opts: &Options, general: Option<&Auth>) -> Option<Auth> {
+        let ws = &opts.websocket.as_ref()?.auth;
+        let timeout = ws.timeout.unwrap_or(opts.auth_timeout);
+        if ws.user.is_some() || ws.token.is_some() {
+            // As `nats-server`, without permissions: those come with users.
+            let grant = Grant {
+                account: GLOBAL,
+                perms: None,
+            };
+            let users = ws
+                .user
+                .iter()
+                .map(|(u, p)| (u.clone(), (p.clone(), grant.clone())));
+            return Some(Auth {
+                users: users.collect(),
+                nkeys: FxHashMap::default(),
+                token_grant: grant,
+                token: ws.token.clone(),
+                no_auth_user: None,
+                timeout,
+            });
+        }
+        if ws.no_auth_user.is_none() && ws.timeout.is_none() {
+            return None;
+        }
+        let mut auth = general?.clone();
+        if ws.no_auth_user.is_some() {
+            auth.no_auth_user.clone_from(&ws.no_auth_user);
+        }
+        auth.timeout = timeout;
+        Some(auth)
     }
 
     /// Whether clients may connect without credentials, as the
@@ -465,6 +515,72 @@ mod tests {
         validate(&opts).unwrap();
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
         assert_eq!(auth.check(&Creds::default(), b"x"), pass(GLOBAL));
+    }
+
+    #[test]
+    fn websocket_clients_may_log_in_otherwise() {
+        let accounts = ["$G".to_owned()];
+        let with = |ws: crate::WebsocketAuth| Options {
+            users: vec![user("al", "pa", None), user("bo", "pb", None)],
+            no_auth_user: Some("al".into()),
+            auth_timeout: Duration::from_secs(5),
+            websocket: Some(crate::Websocket {
+                auth: ws,
+                ..crate::Websocket::default()
+            }),
+            ..Options::default()
+        };
+        let none = with(crate::WebsocketAuth::default());
+        assert!(Auth::websocket(&none, Auth::new(&none, &accounts).as_ref()).is_none());
+
+        // A user of their own stands alone: the others' do not pass.
+        let o = with(crate::WebsocketAuth {
+            user: Some(("web".into(), "pw".into())),
+            timeout: Some(Duration::from_secs(1)),
+            ..crate::WebsocketAuth::default()
+        });
+        let ws = Auth::websocket(&o, Auth::new(&o, &accounts).as_ref()).unwrap();
+        assert_eq!(
+            ws.check(&creds(Some("web"), Some("pw"), None), b""),
+            pass(0)
+        );
+        assert_eq!(
+            ws.check(&creds(Some("al"), Some("pa"), None), b""),
+            Check::Fail
+        );
+        assert_eq!(ws.check(&Creds::default(), b""), Check::Fail);
+        assert_eq!(ws.timeout, Duration::from_secs(1));
+
+        let o = with(crate::WebsocketAuth {
+            token: Some("t".into()),
+            ..crate::WebsocketAuth::default()
+        });
+        let ws = Auth::websocket(&o, None).unwrap();
+        assert_eq!(ws.check(&creds(None, None, Some("t")), b""), pass(0));
+        assert_eq!(ws.timeout, Duration::from_secs(5));
+
+        // A no_auth_user of their own, among the same users.
+        let o = with(crate::WebsocketAuth {
+            no_auth_user: Some("bo".into()),
+            ..crate::WebsocketAuth::default()
+        });
+        let general = Auth::new(&o, &accounts);
+        let ws = Auth::websocket(&o, general.as_ref()).unwrap();
+        assert_eq!(ws.no_auth_user.as_deref(), Some("bo"));
+        assert_eq!(ws.check(&creds(Some("al"), Some("pa"), None), b""), pass(0));
+        assert!(validate(&o).is_ok());
+
+        // A timeout alone, where clients authenticate at all.
+        let o = with(crate::WebsocketAuth {
+            timeout: Some(Duration::from_secs(1)),
+            ..crate::WebsocketAuth::default()
+        });
+        let ws = Auth::websocket(&o, Auth::new(&o, &accounts).as_ref()).unwrap();
+        assert_eq!(
+            (ws.timeout, ws.no_auth_user.as_deref()),
+            (Duration::from_secs(1), Some("al"))
+        );
+        assert!(Auth::websocket(&o, None).is_none());
     }
 
     #[test]

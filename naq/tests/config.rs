@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use naq::{Error, Options};
+use naq::{Error, Options, WebsocketAuth};
 
 /// A directory of its own for test `name`.
 fn dir(name: &str) -> PathBuf {
@@ -365,6 +365,37 @@ fn the_websocket_block_sets_its_own_port() {
 }
 
 #[test]
+fn websocket_clients_may_have_credentials_of_their_own() {
+    let o: Options = "authorization { users [ {user: a, password: b} ] }\n\
+        websocket {\n  port: 1\n  no_tls: true\n  advertise: \"ws.example:443\"\n  \
+        no_auth_user: a\n  authorization { timeout: 0.5 }\n}\n"
+        .parse()
+        .unwrap();
+    let want = WebsocketAuth {
+        no_auth_user: Some("a".into()),
+        timeout: Some(Duration::from_millis(500)),
+        ..WebsocketAuth::default()
+    };
+    assert_eq!(o.websocket.unwrap().auth, want);
+    let o: Options =
+        "websocket { port: 1, no_tls: true, authentication { username: u, pass: p, timeout: 0 } }"
+            .parse()
+            .unwrap();
+    let want = WebsocketAuth {
+        user: Some(("u".into(), "p".into())),
+        ..WebsocketAuth::default()
+    };
+    assert_eq!(o.websocket.unwrap().auth, want);
+    let o: Options = "websocket { port: 1, no_tls: true, authorization { user: u } }"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        o.websocket.unwrap().auth.user,
+        Some(("u".into(), String::new()))
+    );
+}
+
+#[test]
 fn websocket_settings_that_cannot_run_are_an_error() {
     for (text, reason) in [
         (
@@ -379,6 +410,59 @@ fn websocket_settings_that_cannot_run_are_an_error() {
             "websocket { port: 1, no_tls: true, headers { Upgrade: x } }",
             "websocket: invalid header \"Upgrade\" not allowed",
         ),
+        (
+            "websocket { port: 1, no_tls: true, authorization { user: u, token: t } }",
+            "websocket: a token cannot go with a user",
+        ),
+        (
+            "authorization { users [ {user: a, password: b} ] }\n\
+             websocket { port: 1, no_tls: true, no_auth_user: a, authorization { token: t } }",
+            "websocket: no_auth_user cannot go with a user or token of its own",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, no_auth_user: x }",
+            "websocket: no_auth_user \"x\" is not a user",
+        ),
+    ] {
+        let e = text.parse::<Options>().unwrap_err();
+        assert!(
+            matches!(&e, Error::Config { reason: r, .. } if r == reason),
+            "{text}: {e}"
+        );
+    }
+}
+
+#[test]
+fn websocket_credentials_naq_cannot_use_are_an_error() {
+    for (text, reason) in [
+        (
+            "websocket { port: 1, no_tls: true, jwt_cookie: j }",
+            "websocket: jwt_cookie: trusted operators or trusted keys configuration is required for JWT authentication via cookie \"j\"",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, advertise: 1 }",
+            "websocket: advertise: expected a string",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, authorization: 1 }",
+            "websocket: authorization: expected a map",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, authorization { pass: p } }",
+            "websocket: authorization: password without user",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, authorization { users: [] } }",
+            "websocket: authorization: users: not supported",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, authorization { timeout: x } }",
+            "websocket: authorization: timeout: expected seconds or a duration",
+        ),
+        (
+            "websocket { port: 1, no_tls: true, authorization { token: 1 } }",
+            "websocket: authorization: token: expected a string",
+        ),
     ] {
         let e = text.parse::<Options>().unwrap_err();
         assert!(
@@ -392,20 +476,8 @@ fn websocket_settings_that_cannot_run_are_an_error() {
 fn websocket_settings_naq_cannot_use_are_an_error() {
     for (text, reason) in [
         (
-            "websocket { port: 1, no_tls: true, jwt_cookie: j }",
-            "websocket: jwt_cookie: not supported",
-        ),
-        (
-            "websocket { port: 1, no_tls: true, advertise: a }",
-            "websocket: advertise: not supported",
-        ),
-        (
-            "websocket { port: 1, no_tls: true, no_auth_user: a }",
-            "websocket: no_auth_user: not supported",
-        ),
-        (
-            "websocket { port: 1, no_tls: true, authorization { token: t } }",
-            "websocket: authorization: not supported",
+            "websocket { port: 1, no_tls: true, bogus: 1 }",
+            "websocket: bogus: not supported",
         ),
         (
             "websocket { port: 70000 }",

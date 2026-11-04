@@ -1,0 +1,29 @@
+# A no_auth_user of their own for WebSocket clients.
+#! authorization { users [
+#!   { user: al, password: pa, permissions: { publish: "a.>" } }
+#!   { user: bo, password: pb, permissions: { publish: "b.>" } }
+#! ] }
+#! no_auth_user: al
+#! websocket { port: $WS_PORT, no_tls: true, no_auth_user: bo }
+
+# Without credentials: over TCP as al, over WebSocket as bo.
+a> CONNECT {"verbose":false}
+a> PUB a.x 1
+a> y
+a> PUB b.x 1
+a> y
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< -ERR 'Permissions Violation for Publish to "b.x"'
+ws> CONNECT {"verbose":false}
+ws> PUB a.x 1
+ws> y
+ws> PUB b.x 1
+ws> y
+ws< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< -ERR 'Permissions Violation for Publish to "a.x"'
+
+# Users log in as themselves either way.
+ws2> CONNECT {"verbose":false,"user":"al","pass":"pa"}
+ws2> PUB a.x 1
+ws2> y
+ws2< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}

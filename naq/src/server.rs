@@ -35,6 +35,8 @@ pub(crate) struct Shared {
     pub(crate) accounts: Box<[String]>,
     /// What clients must authenticate with, if anything.
     pub(crate) auth: Option<Auth>,
+    /// What WebSocket clients authenticate with, where it is not `auth`.
+    ws_auth: Option<Auth>,
     /// Message counts of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
     /// Slow consumers and stale clients so far.
@@ -51,6 +53,14 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// What clients authenticate with, over WebSocket if `ws`, if anything.
+    pub(crate) const fn auth_for(&self, ws: bool) -> Option<&Auth> {
+        match &self.ws_auth {
+            Some(a) if ws => Some(a),
+            _ => self.auth.as_ref(),
+        }
+    }
+
     /// A new client ID, unique in this server. IDs start at 1.
     pub(crate) fn next_client(&self) -> u64 {
         // Relaxed: IDs only need to be distinct.
@@ -95,6 +105,7 @@ impl Server {
         let (tls, ws_tls) = check(opts)?;
         let accounts = auth::accounts(opts);
         let auth = Auth::new(opts, &accounts);
+        let ws_auth = Auth::websocket(opts, auth.as_ref());
         let ctx = Context::with_config(&Config {
             io_threads: lanes(opts.lanes),
             name: "naq".into(),
@@ -119,6 +130,7 @@ impl Server {
             lanes: txs.into_boxed_slice(),
             accounts,
             auth,
+            ws_auth,
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
             events: stats::Events::default(),
             started: std::time::SystemTime::now(),

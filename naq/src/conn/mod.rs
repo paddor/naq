@@ -270,8 +270,7 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
     let client = Rc::new(Client::new(lane.shared.next_client()));
     let nonce = lane
         .shared
-        .auth
-        .as_ref()
+        .auth_for(ws)
         .filter(|a| a.wants_nonce())
         .map(|_| crate::auth::nonce().into_boxed_str());
     let mut info = Vec::new();
@@ -336,7 +335,7 @@ where
     let now = tokio::time::Instant::now();
     let ws_ping = via.ws.then(|| lane.shared.ws.as_ref()?.opts.ping_interval);
     let ping = ping::Pinger::new(now, ws_ping.flatten().unwrap_or(opts.ping_interval));
-    let auth_by = lane.shared.auth.as_ref().map(|a| now + a.timeout);
+    let auth_by = lane.shared.auth_for(via.ws).map(|a| now + a.timeout);
     let fwd = (0..lane.lanes()).map(|_| Out::default()).collect();
     let ip = client.meta.borrow().ip.clone();
     let mut conn = Conn {

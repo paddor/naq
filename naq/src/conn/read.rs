@@ -293,7 +293,7 @@ impl Conn {
             (meta.name, meta.lang, meta.version) = names;
         }
         self.client.headers.set(self.opts.headers);
-        if let Some(auth) = &self.lane.shared.auth {
+        if let Some(auth) = self.lane.shared.auth_for(self.via.ws) {
             let nonce = self.nonce.as_deref().unwrap_or_default();
             match auth.check(&creds, nonce.as_bytes()) {
                 Check::Pass(account) => self.bind(account),
@@ -310,7 +310,7 @@ impl Conn {
     #[cold]
     #[inline(never)]
     fn without_connect(&mut self) -> Result<(), Close> {
-        let auth = self.lane.shared.auth.as_ref();
+        let auth = self.lane.shared.auth_for(self.via.ws);
         match auth.map(|a| a.check(&Creds::default(), b"")) {
             Some(Check::Pass(account)) => {
                 self.bind(account);

@@ -2,13 +2,14 @@
 
 use super::parse::{Item, Value};
 use super::{Bad, duration, string};
-use crate::Websocket;
+use crate::{Websocket, WebsocketAuth};
 
 /// `websocket { listen, host, port, no_tls, tls, same_origin,
 /// allowed_origins, handshake_timeout, compression, headers,
-/// ping_interval, user_cookie, pass_cookie, token_cookie }`. Without a
-/// port, or with port 0, there is none, as in `nats-server`; -1 picks a
-/// free one.
+/// ping_interval, user_cookie, pass_cookie, token_cookie, authorization,
+/// no_auth_user, advertise }`. Without a port, or with port 0, there is
+/// none, as in `nats-server`; -1 picks a free one. `advertise` changes
+/// nothing on one server: only a cluster tells clients about it.
 pub(super) fn websocket(item: &Item) -> Result<Option<Websocket>, Bad> {
     let Value::Map(m) = &item.value else {
         return Err((item.line, "websocket: expected a map".into()));
@@ -53,10 +54,57 @@ pub(super) fn websocket(item: &Item) -> Result<Option<Websocket>, Bad> {
             "user_cookie" => w.cookies.user = Some(text()?),
             "pass_cookie" => w.cookies.pass = Some(text()?),
             "token_cookie" => w.cookies.token = Some(text()?),
+            "authorization" | "authentication" => auth(&mut w.auth, v)?,
+            "no_auth_user" => w.auth.no_auth_user = Some(text()?),
+            "advertise" => drop(text()?),
+            // Without trusted operators, as naq has none, `nats-server`
+            // refuses it too.
+            "jwt_cookie" => {
+                return Err(bad(&format!(
+                    "trusted operators or trusted keys configuration is required for JWT authentication via cookie {:?}",
+                    text()?
+                )));
+            }
             _ => return Err(bad("not supported")),
         }
     }
     Ok(on.then_some(w))
+}
+
+/// `authorization { user, password, token, timeout }` of the `websocket`
+/// block. A timeout of 0 leaves the server's, as in `nats-server`.
+fn auth(a: &mut WebsocketAuth, item: &Item) -> Result<(), Bad> {
+    let Value::Map(m) = &item.value else {
+        return Err((item.line, "websocket: authorization: expected a map".into()));
+    };
+    let (mut user, mut password) = (None, None);
+    for (k, v) in m {
+        let k = k.to_ascii_lowercase();
+        let bad = |reason: &str| (v.line, format!("websocket: authorization: {k}: {reason}"));
+        let text = || string(v).ok_or_else(|| bad("expected a string"));
+        match k.as_str() {
+            "user" | "username" => user = Some(text()?),
+            "pass" | "password" => password = Some(text()?),
+            "token" => a.token = Some(text()?),
+            "timeout" => {
+                let t =
+                    super::auth::timeout(v).ok_or_else(|| bad("expected seconds or a duration"))?;
+                a.timeout = (!t.is_zero()).then_some(t);
+            }
+            _ => return Err(bad("not supported")),
+        }
+    }
+    match (user, password) {
+        (Some(user), password) => a.user = Some((user, password.unwrap_or_default())),
+        (None, Some(_)) => {
+            return Err((
+                item.line,
+                "websocket: authorization: password without user".into(),
+            ));
+        }
+        (None, None) => {}
+    }
+    Ok(())
 }
 
 /// A port, or -1 for a free one.

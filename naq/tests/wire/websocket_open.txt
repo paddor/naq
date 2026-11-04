@@ -1,0 +1,10 @@
+# The no_auth_user lets WebSocket clients in too, but their INFO asks for
+# credentials all the same.
+#! authorization { users [ { user: al, password: pa } ] }
+#! no_auth_user: al
+#! websocket { port: $WS_PORT, no_tls: true }
+
+ws> CONNECT {"verbose":false}
+ws< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a> CONNECT {"verbose":false}
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}

@@ -217,6 +217,8 @@ pub struct Websocket {
     pub ping_interval: Option<Duration>,
     /// Cookies that carry credentials for a `CONNECT` without them.
     pub cookies: Cookies,
+    /// Credentials of WebSocket clients in place of the server's.
+    pub auth: WebsocketAuth,
 }
 
 impl Default for Websocket {
@@ -233,6 +235,7 @@ impl Default for Websocket {
             headers: Vec::new(),
             ping_interval: None,
             cookies: Cookies::default(),
+            auth: WebsocketAuth::default(),
         }
     }
 }
@@ -248,4 +251,27 @@ pub struct Cookies {
     pub pass: Option<String>,
     /// The cookie with the token.
     pub token: Option<String>,
+}
+
+/// Credentials of WebSocket clients in place of the server's (the
+/// `websocket` block's `authorization` and `no_auth_user`), as in
+/// `nats-server`. With any of `user`, `token` or `no_auth_user`, WebSocket
+/// clients must authenticate, and the server's own credentials stand in
+/// for them as follows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebsocketAuth {
+    /// The user WebSocket clients log in as, with its password, plain or a
+    /// bcrypt hash (`authorization { user, password }`). With it or
+    /// [`WebsocketAuth::token`], they log in with these alone: not with
+    /// [`Options::users`] or [`Options::token`].
+    pub user: Option<(String, String)>,
+    /// The token WebSocket clients give (`authorization { token }`).
+    pub token: Option<String>,
+    /// The user a WebSocket client that gives no credentials connects as,
+    /// one of [`Options::users`], in place of [`Options::no_auth_user`]
+    /// (`no_auth_user`).
+    pub no_auth_user: Option<String>,
+    /// How long a WebSocket client has to authenticate, in place of
+    /// [`Options::auth_timeout`] (`authorization { timeout }`).
+    pub timeout: Option<Duration>,
 }

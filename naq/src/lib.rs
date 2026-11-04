@@ -50,5 +50,7 @@ mod tls;
 mod ws;
 
 pub use error::Error;
-pub use options::{Cookies, Login, Options, Permissions, Responses, Rules, Tls, User, Websocket};
+pub use options::{
+    Cookies, Login, Options, Permissions, Responses, Rules, Tls, User, Websocket, WebsocketAuth,
+};
 pub use server::Server;

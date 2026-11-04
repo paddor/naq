@@ -1,0 +1,24 @@
+# A user of their own for WebSocket clients: they log in with it alone.
+#! authorization { user: tcp, password: pt }
+#! websocket { port: $WS_PORT, no_tls: true, authorization { user: web, password: pw } }
+
+# Over WebSocket, the WebSocket user passes.
+ws> CONNECT {"verbose":false,"user":"web","pass":"pw"}
+ws> PUB x 1
+ws> y
+ws< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+
+# The server's own user does not.
+ws2> CONNECT {"verbose":false,"user":"tcp","pass":"pt"}
+ws2< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws2< -ERR 'Authorization Violation'
+ws2< (close 1008 Authentication Failure)
+ws2< (closed)
+
+# Over TCP it is the other way round.
+a> CONNECT {"verbose":false,"user":"tcp","pass":"pt"}
+a< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b> CONNECT {"verbose":false,"user":"web","pass":"pw"}
+b< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+b< -ERR 'Authorization Violation'
+b< (closed)

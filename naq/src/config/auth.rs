@@ -148,7 +148,7 @@ fn map<'i>(item: &'i Item, what: &str) -> Result<&'i [(String, Item)], Bad> {
 }
 
 /// Seconds, whole or not, or a duration.
-fn timeout(item: &Item) -> Option<Duration> {
+pub(super) fn timeout(item: &Item) -> Option<Duration> {
     match &item.value {
         Value::Int(n) => u64::try_from(*n).ok().map(Duration::from_secs),
         Value::Float(f) => Duration::try_from_secs_f64(*f).ok(),

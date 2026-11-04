@@ -131,6 +131,12 @@ Notable changes to naq. The format follows
   of medians and ratios follows. The perf gate (`--gate`) fails when
   naq's rate over `nats-server`'s on one publisher to one subscriber falls
   below a floor, or when the runs spread too wide to tell.
+- `naq`: WebSocket clients' own credentials (`Websocket::auth`,
+  `WebsocketAuth`; `authorization` and `no_auth_user` in the `websocket`
+  block), as in `nats-server`: a user or token of their own stands in for
+  the server's users and token, a `no_auth_user` for the server's, and a
+  timeout for its own. `advertise` is accepted; `jwt_cookie` is refused, as
+  `nats-server` refuses it without trusted operators.
 
 ### Changed
 
@@ -147,3 +153,5 @@ Notable changes to naq. The format follows
   buffered no longer waits for the client's next output.
 - `naq`: the IPv4 wildcard host `0.0.0.0` binds as `[::]`, so IPv6
   clients get in too, as with `nats-server`.
+- `naq`: a WebSocket client's `INFO` asks for credentials where a
+  `no_auth_user` lets it in without, as `nats-server` asks.

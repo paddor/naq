@@ -157,11 +157,11 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
         tls_available: tls && ws.is_some(),
         tls_verify: shared.tls.as_ref().is_some_and(|t| t.verify),
         // Before the CONNECT, a client need not authenticate if it may
-        // connect as the no_auth_user.
+        // connect as the no_auth_user; over WebSocket, `nats-server` asks
+        // all the same.
         auth_required: shared
-            .auth
-            .as_ref()
-            .is_some_and(|a| bound.is_some() || !a.open()),
+            .auth_for(to.ws)
+            .is_some_and(|a| bound.is_some() || to.ws || !a.open()),
         bound: bound.is_some(),
         remote_account: bound,
     };

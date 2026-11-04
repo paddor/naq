@@ -1,0 +1,11 @@
+# A timeout of their own for WebSocket clients.
+#! authorization { user: a, password: b, timeout: 5 }
+#! websocket { port: $WS_PORT, no_tls: true, authorization { timeout: 0.5 } }
+
+# No CONNECT in time: an empty frame, then nothing.
+ws~
+ws!
+ws< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+ws< -ERR 'Authentication Timeout'
+ws< (close 1008 Authentication Timeout)
+ws< (closed)
