@@ -51,6 +51,8 @@ pub(crate) struct Shared {
     pub(crate) tls: Option<crate::tls::Acceptor>,
     /// The WebSocket port, if there is one.
     pub(crate) ws: Option<crate::ws::Door>,
+    /// TLS to the hub of each leaf node remote.
+    pub(crate) leaf_tls: Box<[crate::leaf::Connector]>,
     next_client: AtomicU64,
 }
 
@@ -104,7 +106,7 @@ impl Server {
     /// [`Error::Listen`] if the client, WebSocket or monitoring port cannot
     /// be bound.
     pub fn start(opts: &Options) -> Result<Server, Error> {
-        let (tls, ws_tls) = check(opts)?;
+        let setup = check(opts)?;
         let accounts = auth::accounts(opts);
         let auth = Auth::new(opts, &accounts);
         let ws_auth = Auth::websocket(opts, auth.as_ref());
@@ -138,16 +140,17 @@ impl Server {
             events: stats::Events::default(),
             started: std::time::SystemTime::now(),
             gone: AtomicU64::new(0),
-            tls,
+            tls: setup.tls,
             ws: opts
                 .websocket
                 .clone()
                 .zip(ws_addr)
                 .map(|(opts, addr)| crate::ws::Door {
                     opts,
-                    tls: ws_tls,
+                    tls: setup.ws_tls,
                     addr,
                 }),
+            leaf_tls: setup.leaf_tls,
             next_client: AtomicU64::new(1),
         });
         let ports = Ports {
@@ -180,9 +183,19 @@ impl Server {
     }
 }
 
-/// Checks `opts` and reads the TLS files they name: for the client port
-/// and for the WebSocket port.
-fn check(opts: &Options) -> Result<(Option<Acceptor>, Option<Acceptor>), Error> {
+/// TLS as the options set it up, its files read.
+struct Setup {
+    /// For the client port.
+    tls: Option<Acceptor>,
+    /// For the WebSocket port.
+    ws_tls: Option<Acceptor>,
+    /// For each leaf node remote.
+    leaf_tls: Box<[crate::leaf::Connector]>,
+}
+
+/// Checks `opts` and reads the TLS files they name: for the client port,
+/// the WebSocket port and the leaf node remotes.
+fn check(opts: &Options) -> Result<Setup, Error> {
     auth::validate(opts).map_err(Error::Options)?;
     crate::leaf::validate(opts).map_err(Error::Options)?;
     if let Some(w) = &opts.websocket {
@@ -195,7 +208,16 @@ fn check(opts: &Options) -> Result<(Option<Acceptor>, Option<Acceptor>), Error> 
         .and_then(|w| w.tls.as_ref())
         .map(Acceptor::new)
         .transpose()?;
-    Ok((tls, ws_tls))
+    let leaf_tls = opts
+        .remotes
+        .iter()
+        .map(crate::leaf::Connector::new)
+        .collect::<Result<_, _>>()?;
+    Ok(Setup {
+        tls,
+        ws_tls,
+        leaf_tls,
+    })
 }
 
 /// The listeners of a server, bound.

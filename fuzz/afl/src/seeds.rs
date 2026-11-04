@@ -19,7 +19,7 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
             "accounts { A { users: [{user: x, password: y}] } }\nno_auth_user: x\n",
             "tls { cert_file: a.pem, key_file: b.pem, timeout: 0.5 }\nhttp_port: 8222\n",
             "a = [1, 2k, 3MB, -4, 1.5, yes, 'q', \"e\\t\"]\nb { c: $a }\n",
-            "leafnodes { reconnect: 2s, remotes: [{url: \"nats-leaf://h:7422\", creds: u.creds}, {urls: [a], seed: SUA, account: A}] }\n",
+            "leafnodes { reconnect: 2s, remotes: [{url: \"nats-leaf://h:7422\", creds: u.creds}, {urls: [a], seed: SUA, account: A, tls { ca_file: c.pem, timeout: 1.5, handshake_first: true }}] }\n",
         ],
         "leaf_wire" => &[
             "INFO {\"server_id\":\"h\",\"nonce\":\"abc\",\"info_on_connect\":true} \r\nPING\r\n",

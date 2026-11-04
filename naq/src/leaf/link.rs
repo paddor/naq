@@ -9,9 +9,8 @@ use naq_proto::client::{Limits, Pub};
 use naq_proto::encode;
 use naq_proto::leaf::{self, LeafOp, Parsed};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
@@ -81,10 +80,10 @@ struct State {
     delay: End,
 }
 
-/// A link's read side.
-struct Link<'l> {
+/// A link's read side: the whole stream until the handshake is done.
+struct Link<'l, R> {
     lane: &'l Rc<Lane>,
-    r: OwnedReadHalf,
+    io: R,
     buf: BytesMut,
     limits: Limits,
     /// Messages of the hub for each other lane, from the last read.
@@ -93,47 +92,139 @@ struct Link<'l> {
     stalled: Option<Rc<Client>>,
 }
 
-/// Dials the hub at `url` for remote `remote`, serves the link and returns
-/// how it ended.
-pub(super) async fn session(lane: &Rc<Lane>, remote: usize, url: &HubUrl) -> Ended {
+/// Dials the hub at `url`, one of `urls`, for remote `remote`, serves the
+/// link and returns how it ended. TLS comes first, after the hub's first
+/// `INFO`, or not at all, as remote and hub say.
+pub(super) async fn session(
+    lane: &Rc<Lane>,
+    remote: usize,
+    url: &HubUrl,
+    urls: &[HubUrl],
+) -> Ended {
     let dial = timeout(DIAL, TcpStream::connect((url.host.as_str(), url.port)));
-    let Ok(Ok(stream)) = dial.await else {
+    let Ok(Ok(mut tcp)) = dial.await else {
         return Ended::Unreached;
     };
-    let _ = stream.set_nodelay(true);
-    let (r, mut w) = stream.into_split();
-    let opts = &lane.shared.opts;
-    let mut link = Link {
-        lane,
-        r,
-        buf: lane.reads.take(conn::READ_CHUNK),
-        // `nats-server` allows a leaf link 16 control lines.
-        limits: Limits {
-            max_control_line: opts.max_control_line.saturating_mul(16),
-            max_payload: opts.max_payload,
-        },
-        fwd: (0..lane.lanes()).map(|_| Out::default()).collect(),
-        stalled: None,
-    };
-    let delay = match link.handshake(remote, url, &mut w).await {
-        Ok(headers) => link.serve(remote, w, headers).await,
-        Err(delay) => delay,
+    let _ = tcp.set_nodelay(true);
+    let tls = &lane.shared.leaf_tls[remote];
+    let mut buf = lane.reads.take(conn::READ_CHUNK);
+    let delay = if tls.first() {
+        match tls.connect(tcp, url, urls).await {
+            Some(s) => Link::new(lane, s, buf).run(remote, url, None).await,
+            None => End::ZERO,
+        }
+    } else {
+        let limits = limits(lane);
+        match timeout(FIRST_INFO, info(&mut tcp, &mut buf, &limits, lane)).await {
+            Ok(Ok(first)) if tls.after_info(first.tls_required) => {
+                match tls.connect(tcp, url, urls).await {
+                    Some(s) => Link::new(lane, s, buf).run(remote, url, Some(first)).await,
+                    None => End::ZERO,
+                }
+            }
+            Ok(Ok(first)) => {
+                Link::new(lane, tcp, buf)
+                    .run(remote, url, Some(first))
+                    .await
+            }
+            Ok(Err(delay)) => delay,
+            Err(_) => End::ZERO,
+        }
     };
     Ended::Closed { delay }
 }
 
-impl Link<'_> {
-    /// The hub's `INFO`, the `CONNECT`, and the `INFO` that answers it.
-    /// Returns whether the link carries header blocks.
+/// Limits of a link: `nats-server` allows it 16 control lines.
+fn limits(lane: &Lane) -> Limits {
+    let opts = &lane.shared.opts;
+    Limits {
+        max_control_line: opts.max_control_line.saturating_mul(16),
+        max_payload: opts.max_payload,
+    }
+}
+
+/// Reads up to the next `INFO` from `io` into `buf`, answering `PING`s on
+/// the way.
+async fn info<S>(
+    io: &mut S,
+    buf: &mut BytesMut,
+    limits: &Limits,
+    lane: &Lane,
+) -> Result<HubInfo, End>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        match leaf::parse(buf, limits) {
+            Ok(Parsed::Op(op, used)) => {
+                let info = match op {
+                    LeafOp::Info(json) => {
+                        Some(serde_json::from_slice(json).map_err(|_| End::ZERO)?)
+                    }
+                    LeafOp::Ping => {
+                        io.write_all(encode::PONG).await.map_err(|_| End::ZERO)?;
+                        None
+                    }
+                    LeafOp::Err(text) => return Err(err_delay(text)),
+                    _ => None,
+                };
+                buf.advance(used);
+                if let Some(info) = info {
+                    return Ok(info);
+                }
+            }
+            Ok(Parsed::Partial(need)) => {
+                conn::make_room(buf, need, &lane.reads);
+                match io.read_buf(buf).await {
+                    Ok(0) | Err(_) => return Err(End::ZERO),
+                    Ok(_) => {}
+                }
+            }
+            Err(_) => return Err(End::ZERO),
+        }
+    }
+}
+
+impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
+    /// A link of `lane` over `io`, with what was read of it in `buf`.
+    fn new(lane: &'l Rc<Lane>, io: S, buf: BytesMut) -> Self {
+        Link {
+            lane,
+            io,
+            buf,
+            limits: limits(lane),
+            fwd: (0..lane.lanes()).map(|_| Out::default()).collect(),
+            stalled: None,
+        }
+    }
+
+    /// The handshake for remote `remote` with the hub at `url`, after its
+    /// `first` INFO if read already, then the link until it ends.
+    async fn run(mut self, remote: usize, url: &HubUrl, first: Option<HubInfo>) -> End {
+        match self.handshake(remote, url, first).await {
+            Ok(headers) => {
+                let (mut link, w) = self.split();
+                link.serve(remote, w, headers).await
+            }
+            Err(delay) => delay,
+        }
+    }
+
+    /// The checks of the hub's `first` INFO, read here unless given, the
+    /// `CONNECT`, and the `INFO` that answers it. Returns whether the link
+    /// carries header blocks.
     async fn handshake(
         &mut self,
         remote: usize,
         url: &HubUrl,
-        w: &mut OwnedWriteHalf,
+        first: Option<HubInfo>,
     ) -> Result<bool, End> {
-        let info = timeout(FIRST_INFO, self.info(w))
-            .await
-            .map_err(|_| End::ZERO)??;
+        let info = match first {
+            Some(info) => info,
+            None => timeout(FIRST_INFO, self.info())
+                .await
+                .map_err(|_| End::ZERO)??,
+        };
         if info.client_id == 0 || (!info.info_on_connect && info.leafnode_urls.is_empty()) {
             // A client port, not a leaf node port.
             return Err(End::ZERO);
@@ -141,11 +232,7 @@ impl Link<'_> {
         if let Some(text) = info.cluster.as_deref().and_then(cluster_error) {
             let mut out = Vec::new();
             encode::err(&mut out, text);
-            let _ = w.write_all(&out).await;
-            return Err(End::ZERO);
-        }
-        if info.tls_required {
-            // TLS to hubs comes later.
+            let _ = self.io.write_all(&out).await;
             return Err(End::ZERO);
         }
         let opts = &self.lane.shared.opts;
@@ -170,8 +257,8 @@ impl Link<'_> {
         };
         let mut out = Vec::new();
         leaf::connect(&mut out, &serde_json::to_vec(&connect).unwrap_or_default());
-        w.write_all(&out).await.map_err(|_| End::ZERO)?;
-        let answer = timeout(CONNECT_INFO, self.info(w))
+        self.io.write_all(&out).await.map_err(|_| End::ZERO)?;
+        let answer = timeout(CONNECT_INFO, self.info())
             .await
             .map_err(|_| End::ZERO)??;
         if !answer.connect_info {
@@ -181,45 +268,35 @@ impl Link<'_> {
     }
 
     /// Reads up to the next `INFO`, answering `PING`s on the way.
-    async fn info(&mut self, w: &mut OwnedWriteHalf) -> Result<HubInfo, End> {
-        loop {
-            match leaf::parse(&self.buf, &self.limits) {
-                Ok(Parsed::Op(op, used)) => {
-                    let info = match op {
-                        LeafOp::Info(json) => {
-                            Some(serde_json::from_slice(json).map_err(|_| End::ZERO)?)
-                        }
-                        LeafOp::Ping => {
-                            w.write_all(encode::PONG).await.map_err(|_| End::ZERO)?;
-                            None
-                        }
-                        LeafOp::Err(text) => return Err(err_delay(text)),
-                        _ => None,
-                    };
-                    self.buf.advance(used);
-                    if let Some(info) = info {
-                        return Ok(info);
-                    }
-                }
-                Ok(Parsed::Partial(need)) => self.read(need).await?,
-                Err(_) => return Err(End::ZERO),
-            }
-        }
+    async fn info(&mut self) -> Result<HubInfo, End> {
+        info(&mut self.io, &mut self.buf, &self.limits, self.lane).await
     }
 
-    /// Reads more, for an operation of `need` bytes if known.
-    async fn read(&mut self, need: Option<usize>) -> Result<(), End> {
-        conn::make_room(&mut self.buf, need, &self.lane.reads);
-        match self.r.read_buf(&mut self.buf).await {
-            Ok(0) | Err(_) => Err(End::ZERO),
-            Ok(_) => Ok(()),
-        }
+    /// The link's read side, and its write side for the writer.
+    fn split(self) -> (Link<'l, ReadHalf<S>>, WriteHalf<S>) {
+        let (r, w) = tokio::io::split(self.io);
+        let link = Link {
+            lane: self.lane,
+            io: r,
+            buf: self.buf,
+            limits: self.limits,
+            fwd: self.fwd,
+            stalled: self.stalled,
+        };
+        (link, w)
     }
+}
 
+impl<R: AsyncRead + Unpin> Link<'_, R> {
     /// Serves the established link of remote `remote` until it ends: tells
-    /// the hub of local interest, answers and sends `PING`s, and notes what
-    /// the hub says.
-    async fn serve(&mut self, remote: usize, w: OwnedWriteHalf, headers: bool) -> End {
+    /// the hub of local interest, answers and sends `PING`s, routes what
+    /// the hub sends, and notes what it says.
+    async fn serve<W: AsyncWrite + Unpin + 'static>(
+        &mut self,
+        remote: usize,
+        w: W,
+        headers: bool,
+    ) -> End {
         let shared = &self.lane.shared;
         let name = shared.opts.remotes[remote]
             .account
@@ -290,7 +367,7 @@ impl Link<'_> {
                     self.send(client, encode::PING);
                     timer.as_mut().reset(Instant::now() + interval);
                 }
-                n = self.r.read_buf(&mut buf) => match n {
+                n = self.io.read_buf(&mut buf) => match n {
                     Ok(0) | Err(_) => return st.delay,
                     Ok(_) => {}
                 },

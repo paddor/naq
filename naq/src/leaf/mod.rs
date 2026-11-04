@@ -4,9 +4,11 @@
 mod creds;
 mod link;
 mod side;
+mod tls;
 mod url;
 
 pub(crate) use side::LinkSide;
+pub(crate) use tls::Connector;
 pub(crate) use url::HubUrl;
 
 use std::collections::VecDeque;
@@ -89,11 +91,12 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
     };
     let remote = &shared.opts.remotes[index];
     // Valid: the options were checked.
-    let mut urls: VecDeque<HubUrl> = remote
+    let all: Vec<HubUrl> = remote
         .urls
         .iter()
         .filter_map(|u| HubUrl::parse(u).ok())
         .collect();
+    let mut urls: VecDeque<HubUrl> = all.iter().cloned().collect();
     if !remote.no_randomize {
         for i in (1..urls.len()).rev() {
             let j = lane.below(i as u64 + 1) as usize;
@@ -106,7 +109,7 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
             return;
         };
         urls.push_back(url.clone());
-        let wait = match link::session(&lane, index, &url).await {
+        let wait = match link::session(&lane, index, &url, &all).await {
             // Some jitter, so leafs do not dial a hub in step.
             Ended::Unreached => interval + interval.mul_f64(lane.below(1000) as f64 / 1000.0),
             Ended::Closed { delay } => interval + delay,

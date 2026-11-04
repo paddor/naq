@@ -309,4 +309,39 @@ pub struct Remote {
     /// public key and signs the hub's nonce with it. Not with
     /// [`Remote::credentials`].
     pub nkey: Option<String>,
+    /// TLS to the hub (`tls`). Without it, the link starts TLS only when
+    /// the hub asks for it, and trusts the system's certificate
+    /// authorities.
+    pub tls: Option<RemoteTls>,
+}
+
+/// TLS of a leaf node link (`tls` of a remote): the handshake after the
+/// hub's `INFO`, or before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTls {
+    /// PEM file of a certificate chain the link presents, for hubs that
+    /// verify leafs (`cert_file`), with `key_file`.
+    pub cert_file: Option<std::path::PathBuf>,
+    /// PEM file of its private key (`key_file`).
+    pub key_file: Option<std::path::PathBuf>,
+    /// PEM file of the certificate authorities the hub's certificate must
+    /// chain to (`ca_file`); without it, the system's.
+    pub ca_file: Option<std::path::PathBuf>,
+    /// How long a handshake may take (`timeout`).
+    pub timeout: Duration,
+    /// The handshake comes first, before the hub's `INFO`
+    /// (`handshake_first`). The hub must expect it.
+    pub handshake_first: bool,
+}
+
+impl Default for RemoteTls {
+    fn default() -> RemoteTls {
+        RemoteTls {
+            cert_file: None,
+            key_file: None,
+            ca_file: None,
+            timeout: Duration::from_secs(2),
+            handshake_first: false,
+        }
+    }
 }

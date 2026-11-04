@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use naq::{Options, Remote, Server};
+use naq::{Options, Remote, RemoteTls, Server};
 
 /// Longest wait for anything a test expects.
 const WAIT: Duration = Duration::from_secs(5);
@@ -389,7 +389,7 @@ fn hubs_that_break_the_handshake_or_the_link_are_left() {
     let hub = Hub::new();
     let _leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
     let scripts: [&[&str]; 6] = [
-        // TLS to hubs is not there yet.
+        // A hub that asks for TLS and never answers the handshake.
         &["INFO {\"client_id\":5,\"info_on_connect\":true,\"tls_required\":true}\r\n"],
         // An answer that is not the connect_info.
         &[INFO, "INFO {\"server_id\":\"HUB\"}\r\n"],
@@ -932,4 +932,131 @@ fn naq_clients_get_what_go_hub_clients_publish() {
         lines(&mut sub, 4),
         ["MSG orders.1 1 2", "hi", "MSG jobs 2 3", "job"]
     );
+}
+
+/// A CA, and certificates it signed for a hub at 127.0.0.1 and for a
+/// leaf, in PEM files of a directory of the test's own.
+struct Pki {
+    dir: PathBuf,
+}
+
+impl Pki {
+    fn new() -> Pki {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+        let dir = std::env::temp_dir().join(format!("naq-leaf-tls-{}", fastrand()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        std::fs::write(dir.join("ca.pem"), ca.self_signed(&ca_key).unwrap().pem()).unwrap();
+        let issuer = Issuer::from_params(&ca, &ca_key);
+        for (who, name) in [("hub", "127.0.0.1"), ("leaf", "leaf")] {
+            let key = KeyPair::generate().unwrap();
+            let cert = CertificateParams::new(vec![name.to_owned()])
+                .unwrap()
+                .signed_by(&key, &issuer)
+                .unwrap();
+            std::fs::write(dir.join(format!("{who}.pem")), cert.pem()).unwrap();
+            std::fs::write(dir.join(format!("{who}-key.pem")), key.serialize_pem()).unwrap();
+        }
+        Pki { dir }
+    }
+
+    fn path(&self, file: &str) -> String {
+        self.dir.join(file).display().to_string()
+    }
+}
+
+impl Drop for Pki {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn a_hub_that_asks_for_tls_gets_a_handshake_after_its_info() {
+    let hub = Hub::new();
+    let _leaf = leaf(&format!("127.0.0.1:{}", hub.port()));
+    let mut p = hub.accept();
+    p.send(&INFO.replace("\"headers\"", "\"tls_required\":true,\"headers\""));
+    let mut hello = [0u8; 1];
+    std::io::Read::read_exact(&mut p.r, &mut hello).unwrap();
+    assert_eq!(hello[0], 0x16, "a TLS handshake record");
+}
+
+#[test]
+fn a_go_hub_that_asks_for_tls_gets_it_after_its_info() {
+    let pki = Pki::new();
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!(
+        "port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport}, tls {{ cert_file: \"{}\", key_file: \"{}\" }} }}\n",
+        pki.path("hub.pem"),
+        pki.path("hub-key.pem"),
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let mut sub = go_client(port, "SUB s 1\r\n");
+    let leaf = leaf_with(Remote {
+        urls: vec![format!("nats-leaf://127.0.0.1:{leafport}")],
+        tls: Some(RemoteTls {
+            ca_file: Some(pki.path("ca.pem").into()),
+            ..RemoteTls::default()
+        }),
+        ..Remote::default()
+    });
+    let z = leafz_until(http, |z| z["leafnodes"] == 1);
+    assert_eq!(z["leafs"][0]["name"], "naq-leaf", "{z}");
+    published_to_go(&leaf, &mut sub);
+}
+
+#[test]
+fn a_go_hub_takes_tls_first_and_checks_the_certificate_of_the_leaf() {
+    let pki = Pki::new();
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!(
+        "port: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport}, tls {{ cert_file: \"{}\", key_file: \"{}\", ca_file: \"{}\", verify: true, handshake_first: true }} }}\n",
+        pki.path("hub.pem"),
+        pki.path("hub-key.pem"),
+        pki.path("ca.pem"),
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let mut sub = go_client(port, "SUB s 1\r\n");
+    let leaf = leaf_with(Remote {
+        urls: vec![format!("nats-leaf://127.0.0.1:{leafport}")],
+        tls: Some(RemoteTls {
+            ca_file: Some(pki.path("ca.pem").into()),
+            cert_file: Some(pki.path("leaf.pem").into()),
+            key_file: Some(pki.path("leaf-key.pem").into()),
+            handshake_first: true,
+            ..RemoteTls::default()
+        }),
+        ..Remote::default()
+    });
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    published_to_go(&leaf, &mut sub);
+}
+
+/// Waits until a client of `leaf` publishing to `s` reaches `sub`, a Go
+/// client with `SUB s 1`: the hub's interest reaches the leaf in its own
+/// time.
+fn published_to_go(leaf: &Server, sub: &mut Peer) {
+    let mut c = client(leaf, "");
+    let deadline = Instant::now() + WAIT;
+    sub.w
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        c.send("PUB s 2\r\nhi\r\n");
+        let mut l = String::new();
+        if sub.r.read_line(&mut l).is_ok() && l.starts_with("MSG s 1 2") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing came");
+    }
+    sub.w.set_read_timeout(Some(WAIT)).unwrap();
 }

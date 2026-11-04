@@ -190,17 +190,7 @@ fn tls(item: &Item) -> Result<crate::Tls, Bad> {
                     t.handshake_first = flag()?;
                 }
             }
-            "timeout" => {
-                t.timeout = match v.value {
-                    Value::Int(n) => u64::try_from(n)
-                        .map(Duration::from_secs)
-                        .map_err(|_| bad("expected seconds"))?,
-                    Value::Float(f) => {
-                        Duration::try_from_secs_f64(f).map_err(|_| bad("expected seconds"))?
-                    }
-                    _ => duration(v).map_err(|e| bad(&e))?,
-                };
-            }
+            "timeout" => t.timeout = seconds(v).map_err(|e| bad(&e))?,
             _ => return Err(bad("not supported")),
         }
     }
@@ -208,6 +198,17 @@ fn tls(item: &Item) -> Result<crate::Tls, Bad> {
     t.key_file = key.ok_or_else(|| (item.line, "tls: key_file missing".to_owned()))?;
     t.ca_file = ca;
     Ok(t)
+}
+
+/// Seconds, whole or not, or a duration.
+pub(super) fn seconds(v: &Item) -> Result<Duration, String> {
+    match v.value {
+        Value::Int(n) => u64::try_from(n)
+            .map(Duration::from_secs)
+            .map_err(|_| "expected seconds".into()),
+        Value::Float(f) => Duration::try_from_secs_f64(f).map_err(|_| "expected seconds".into()),
+        _ => duration(v),
+    }
 }
 
 pub(super) fn string(item: &Item) -> Option<String> {

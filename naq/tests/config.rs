@@ -673,3 +673,74 @@ fn config_error(text: &str, reason: &str) {
         "{text:?}: {e:?}"
     );
 }
+
+#[test]
+fn a_remote_takes_a_tls_block() {
+    let o: Options = "leafnodes { remotes: [{ url: h, tls { cert_file: c.pem, key_file: k.pem, \
+                      ca_file: ca.pem, timeout: 0.5, handshake_first: true } }] }\n"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        o.remotes[0].tls,
+        Some(naq::RemoteTls {
+            cert_file: Some("c.pem".into()),
+            key_file: Some("k.pem".into()),
+            ca_file: Some("ca.pem".into()),
+            timeout: Duration::from_millis(500),
+            handshake_first: true,
+        })
+    );
+    let whole: Options = "leafnodes { remotes: [{ url: h, tls { timeout: 3 } }] }"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        whole.remotes[0].tls.as_ref().unwrap().timeout,
+        Duration::from_secs(3)
+    );
+    for (text, reason) in [
+        (
+            "leafnodes { remotes: [{url: h, tls: 1}] }",
+            "leafnodes: remotes: tls: expected a map",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, tls { verify: true }}] }",
+            "leafnodes: remotes: tls: verify: not supported",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, tls { ca_file: 1 }}] }",
+            "leafnodes: remotes: tls: ca_file: expected a path",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, tls { first: 1 }}] }",
+            "leafnodes: remotes: tls: first: expected true or false",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, tls { timeout: -1 }}] }",
+            "leafnodes: remotes: tls: timeout: expected seconds",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, tls { timeout: x }}] }",
+            "leafnodes: remotes: tls: timeout: bad duration \"x\"",
+        ),
+    ] {
+        config_error(text, reason);
+    }
+}
+
+#[test]
+fn a_remote_tls_file_that_cannot_be_read_stops_the_start() {
+    let o = Options {
+        port: 0,
+        remotes: vec![naq::Remote {
+            urls: vec!["h".into()],
+            tls: Some(naq::RemoteTls {
+                ca_file: Some("/nonexistent/ca.pem".into()),
+                ..naq::RemoteTls::default()
+            }),
+            ..naq::Remote::default()
+        }],
+        ..Options::default()
+    };
+    let e = naq::Server::start(&o).unwrap_err();
+    assert!(matches!(e, Error::Tls(_)), "{e}");
+}

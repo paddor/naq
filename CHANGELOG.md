@@ -172,6 +172,13 @@ Notable changes to naq. The format follows
   credentials file, read at each dial, sends its user JWT and signs with
   its seed. Both on one remote, or a seed that is not a user's, is a
   config error. Two remotes differ by their credentials too.
+- `naq`: TLS on leaf node links (`Remote::tls`, `RemoteTls`; `tls` of a
+  remote). The link starts TLS after the hub's first `INFO` when the remote
+  has `tls` or the hub asks for it, or before it with `handshake_first`.
+  The hub's certificate must chain to `ca_file`, else to the system's
+  authorities, and name the URL's host, or for an IP, the first host name
+  of the remote's URLs. `cert_file` and `key_file` give a certificate for
+  hubs that verify leafs. A file that cannot be read stops the start.
 
 ### Changed
 
