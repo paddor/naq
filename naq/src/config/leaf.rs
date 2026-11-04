@@ -31,7 +31,7 @@ pub(super) fn leafnodes(o: &mut Options, item: &Item) -> Result<(), Bad> {
     Ok(())
 }
 
-/// One remote: `{ url, urls, account, no_randomize }`.
+/// One remote: `{ url, urls, account, no_randomize, credentials, nkey }`.
 fn remote(item: &Item) -> Result<Remote, Bad> {
     let Value::Map(m) = &item.value else {
         return Err((item.line, "leafnodes: remotes: expected a map".into()));
@@ -59,6 +59,12 @@ fn remote(item: &Item) -> Result<Remote, Bad> {
                     Value::Bool(b) => b,
                     _ => return Err(bad("expected true or false")),
                 };
+            }
+            "credentials" | "creds" => {
+                r.credentials = Some(string(v).ok_or_else(|| bad("expected a string"))?.into());
+            }
+            "nkey" | "seed" => {
+                r.nkey = Some(string(v).ok_or_else(|| bad("expected a string"))?);
             }
             _ => return Err(bad("not supported")),
         }

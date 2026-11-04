@@ -16,16 +16,26 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// A naq leaf that dials `url`, quickly again after a link ends.
 fn leaf(url: &str) -> Server {
+    leaf_with(Remote {
+        urls: vec![url.into()],
+        ..Remote::default()
+    })
+}
+
+/// A naq leaf of `remote`, which it dials quickly again after a link ends.
+fn leaf_with(remote: Remote) -> Server {
+    leaf_named("naq-leaf", remote)
+}
+
+/// [`leaf_with`], with server name `name`.
+fn leaf_named(name: &str, remote: Remote) -> Server {
     Server::start(&Options {
         host: "127.0.0.1".into(),
         port: 0,
         lanes: 2,
-        server_name: "naq-leaf".into(),
+        server_name: name.into(),
         leaf_reconnect: Duration::from_millis(50),
-        remotes: vec![Remote {
-            urls: vec![url.into()],
-            ..Remote::default()
-        }],
+        remotes: vec![remote],
         ..Options::default()
     })
     .unwrap()
@@ -128,6 +138,103 @@ fn a_leaf_connects_as_nats_server_does_and_answers_pings() {
     lines_until(&mut p, "LS+ $LDS.");
     p.send("PING\r\n");
     assert_eq!(p.line(), "PONG");
+}
+
+/// A user NKey seed.
+const SEED: &str = "SUABXPISJ672XCVCU7XD7CVTTXYTBXTGZ4LX3WZCSLCPKHDPCXCLZVMVPI";
+
+/// The `CONNECT` of a leaf of `remote` that dials `hub`, as JSON.
+fn connect_of(hub: &Hub, mut remote: Remote) -> serde_json::Value {
+    remote.urls = vec![format!("127.0.0.1:{}", hub.port())];
+    let _leaf = leaf_with(remote);
+    let mut p = hub.accept();
+    p.send(INFO);
+    serde_json::from_str(p.line().strip_prefix("CONNECT ").unwrap()).unwrap()
+}
+
+/// Whether `sig` of `json` is the hub's nonce `n`, signed with [`SEED`].
+fn signed(json: &serde_json::Value) -> bool {
+    let sig = data_encoding::BASE64URL_NOPAD
+        .decode(json["sig"].as_str().unwrap().as_bytes())
+        .unwrap();
+    let key = nkeys::KeyPair::from_seed(SEED).unwrap();
+    key.verify(b"n", &sig).is_ok()
+}
+
+#[test]
+fn a_seed_signs_the_nonce_of_the_hub() {
+    let json = connect_of(
+        &Hub::new(),
+        Remote {
+            nkey: Some(SEED.into()),
+            ..Remote::default()
+        },
+    );
+    let key = nkeys::KeyPair::from_seed(SEED).unwrap().public_key();
+    assert_eq!(json["nkey"].as_str(), Some(key.as_str()));
+    assert!(signed(&json), "{json}");
+    assert!(json.get("jwt").is_none(), "{json}");
+}
+
+#[test]
+fn a_credentials_file_gives_its_jwt_and_signs_the_nonce() {
+    let dir = std::env::temp_dir().join(format!("naq-leaf-creds-{}", fastrand()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("user.creds");
+    std::fs::write(
+        &path,
+        format!(
+            "-----BEGIN NATS USER JWT-----\nthe.user.jwt\n------END NATS USER JWT------\n\n\
+             -----BEGIN USER NKEY SEED-----\n{SEED}\n------END USER NKEY SEED------\n"
+        ),
+    )
+    .unwrap();
+    let json = connect_of(
+        &Hub::new(),
+        Remote {
+            credentials: Some(path),
+            ..Remote::default()
+        },
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(json["jwt"], "the.user.jwt");
+    assert!(signed(&json), "{json}");
+    assert!(json.get("nkey").is_none(), "{json}");
+}
+
+#[test]
+fn a_go_hub_takes_a_leaf_that_signs_with_the_nkey_it_knows() {
+    let (leafport, http) = (free_port(), free_port());
+    let key = nkeys::KeyPair::from_seed(SEED).unwrap().public_key();
+    let conf = format!(
+        "port: -1\nhttp_port: {http}\nleafnodes {{ port: {leafport}, authorization {{ nkey: {key} }} }}\n"
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let url = format!("nats-leaf://127.0.0.1:{leafport}");
+    let _right = leaf_with(Remote {
+        urls: vec![url.clone()],
+        nkey: Some(SEED.into()),
+        ..Remote::default()
+    });
+    leafz_until(http, |z| z["leafnodes"] == 1);
+    // Named apart, so the hub would take it beside the first.
+    let _wrong = leaf_named(
+        "naq-wrong",
+        Remote {
+            urls: vec![url],
+            nkey: Some(nkeys::KeyPair::new_user().seed().unwrap()),
+            ..Remote::default()
+        },
+    );
+    // It dials again every 50 ms or so, and is refused each time.
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        assert_eq!(get(http, "/leafz")["leafnodes"], 1);
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

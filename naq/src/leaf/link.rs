@@ -15,7 +15,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use super::{Ended, HubUrl, LinkSide, side};
+use super::{Ended, HubUrl, LinkSide, creds, side};
 use crate::conn::{self, Client};
 use crate::lane::{Lane, Out, Routing};
 
@@ -44,6 +44,7 @@ struct HubInfo {
     leafnode_urls: Vec<String>,
     info_on_connect: bool,
     connect_info: bool,
+    nonce: String,
 }
 
 /// The leaf's `CONNECT`. Without `compress_mode`, the hub stays
@@ -60,6 +61,12 @@ struct Connect<'a> {
     pass: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_token: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jwt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nkey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sig: Option<String>,
 }
 
 /// Why a link ends: the wait the hub asked for, beyond the interval.
@@ -142,7 +149,10 @@ impl Link<'_> {
             return Err(End::ZERO);
         }
         let opts = &self.lane.shared.opts;
-        let account = opts.remotes[remote].account.as_deref().unwrap_or("$G");
+        let r = &opts.remotes[remote];
+        let account = r.account.as_deref().unwrap_or("$G");
+        // A file gone or broken ends this dial; the next reads it again.
+        let proof = creds::prove(r, &info.nonce).map_err(|_| End::ZERO)?;
         let token = url.pass.is_none().then_some(url.user.as_deref()).flatten();
         let connect = Connect {
             version: env!("CARGO_PKG_VERSION"),
@@ -154,6 +164,9 @@ impl Link<'_> {
             // A user without a password is a token too, as `nats-server`
             // sends it.
             auth_token: token,
+            jwt: proof.jwt,
+            nkey: proof.nkey,
+            sig: proof.sig,
         };
         let mut out = Vec::new();
         leaf::connect(&mut out, &serde_json::to_vec(&connect).unwrap_or_default());

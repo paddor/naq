@@ -302,4 +302,11 @@ pub struct Remote {
     pub account: Option<String>,
     /// URLs are tried in the order given (`no_randomize`); else shuffled.
     pub no_randomize: bool,
+    /// A credentials file (`credentials`, `creds`): a user JWT, sent to
+    /// the hub, and the seed that signs its nonce. Read at each dial.
+    pub credentials: Option<std::path::PathBuf>,
+    /// A user NKey seed (`nkey`, `seed`), `SU...`: the link sends its
+    /// public key and signs the hub's nonce with it. Not with
+    /// [`Remote::credentials`].
+    pub nkey: Option<String>,
 }

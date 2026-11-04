@@ -166,6 +166,12 @@ Notable changes to naq. The format follows
   the hub it came from. Messages on `$JS.API.>`, `$KV.>` and `$OBJ.>`, and
   hub interest in literal subjects among them, are dropped. A subscriber
   past the stall mark slows the link's reads.
+- `naq`: credentials for leaf node links (`Remote::credentials`,
+  `Remote::nkey`; `credentials`/`creds` and `nkey`/`seed` of a remote). A
+  user NKey seed signs the hub's nonce and sends its public key; a
+  credentials file, read at each dial, sends its user JWT and signs with
+  its seed. Both on one remote, or a seed that is not a user's, is a
+  config error. Two remotes differ by their credentials too.
 
 ### Changed
 

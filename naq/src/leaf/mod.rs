@@ -1,6 +1,7 @@
 //! Leaf node links this server dials: one per remote, on a lane of its
 //! own, dialing again whenever it ends.
 
+mod creds;
 mod link;
 mod side;
 mod url;
@@ -59,9 +60,21 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
         {
             return Err(format!("leafnode remote: no account {a:?}"));
         }
-        let key = (r.account.as_deref().unwrap_or("$G"), urls);
+        if r.credentials.is_some() && r.nkey.is_some() {
+            return Err("leafnode remote: both credentials and an nkey".into());
+        }
+        // The seed stays out of the message: it is a secret.
+        if r.nkey.as_deref().is_some_and(|s| !creds::is_user_seed(s)) {
+            return Err("leafnode remote: nkey is not a user seed".into());
+        }
+        let key = (
+            r.account.as_deref().unwrap_or("$G"),
+            urls,
+            &r.credentials,
+            &r.nkey,
+        );
         if seen.contains(&key) {
-            return Err("leafnode remotes: the same account and urls twice".into());
+            return Err("leafnode remotes: the same account, urls and credentials twice".into());
         }
         seen.push(key);
     }

@@ -544,11 +544,16 @@ fn websocket_settings_naq_cannot_use_are_an_error() {
     }
 }
 
+/// A user NKey seed.
+const SEED: &str = "SUABXPISJ672XCVCU7XD7CVTTXYTBXTGZ4LX3WZCSLCPKHDPCXCLZVMVPI";
+
 #[test]
 fn remotes_come_from_the_leafnodes_block() {
     let o: Options = "accounts [A]\nleafnodes {\n  reconnect: 2\n  remotes [\n    \
                       { url: \"nats-leaf://h:1\", account: A, no_randomize: true }\n    \
-                      { urls: [\"a\", \"b:2\"] }\n  ]\n}\n"
+                      { urls: [\"a\", \"b:2\"], creds: u.creds }\n    \
+                      { urls: [\"a\", \"b:2\"], seed: {SEED} }\n  ]\n}\n"
+        .replace("{SEED}", SEED)
         .parse()
         .unwrap();
     assert_eq!(o.leaf_reconnect, Duration::from_secs(2));
@@ -559,9 +564,16 @@ fn remotes_come_from_the_leafnodes_block() {
                 urls: vec!["nats-leaf://h:1".into()],
                 account: Some("A".into()),
                 no_randomize: true,
+                ..naq::Remote::default()
             },
             naq::Remote {
                 urls: vec!["a".into(), "b:2".into()],
+                credentials: Some("u.creds".into()),
+                ..naq::Remote::default()
+            },
+            naq::Remote {
+                urls: vec!["a".into(), "b:2".into()],
+                nkey: Some(SEED.into()),
                 ..naq::Remote::default()
             },
         ]
@@ -619,7 +631,7 @@ fn leafnodes_naq_cannot_use_are_an_error() {
         ),
         (
             "leafnodes { remotes: [{url: h}, {url: \"nats://h:7422\"}] }",
-            "leafnode remotes: the same account and urls twice",
+            "leafnode remotes: the same account, urls and credentials twice",
         ),
     ] {
         match text.parse::<Options>() {
@@ -627,4 +639,37 @@ fn leafnodes_naq_cannot_use_are_an_error() {
             other => panic!("{text:?}: {other:?}"),
         }
     }
+}
+
+#[test]
+fn remote_credentials_that_cannot_work_are_an_error() {
+    for (text, reason) in [
+        (
+            "leafnodes { remotes: [{url: h, creds: c, nkey: n}] }",
+            "leafnode remote: both credentials and an nkey",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, nkey: SUnot}] }",
+            "leafnode remote: nkey is not a user seed",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, creds: 1}] }",
+            "leafnodes: remotes: creds: expected a string",
+        ),
+        (
+            "leafnodes { remotes: [{url: h, nkey: 1}] }",
+            "leafnodes: remotes: nkey: expected a string",
+        ),
+    ] {
+        config_error(text, reason);
+    }
+}
+
+/// Asserts that `text` is a config error for `reason`.
+fn config_error(text: &str, reason: &str) {
+    let e = text.parse::<Options>().err();
+    assert!(
+        matches!(&e, Some(Error::Config { reason: r, .. }) if r == reason),
+        "{text:?}: {e:?}"
+    );
 }
