@@ -467,14 +467,19 @@ fn limits_left_out_are_zero_and_limits_hold() {
             "-ERR 'maximum account active connections exceeded'",
             "{name}"
         );
-        // A user without subscriptions is told once it is in, and closed.
+        // A user without subscriptions is let in, told, and closed. Go
+        // tells it from a goroutine, before or after the `PONG`.
         let mut nosubs = json!({"type": "user", "version": 2, "payload": OPEN});
         nosubs["data"] = OPEN.into();
         let jwt = mint(&w.a, &u.public_key(), &nosubs, &json!({}));
         let mut c = Client::login(&t, Some(&u), &jwt, "");
-        logged_in(&mut c, name, &w.a.public_key(), 1 << 20);
-        assert_eq!(c.line(), "-ERR 'maximum subscriptions exceeded'", "{name}");
-        assert!(c.closed(), "{name}");
+        let mut got = String::new();
+        assert!(c.r.read_to_string(&mut got).is_ok(), "{name}: closed");
+        let lines: Vec<&str> = got.lines().collect();
+        assert!(
+            lines.contains(&"PONG") && lines.contains(&"-ERR 'maximum subscriptions exceeded'"),
+            "{name}: {got}"
+        );
         // Two subscriptions, not three; a payload of ten bytes, not eleven.
         let jwt = user(&w.a, &u, &json!({"subs": 2, "payload": 10}), &json!({}));
         let mut c = Client::login(&t, Some(&u), &jwt, "");
