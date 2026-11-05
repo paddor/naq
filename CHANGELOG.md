@@ -5,6 +5,12 @@ Notable changes to naq. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `naq`: plain subscriptions get a message from another server of the
+  cluster, or from a naq hub or leaf, once, not twice, where a queue group
+  of theirs matches it too and gets its pick there.
+
 ## [0.1.0] - 2026-11-05
 
 ### Added
