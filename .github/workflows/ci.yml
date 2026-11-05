@@ -1,0 +1,131 @@
+name: ci
+
+# Formatting and clippy run first. Tests run only once they pass.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # The reference server: the tests run their scenarios against it too.
+  NATS_SERVER: v2.15.2
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+  test:
+    name: cargo test (${{ matrix.profile }})
+    needs: [lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [release, debug]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.profile }}
+      - name: nats-server
+        run: |
+          name="nats-server-$NATS_SERVER-linux-amd64"
+          url="https://github.com/nats-io/nats-server/releases/download/$NATS_SERVER"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$url/$name.tar.gz"
+          curl -fsSLO "$url/SHA256SUMS"
+          grep " $name.tar.gz\$" SHA256SUMS | sha256sum -c -
+          tar xzf "$name.tar.gz"
+          echo "NAQ_GO=$RUNNER_TEMP/$name/nats-server" >> "$GITHUB_ENV"
+      - name: cargo test
+        run: cargo test --workspace ${{ matrix.profile == 'release' && '--release' || '' }}
+
+  msrv:
+    name: cargo test (1.93)
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace
+
+  fuzz:
+    name: fuzz targets
+    needs: [lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: fuzz/afl
+    env:
+      # AFL's own flags come on top; clippy denies the warnings.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz/afl
+      - name: install cargo-afl
+        run: |
+          cargo install cargo-afl --locked --version 0.18.2
+          # The install may have built AFL++ already, a cached one not.
+          cargo afl config --build --force
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: replay seeds and regressions
+        run: cargo afl test --release
+
+  ci-success:
+    name: CI success
+    needs: [lint, test, msrv, fuzz]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: check all jobs passed
+        run: |
+          if [[ '${{ toJSON(needs.*.result) }}' =~ (failure|cancelled|skipped) ]]; then
+            exit 1
+          fi
