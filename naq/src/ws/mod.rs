@@ -221,6 +221,9 @@ pub(super) fn closing(why: Option<Close>) -> (u16, &'static str) {
         Some(Close::Stale) => (frame::GOING_AWAY, "Stale Connection"),
         Some(Close::Auth) => (frame::POLICY, "Authentication Failure"),
         Some(Close::AuthTimeout) => (frame::POLICY, "Authentication Timeout"),
+        Some(Close::AccountConns) => (frame::POLICY, "Maximum Account Connections Exceeded"),
+        Some(Close::UserExpired) => (frame::POLICY, "Authentication Expired"),
+        Some(Close::MaxSubs) => (frame::POLICY, "Maximum Subscriptions Exceeded"),
         None => (frame::GOING_AWAY, "Server Shutdown"),
     }
 }

@@ -41,6 +41,17 @@ pub fn websocket(data: &[u8]) {
     crate::ws::fuzz(data);
 }
 
+/// Decodes a JWT as each kind of claims.
+pub fn jwt(data: &[u8]) {
+    let Ok(token) = std::str::from_utf8(data) else {
+        return;
+    };
+    let _ = crate::jwt::decode::<crate::jwt::claims::Operator>(token);
+    let _ = crate::jwt::decode::<crate::jwt::claims::Account>(token);
+    let _ = crate::jwt::decode::<crate::jwt::claims::User>(token);
+    let _ = crate::jwt::decode::<crate::jwt::claims::Activation>(token);
+}
+
 fn check(idx: &Index, subj: &[u8], filters: &[&[u8]], kept: impl Fn(usize) -> bool) {
     let mut want: Vec<usize> = filters
         .iter()

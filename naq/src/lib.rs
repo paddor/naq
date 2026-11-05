@@ -40,6 +40,7 @@ mod error;
 pub mod fuzzing;
 mod imports;
 mod index;
+mod jwt;
 mod lane;
 mod leaf;
 mod mailbox;
@@ -55,7 +56,7 @@ mod ws;
 pub use error::Error;
 pub use options::{
     Account, Cluster, Cookies, Export, ExportKind, Import, ImportKind, Latency, Leafnodes, Login,
-    Options, Permissions, Remote, RemoteTls, ResponseType, Responses, Rules, Sampling,
+    Options, Permissions, Remote, RemoteTls, Resolver, ResponseType, Responses, Rules, Sampling,
     ServiceExport, Tls, User, Websocket, WebsocketAuth,
 };
 pub use server::Server;

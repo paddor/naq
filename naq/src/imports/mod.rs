@@ -1,6 +1,7 @@
 //! Subjects shared between accounts: exports, and the imports of them,
 //! linked and checked as `nats-server` checks them.
 
+mod defs;
 mod info;
 pub(crate) mod latency;
 mod link;

@@ -40,6 +40,8 @@ pub(crate) struct Shared {
     pub(crate) responses: Box<[Arc<crate::imports::service::Responses>]>,
     /// The system account, if there is one.
     pub(crate) system: Option<u32>,
+    /// The connections of users of JWTs, by account.
+    pub(crate) conns: Box<[std::sync::atomic::AtomicI64]>,
     /// The hash of the server's name that replies tracked for latency end
     /// in, with a system account, as `nats-server` makes it.
     pub(crate) node: Option<[u8; 8]>,
@@ -84,6 +86,33 @@ impl Shared {
         self.next_client.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Counts a connection of `account`, unless it has `limit` already,
+    /// -1 for none. Returns whether it did.
+    pub(crate) fn count(&self, account: u32, limit: i64) -> bool {
+        let Some(n) = self.conns.get(account as usize) else {
+            return false;
+        };
+        // Relaxed: the count alone decides, and its updates are ordered.
+        let mut now = n.load(Ordering::Relaxed);
+        loop {
+            if limit >= 0 && now >= limit {
+                return false;
+            }
+            match n.compare_exchange_weak(now, now + 1, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(was) => now = was,
+            }
+        }
+    }
+
+    /// Lets a connection of `account` that [`Shared::count`] counted go.
+    pub(crate) fn uncount(&self, account: u32) {
+        if let Some(n) = self.conns.get(account as usize) {
+            // Relaxed: as in `count`.
+            n.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
     /// Notes that a client went away.
     pub(crate) fn client_gone(&self) {
         // Relaxed: a counter, read now and then.
@@ -124,7 +153,6 @@ impl Server {
         let accounts = auth::accounts(opts);
         let system = auth::system(opts, &accounts);
         let auth = Auth::new(opts, &accounts);
-        let ws_auth = Auth::websocket(opts, auth.as_ref());
         let ctx = Context::with_config(&Config {
             io_threads: lanes(opts.lanes),
             name: "naq".into(),
@@ -148,9 +176,12 @@ impl Server {
             server_id: server_id(),
             lanes: txs.into_boxed_slice(),
             lds: accounts.iter().map(|_| crate::leaf::lds()).collect(),
+            conns: std::iter::repeat_with(Default::default)
+                .take(accounts.len())
+                .collect(),
             accounts,
+            ws_auth: Auth::websocket(opts, auth.as_ref()),
             auth,
-            ws_auth,
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
             events: stats::Events::default(),
             started: std::time::SystemTime::now(),
@@ -158,9 +189,7 @@ impl Server {
             tls: setup.tls,
             ws: door(opts, ws_addr, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
-            responses: (0..setup.imports.len())
-                .map(|_| Arc::new(crate::imports::service::Responses::new(random())))
-                .collect(),
+            responses: responses(setup.imports.len()),
             imports: setup.imports,
             system,
             node: system.map(|_| node(&opts.server_name)),
@@ -469,6 +498,14 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
 }
 
 /// 22 random-looking characters, as `nats-server` IDs have.
+/// The requests sent into each of `n` accounts, each with a reply prefix
+/// of its own.
+fn responses(n: usize) -> Box<[Arc<crate::imports::service::Responses>]> {
+    (0..n)
+        .map(|_| Arc::new(crate::imports::service::Responses::new(random())))
+        .collect()
+}
+
 /// The hash of server name `name`: eight letters or digits from its
 /// SHA-256, as `nats-server` makes it.
 fn node(name: &str) -> [u8; 8] {

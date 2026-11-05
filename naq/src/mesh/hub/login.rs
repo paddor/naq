@@ -121,7 +121,8 @@ impl Logins {
         };
         match auth.check(&creds(c), g.nonce.as_bytes()) {
             Check::Pass(grant) => Outcome::Pass(g, grant),
-            Check::Fail => Outcome::Fail(g.who),
+            // Leafs give no JWT: they log in otherwise.
+            Check::Fail | Check::User(_) => Outcome::Fail(g.who),
             Check::Bcrypt(p) => {
                 let tx = self.done.0.clone();
                 tokio::task::spawn_local(async move {
@@ -171,5 +172,6 @@ fn creds(c: &Connect<'_>) -> Creds {
         token: text(c.token),
         nkey: text(c.nkey),
         sig: text(c.sig),
+        jwt: None,
     }
 }

@@ -331,6 +331,19 @@ Notable changes to naq. The format follows
   it had no reply (400), nobody took it (503) or no response came in time
   (504), as `nats-server` writes it. Samples of requests answered at
   another server carry no responder.
+- `naq`: operator mode (`operator`, `trusted_keys`, `resolver: MEMORY`,
+  `resolver_preload`; `Options::operators`, `Options::trusted_keys`,
+  `Options::resolver`, `Options::resolver_preload`). Accounts are the JWTs
+  preloaded, checked as nats-io/jwt checks them; users log in with a user
+  JWT and the nonce signed, or as bearer users, and are checked as
+  `nats-server` checks them: issuer and signing keys, scoped signing keys
+  and their templates, expiry, revocations, `disallow_bearer`, connection
+  types, `src`, `times` (UTC only), and the account's and user's limits on
+  connections, subscriptions and payload, which left out are zero. A user
+  is closed once its JWT expires. Account JWTs import and export as the
+  config does, with activation tokens for exports that need them; an
+  import that does not link is left out. Accounts with subject mappings or
+  auth callout are refused, and v1 JWTs are not taken.
 - `naq`: clients may not publish to `_GR_.`, `$GR.` or `$NRG.` subjects,
   nor with `_R_.`, `$JS.ACK.`, `_GR_.` or `$GR.` replies, as in
   `nats-server`: the message is dropped with a permissions violation.

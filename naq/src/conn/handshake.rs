@@ -54,6 +54,7 @@ struct Connect {
     auth_token: Option<String>,
     nkey: Option<String>,
     sig: Option<String>,
+    jwt: Option<String>,
     name: Option<String>,
     lang: Option<String>,
     version: Option<String>,
@@ -82,6 +83,7 @@ impl ClientOpts {
             token: c.auth_token,
             nkey: c.nkey,
             sig: c.sig,
+            jwt: c.jwt,
         };
         Ok((creds, (c.name, c.lang, c.version)))
     }
@@ -128,6 +130,8 @@ pub(super) struct To<'a> {
     pub(super) nonce: Option<&'a str>,
     /// It came over WebSocket.
     pub(super) ws: bool,
+    /// The largest message it may publish.
+    pub(super) max_payload: usize,
 }
 
 /// Appends the `INFO` for client `to`. The one that follows the first
@@ -152,7 +156,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
         host,
         port,
         headers: true,
-        max_payload: shared.opts.max_payload,
+        max_payload: to.max_payload,
         client_id: to.id,
         client_ip: to.ip,
         nonce: to.nonce,

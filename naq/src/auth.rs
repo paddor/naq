@@ -23,6 +23,8 @@ pub(crate) struct Auth {
     token_grant: Grant,
     token: Option<String>,
     no_auth_user: Option<String>,
+    /// In operator mode: who signs the accounts and users.
+    trust: Option<Arc<crate::jwt::trust::Trust>>,
     /// How long a client has to authenticate.
     pub(crate) timeout: Duration,
 }
@@ -36,6 +38,8 @@ pub(crate) struct Creds {
     pub(crate) nkey: Option<String>,
     /// The nonce signed, in base64.
     pub(crate) sig: Option<String>,
+    /// A user JWT, in operator mode.
+    pub(crate) jwt: Option<String>,
 }
 
 impl Creds {
@@ -54,7 +58,11 @@ impl Creds {
     }
 
     const fn is_blank(&self) -> bool {
-        self.user.is_none() && self.pass.is_none() && self.token.is_none() && self.nkey.is_none()
+        self.user.is_none()
+            && self.pass.is_none()
+            && self.token.is_none()
+            && self.nkey.is_none()
+            && self.jwt.is_none()
     }
 }
 
@@ -87,6 +95,8 @@ pub(crate) enum Check {
     Fail,
     /// They hold if a bcrypt comparison does.
     Bcrypt(Pending),
+    /// A user JWT holds: its user.
+    User(Box<crate::jwt::trust::User>),
 }
 
 /// A bcrypt comparison still to make: slow by design, so not on a lane.
@@ -108,22 +118,31 @@ impl Pending {
 /// The name of the system account `nats-server` makes.
 pub(crate) const SYSTEM: &str = "$SYS";
 
-/// Account names by id: `$G` first, then those of `opts`, then `$SYS` if
-/// the server makes it.
+/// Account names by id: `$G` first, then those of `opts`, then those of
+/// the JWTs preloaded, by public key, then `$SYS` if the server makes it.
 pub(crate) fn accounts(opts: &Options) -> Box<[String]> {
-    let made = opts.system_account.is_none()
+    let made = system_name(opts).is_none()
         && !opts.no_system_account
         && !opts.accounts.iter().any(|a| a.name == SYSTEM);
     std::iter::once("$G".to_owned())
         .chain(opts.accounts.iter().map(|a| a.name.clone()))
+        .chain(opts.resolver_preload.iter().map(|(key, _)| key.clone()))
         .chain(made.then(|| SYSTEM.to_owned()))
         .collect()
+}
+
+/// The system account `opts` or their operator JWT name, if any.
+fn system_name(opts: &Options) -> Option<String> {
+    opts.system_account
+        .clone()
+        .or_else(|| crate::jwt::trust::system_account(opts))
 }
 
 /// The id of the system account among `names`, the server's accounts, if
 /// it has one.
 pub(crate) fn system(opts: &Options, names: &[String]) -> Option<u32> {
-    let name = match &opts.system_account {
+    let chosen = system_name(opts);
+    let name = match &chosen {
         Some(n) => n.as_str(),
         None if opts.no_system_account && !opts.accounts.iter().any(|a| a.name == SYSTEM) => {
             return None;
@@ -163,8 +182,9 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
     {
         return Err(format!("no_auth_user {n:?} is not a user"));
     }
-    if let Some(a) = &opts.system_account
-        && !opts.accounts.iter().any(|x| x.name == *a)
+    crate::jwt::trust::validate(opts)?;
+    if let Some(a) = system_name(opts)
+        && !accounts(opts).contains(&a)
     {
         return Err(format!("system_account: no account {a:?}"));
     }
@@ -210,6 +230,20 @@ pub(crate) fn nonce() -> String {
 impl Auth {
     /// The authentication `opts` ask for, if any. `opts` are valid.
     pub(crate) fn new(opts: &Options, accounts: &[String]) -> Option<Auth> {
+        if let Some(t) = crate::jwt::trust::Trust::new(opts, accounts) {
+            return Some(Auth {
+                users: FxHashMap::default(),
+                nkeys: FxHashMap::default(),
+                token_grant: Grant {
+                    account: GLOBAL,
+                    perms: None,
+                },
+                token: None,
+                no_auth_user: None,
+                trust: Some(Arc::new(t)),
+                timeout: opts.auth_timeout,
+            });
+        }
         if opts.users.is_empty() && opts.user.is_none() && opts.token.is_none() {
             return None;
         }
@@ -255,6 +289,7 @@ impl Auth {
             token_grant: bare,
             token: opts.token.clone(),
             no_auth_user: opts.no_auth_user.clone(),
+            trust: None,
             timeout: opts.auth_timeout,
         })
     }
@@ -281,6 +316,7 @@ impl Auth {
                 token_grant: grant,
                 token: ws.token.clone(),
                 no_auth_user: None,
+                trust: None,
                 timeout,
             });
         }
@@ -339,6 +375,7 @@ impl Auth {
             },
             token: None,
             no_auth_user: None,
+            trust: None,
             timeout: l.auth_timeout,
         })
     }
@@ -349,9 +386,28 @@ impl Auth {
         self.no_auth_user.is_some()
     }
 
-    /// Whether clients get a nonce to sign: some users have NKeys.
+    /// Whether clients get a nonce to sign: some users have NKeys, or
+    /// they log in with JWTs.
     pub(crate) fn wants_nonce(&self) -> bool {
-        !self.nkeys.is_empty()
+        !self.nkeys.is_empty() || self.trust.is_some()
+    }
+
+    /// Checks what a client that connects from `origin` gave, after an
+    /// `INFO` with `nonce`: in operator mode, its user JWT.
+    pub(crate) fn check_from(
+        &self,
+        c: &Creds,
+        nonce: &[u8],
+        origin: crate::jwt::trust::Origin,
+    ) -> Check {
+        let Some(t) = &self.trust else {
+            return self.check(c, nonce);
+        };
+        let user = c
+            .jwt
+            .as_deref()
+            .and_then(|jwt| t.login(jwt, c.sig.as_deref(), nonce, origin));
+        user.map_or(Check::Fail, |u| Check::User(Box::new(u)))
     }
 
     /// Checks what a client gave, after an `INFO` with `nonce`.
@@ -387,7 +443,7 @@ impl Auth {
 }
 
 /// Whether `sig` is `nonce` signed with the seed of public NKey `key`.
-fn signed(key: &str, nonce: &[u8], sig: Option<&str>) -> bool {
+pub(crate) fn signed(key: &str, nonce: &[u8], sig: Option<&str>) -> bool {
     let Some(sig) = sig else {
         return false;
     };

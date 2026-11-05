@@ -6,8 +6,8 @@ wakes and writes.
 
 The server runs core publish and subscribe: wildcards, queue groups,
 `UNSUB` maximums, accounts with stream and service imports between them,
-users with passwords, tokens or NKeys, permissions, over TCP, TLS and
-WebSocket. It links to `nats-server` hubs
+users with passwords, tokens or NKeys, operator mode with JWTs,
+permissions, over TCP, TLS and WebSocket. It links to `nats-server` hubs
 as a leaf node, over TCP, TLS or WebSocket, with credentials, failover
 across a hub cluster and the hub's permissions. Servers of one cluster
 mesh over OMQ: they share their clients' interest, carry messages one hop

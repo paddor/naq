@@ -2,6 +2,7 @@
 
 use naq_proto::subject;
 
+use super::defs::{self, Def};
 use super::transform::{self, Transform};
 use super::{Imports, Rewrite, ServiceImport, StreamImport};
 use crate::{ExportKind, ImportKind, Options, ResponseType, ServiceExport};
@@ -12,105 +13,99 @@ pub(crate) fn link(opts: &Options) -> Result<Box<[Imports]>, String> {
     let all_names = crate::auth::accounts(opts);
     let names: Vec<&str> = all_names.iter().map(String::as_str).collect();
     let all = names.iter().map(|_| Imports::default()).collect();
-    check_exports(opts)?;
-    let mut l = Linker { opts, names, all };
+    let mut defs = defs::of(opts, &all_names);
+    let system = crate::auth::system(opts, &all_names).is_some();
+    check_exports(&mut defs, system)?;
+    let mut l = Linker {
+        defs: &defs,
+        names,
+        all,
+    };
     // As `nats-server` links them: every stream import, then every service
     // import. A cycle shows on the import that closes it.
-    for (i, a) in opts.accounts.iter().enumerate() {
-        for im in a.imports.iter().filter(|im| im.kind == ImportKind::Stream) {
-            let s = l.stream(&a.name, im).map_err(|e| {
-                format!("account {:?}: stream import {:?}: {e}", a.name, im.subject)
-            })?;
-            l.all[i + 1].streams.push(std::sync::Arc::new(s));
-        }
-    }
-    for (i, a) in opts.accounts.iter().enumerate() {
-        for im in &a.imports {
-            let ImportKind::Service { share } = im.kind else {
-                continue;
-            };
-            let s = l.service(&a.name, im, share).map_err(|e| {
-                format!("account {:?}: service import {:?}: {e}", a.name, im.subject)
-            })?;
-            if let Some(dup) = l.all[i + 1]
-                .services
-                .iter()
-                .find(|d| d.to == s.to && d.from == s.from)
-            {
-                return Err(format!(
-                    "account {:?}: service import {:?} twice from account {:?}",
-                    a.name,
-                    String::from_utf8_lossy(&dup.from),
-                    l.names[dup.to as usize]
-                ));
-            }
-            l.all[i + 1].services.push(std::sync::Arc::new(s));
-        }
-    }
+    l.streams()?;
+    l.services()?;
     Ok(l.all.into())
 }
 
-/// Checks the exports of every account on their own.
-fn check_exports(opts: &Options) -> Result<(), String> {
-    for a in &opts.accounts {
-        for e in &a.exports {
-            let bad =
-                |reason: &str| format!("account {:?}: export {:?}: {reason}", a.name, e.subject);
-            if !subject::is_valid_filter(e.subject.as_bytes()) {
-                return Err(bad("invalid subject"));
-            }
-            if let Some(n) = e.token_position
-                && e.subject.split('.').nth(n - 1) != Some("*")
+/// Checks the exports of every account on their own: those of a config
+/// that do not hold are an error, those of a JWT are left out. Latency
+/// samples need a `system` account.
+fn check_exports(defs: &mut [Def], system: bool) -> Result<(), String> {
+    for d in defs {
+        let mut keep = Vec::with_capacity(d.exports.len());
+        for e in &d.exports {
+            let fault = export_fault(e, &d.exports, system);
+            keep.push(fault.is_none());
+            if let Some(f) = fault
+                && !d.lenient
             {
-                return Err(bad("the account token position is no `*`"));
-            }
-            let ExportKind::Service(s) = &e.kind else {
-                continue;
-            };
-            if let Some(l) = &s.latency {
-                if s.response != ResponseType::Singleton {
-                    return Err(bad("latency needs a singleton response type"));
-                }
-                let exported = a.exports.iter().any(|x| {
-                    matches!(x.kind, ExportKind::Service(_))
-                        && subject::is_subset(l.subject.as_bytes(), x.subject.as_bytes())
-                });
-                if !subject::is_valid_literal(l.subject.as_bytes()) || exported {
-                    return Err(bad("invalid latency subject"));
-                }
-                if crate::auth::system(opts, &crate::auth::accounts(opts)).is_none() {
-                    return Err(bad("latency needs a system account"));
-                }
+                return Err(format!("account {:?}: export {:?}: {f}", d.name, e.subject));
             }
         }
+        let mut k = keep.iter();
+        d.exports.retain(|_| k.next() == Some(&true));
+        let mut k = keep.iter();
+        d.tokens.retain(|_| k.next() == Some(&true));
     }
     Ok(())
+}
+
+/// Why export `e`, among `all` of its account, does not hold, if it does
+/// not.
+fn export_fault(e: &crate::Export, all: &[crate::Export], system: bool) -> Option<&'static str> {
+    if !subject::is_valid_filter(e.subject.as_bytes()) {
+        return Some("invalid subject");
+    }
+    if let Some(n) = e.token_position
+        && e.subject.split('.').nth(n - 1) != Some("*")
+    {
+        return Some("the account token position is no `*`");
+    }
+    let ExportKind::Service(s) = &e.kind else {
+        return None;
+    };
+    let l = s.latency.as_ref()?;
+    if s.response != ResponseType::Singleton {
+        return Some("latency needs a singleton response type");
+    }
+    let exported = all.iter().any(|x| {
+        matches!(x.kind, ExportKind::Service(_))
+            && subject::is_subset(l.subject.as_bytes(), x.subject.as_bytes())
+    });
+    if !subject::is_valid_literal(l.subject.as_bytes()) || exported {
+        return Some("invalid latency subject");
+    }
+    (!system).then_some("latency needs a system account")
 }
 
 /// The export of account `exporter` that an import of `subject`, of the
 /// kind `service` says, is of, and its place among the account's exports:
 /// the one of that subject, else the first that holds it.
-fn export_of<'o>(
-    opts: &'o Options,
-    exporter: &str,
+fn export_of<'d>(
+    exporter: &'d Def,
     subject: &str,
     service: bool,
-) -> Option<(u32, &'o crate::Export)> {
-    let a = opts.accounts.iter().find(|a| a.name == exporter)?;
+) -> Option<(u32, &'d crate::Export)> {
     let of_kind =
         |(_, e): &(usize, &crate::Export)| matches!(e.kind, ExportKind::Service(_)) == service;
-    let mut all = a.exports.iter().enumerate().filter(of_kind);
+    let mut all = exporter.exports.iter().enumerate().filter(of_kind);
     all.clone()
         .find(|(_, e)| e.subject == subject)
         .or_else(|| all.find(|(_, e)| subject::is_subset(subject.as_bytes(), e.subject.as_bytes())))
         .map(|(i, e)| (i as u32, e))
 }
 
-/// Whether account `importer` may import `subject` by export `e`.
-fn allows(e: &crate::Export, importer: &str, subject: &str) -> bool {
+/// Whether account `importer` may import `subject` from `exporter` by its
+/// export at `at`, with activation token `token` if it gives one.
+fn allows(exporter: &Def, at: u32, importer: &str, subject: &str, token: Option<&str>) -> bool {
+    let e = &exporter.exports[at as usize];
     if let Some(n) = e.token_position {
         // An import of the export's subject as it is names no account.
         return e.subject != subject && subject.split('.').nth(n - 1) == Some(importer);
+    }
+    if let Some(Some(revoked)) = exporter.tokens.get(at as usize) {
+        return defs::activated(exporter, revoked, importer, subject, token);
     }
     e.accounts
         .as_ref()
@@ -128,7 +123,8 @@ fn id(names: &[&str], name: &str) -> Result<u32, String> {
 
 /// The imports linked so far.
 struct Linker<'o> {
-    opts: &'o Options,
+    /// Accounts by id.
+    defs: &'o [Def],
     /// Account names by id.
     names: Vec<&'o str>,
     /// Imports by account id.
@@ -136,15 +132,84 @@ struct Linker<'o> {
 }
 
 impl Linker<'_> {
+    /// Links the stream imports of every account.
+    fn streams(&mut self) -> Result<(), String> {
+        let defs = self.defs;
+        for (i, d) in defs.iter().enumerate() {
+            for (im, token) in d
+                .imports
+                .iter()
+                .filter(|(im, _)| im.kind == ImportKind::Stream)
+            {
+                match self.stream(&d.name, im, token.as_deref()) {
+                    Ok(s) => self.all[i].streams.push(std::sync::Arc::new(s)),
+                    Err(_) if d.lenient => {}
+                    Err(e) => {
+                        return Err(format!(
+                            "account {:?}: stream import {:?}: {e}",
+                            d.name, im.subject
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Links the service imports of every account.
+    fn services(&mut self) -> Result<(), String> {
+        let defs = self.defs;
+        for (i, d) in defs.iter().enumerate() {
+            for (im, token) in &d.imports {
+                let ImportKind::Service { share } = im.kind else {
+                    continue;
+                };
+                let s = match self.service(&d.name, im, share, token.as_deref()) {
+                    Ok(s) => s,
+                    Err(_) if d.lenient => continue,
+                    Err(e) => {
+                        return Err(format!(
+                            "account {:?}: service import {:?}: {e}",
+                            d.name, im.subject
+                        ));
+                    }
+                };
+                let dup = self.all[i]
+                    .services
+                    .iter()
+                    .find(|x| x.to == s.to && x.from == s.from);
+                if let Some(dup) = dup {
+                    if d.lenient {
+                        continue;
+                    }
+                    return Err(format!(
+                        "account {:?}: service import {:?} twice from account {:?}",
+                        d.name,
+                        String::from_utf8_lossy(&dup.from),
+                        self.names[dup.to as usize]
+                    ));
+                }
+                self.all[i].services.push(std::sync::Arc::new(s));
+            }
+        }
+        Ok(())
+    }
+
     /// Links stream import `im` of account `importer`.
-    fn stream(&self, importer: &str, im: &crate::Import) -> Result<StreamImport, String> {
-        let (opts, names, all) = (self.opts, &self.names[..], &self.all[..]);
+    fn stream(
+        &self,
+        importer: &str,
+        im: &crate::Import,
+        token: Option<&str>,
+    ) -> Result<StreamImport, String> {
+        let (names, all) = (&self.names[..], &self.all[..]);
         let from = id(names, &im.account)?;
         if !subject::is_valid_filter(im.subject.as_bytes()) {
             return Err("invalid subject".into());
         }
-        let authorized = export_of(opts, &im.account, &im.subject, false)
-            .is_some_and(|(_, e)| allows(e, importer, &im.subject));
+        let exporter = &self.defs[from as usize];
+        let authorized = export_of(exporter, &im.subject, false)
+            .is_some_and(|(at, _)| allows(exporter, at, importer, &im.subject, token));
         if !authorized {
             return Err("not authorized".into());
         }
@@ -194,18 +259,10 @@ impl Linker<'_> {
     /// while the account exports a stream that holds `to`, through its stream
     /// imports that collide with it.
     fn stream_cycle(&self, from: u32, to: &str, seen: &mut Vec<u32>) -> bool {
-        let (opts, all) = (self.opts, &self.all);
-        let name = self.names[from as usize];
-        let exports = opts
-            .accounts
-            .iter()
-            .find(|a| a.name == name)
-            .is_some_and(|a| {
-                a.exports.iter().any(|e| {
-                    e.kind == ExportKind::Stream
-                        && subject::is_subset(to.as_bytes(), e.subject.as_bytes())
-                })
-            });
+        let all = &self.all;
+        let exports = self.defs[from as usize].exports.iter().any(|e| {
+            e.kind == ExportKind::Stream && subject::is_subset(to.as_bytes(), e.subject.as_bytes())
+        });
         if !exports || seen.len() >= MAX_DEPTH {
             return false;
         }
@@ -235,8 +292,9 @@ impl Linker<'_> {
         importer: &str,
         im: &crate::Import,
         share: bool,
+        token: Option<&str>,
     ) -> Result<ServiceImport, String> {
-        let (opts, names, all) = (self.opts, &self.names[..], &self.all[..]);
+        let (names, all) = (&self.names[..], &self.all[..]);
         let to = id(names, &im.account)?;
         // `subject` is the exporter's side, `from` the importer's.
         let remote = &im.subject;
@@ -246,8 +304,9 @@ impl Linker<'_> {
         {
             return Err("invalid subject".into());
         }
-        let Some((at, export)) =
-            export_of(opts, &im.account, remote, true).filter(|(_, e)| allows(e, importer, remote))
+        let exporter = &self.defs[to as usize];
+        let Some((at, export)) = export_of(exporter, remote, true)
+            .filter(|&(at, _)| allows(exporter, at, importer, remote, token))
         else {
             return Err("not authorized".into());
         };

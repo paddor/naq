@@ -51,16 +51,12 @@ enum Step {
 
 impl Conn {
     pub(super) async fn read_loop<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Close {
-        let opts = &self.lane.shared.opts;
-        let limits = Limits {
-            max_control_line: opts.max_control_line,
-            max_payload: opts.max_payload,
-        };
-        let stall_mark = opts.max_pending / 4 * 3;
+        let stall_mark = self.lane.shared.opts.max_pending / 4 * 3;
         let mut buf = self.lane.reads.take(READ_CHUNK);
         let timer = tokio::time::sleep_until(self.ping.next);
         tokio::pin!(timer);
         loop {
+            let limits = self.bounds.limits;
             let (at, stop) = self.parse(&buf, &limits);
             if std::mem::take(&mut self.busy) {
                 self.ping.active(Instant::now());
@@ -83,9 +79,10 @@ impl Conn {
                 return Close::Kicked;
             }
             make_room(&mut buf, need, &self.lane.reads);
-            let due = self
-                .auth_by
-                .map_or(self.ping.next, |t| t.min(self.ping.next));
+            let due = [self.auth_by, self.bounds.deadline.map(|(t, _)| t)]
+                .into_iter()
+                .flatten()
+                .fold(self.ping.next, Instant::min);
             if timer.deadline() != due {
                 timer.as_mut().reset(due);
             }
@@ -123,10 +120,17 @@ impl Conn {
         Ok(None)
     }
 
-    /// The timer fired: the end of the time to authenticate, or a `PING`.
+    /// The timer fired: the end of the time to authenticate or of the
+    /// user's JWT, or a `PING`.
     fn timer_fired(&mut self) -> Option<Close> {
-        if self.auth_by.is_some_and(|t| t <= Instant::now()) {
+        let now = Instant::now();
+        if self.auth_by.is_some_and(|t| t <= now) {
             return Some(Close::AuthTimeout);
+        }
+        if let Some((t, why)) = self.bounds.deadline
+            && t <= now
+        {
+            return Some(why);
         }
         self.ping_tick()
     }
@@ -280,10 +284,15 @@ impl Conn {
         self.client.headers.set(self.opts.headers);
         if let Some(auth) = self.lane.shared.auth_for(self.via.ws) {
             let nonce = self.nonce.as_deref().unwrap_or_default();
-            match auth.check(&creds, nonce.as_bytes()) {
+            let origin = crate::jwt::trust::Origin {
+                ip: self.ip.parse().ok(),
+                websocket: self.via.ws,
+            };
+            match auth.check_from(&creds, nonce.as_bytes(), origin) {
                 Check::Pass(account) => self.bind(account),
                 Check::Fail => return Err(Close::Auth),
                 Check::Bcrypt(p) => return Ok(Step::Verify(Box::new(p))),
+                Check::User(u) => self.bind_user(&u)?,
             }
         }
         self.connected()?;
@@ -333,6 +342,46 @@ impl Conn {
             self.client.unsubscribe(&self.lane, &sid);
         }
         self.client.account.set(grant.account);
+    }
+
+    /// Puts the client into the account of user `u` of a JWT, with its
+    /// limits, unless the account has all the connections it may.
+    #[cold]
+    #[inline(never)]
+    fn bind_user(&mut self, u: &crate::jwt::trust::User) -> Result<(), Close> {
+        let shared = self.lane.shared.clone();
+        if self.bounds.counted != Some(u.account) {
+            if !shared.count(u.account, u.conns) {
+                return Err(Close::AccountConns);
+            }
+            if let Some(a) = self.bounds.counted.replace(u.account) {
+                shared.uncount(a);
+            }
+        }
+        self.bind(Grant {
+            account: u.account,
+            perms: u.perms.clone(),
+        });
+        let server = shared.opts.max_payload;
+        self.bounds.limits.max_payload =
+            usize::try_from(u.payload).map_or(server, |p| p.min(server));
+        self.bounds.subs = u.subs;
+        self.bounds.deadline = if u.subs == 0 {
+            // As `nats-server` does: once it is in, it is told and closed.
+            Some((
+                Instant::now() + std::time::Duration::from_millis(20),
+                Close::MaxSubs,
+            ))
+        } else {
+            u.expires.map(|t| {
+                let left = t
+                    .duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default();
+                (Instant::now() + left, Close::UserExpired)
+            })
+        };
+        self.client.meta.borrow_mut().user = Some(u.key.clone());
+        Ok(())
     }
 
     /// Whether it may send `p`, as `nats-server` checks a client's
@@ -442,6 +491,10 @@ impl Conn {
         }
         if self.client.subs.borrow().contains_key(s.sid) {
             return self.ok();
+        }
+        let subs = self.client.subs.borrow().len();
+        if usize::try_from(self.bounds.subs).is_ok_and(|max| subs >= max) {
+            return self.error("maximum subscriptions exceeded");
         }
         if !subject::is_valid_filter(s.subject) {
             return self.error("Invalid Subject");

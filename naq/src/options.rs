@@ -82,6 +82,25 @@ pub struct Options {
     pub system_account: Option<String>,
     /// No system account is made (`no_system_account`).
     pub no_system_account: bool,
+    /// The JWTs of the operators whose accounts the server trusts
+    /// (`operator`): users then log in with a JWT their account signed.
+    pub operators: Vec<String>,
+    /// Operator keys trusted without a JWT (`trusted_keys`).
+    pub trusted_keys: Vec<String>,
+    /// Where the JWTs of accounts come from (`resolver`), with trusted
+    /// operators.
+    pub resolver: Option<Resolver>,
+    /// Account JWTs the resolver starts with, by the account's public key
+    /// (`resolver_preload`).
+    pub resolver_preload: Vec<(String, String)>,
+}
+
+/// Where the JWTs of accounts come from (`resolver`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Resolver {
+    /// Those of [`Options::resolver_preload`] only (`MEMORY`).
+    Memory,
 }
 
 /// A fixed mesh of naq servers (`cluster`): each lists the others, and
@@ -369,6 +388,10 @@ impl Default for Options {
             cluster: None,
             system_account: None,
             no_system_account: false,
+            operators: Vec::new(),
+            trusted_keys: Vec::new(),
+            resolver: None,
+            resolver_preload: Vec::new(),
             http_port: None,
             http_host: None,
             tls: None,

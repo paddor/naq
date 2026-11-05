@@ -24,6 +24,13 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
             "accounts { E { exports: [{stream: \"s.>\"}, {service: \"q.*.*\", accounts: [I], response_type: stream, threshold: 1s, account_token_position: 2}] }\n  I { imports: [{stream: {account: E, subject: \"s.>\"}, prefix: p}, {service: {account: E, subject: \"q.I.*\"}, to: \"r.$1\", share: true}] } }\n",
             "system_account: S\nno_sys_acc: false\naccounts { S {}, E { exports: [{service: l, latency: {sampling: \"50%\", subject: r}}, {service: h, latency: {sampling: headers, subject: r}}] } }\n",
         ],
+        "jwts" => &[
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJKIiwiaWF0IjoxLCJpc3MiOiJPQkFQMjU3WE1YWlY2M09QSkVSVTZRNFlONU9EREk0VDRYUTVKMlJGRUY1VFRPVEJKS01LT05BSiIsInN1YiI6IkFDR0tFWjVYM1NMVTNSNTUyNk9TVExOUlBNN0I1T1pVMjRGSDc3V0JUVDVVQUtCRTNZSUlCVjNBIiwibmF0cyI6eyJ0eXBlIjoiYWNjb3VudCIsInZlcnNpb24iOjIsImxpbWl0cyI6eyJjb25uIjotMX0sInNpZ25pbmdfa2V5cyI6WyJBWCIseyJraW5kIjoidXNlcl9zY29wZSIsImtleSI6IkFZIiwidGVtcGxhdGUiOnt9fV0sImV4cG9ydHMiOlt7InN1YmplY3QiOiJzLj4iLCJ0eXBlIjoic3RyZWFtIn1dfX0.5osOiPS1ydjWp6EHqkbYDqIm-P1U2vd4Hzsf3zf9eE2MMLhqIOuEuGM1j6DSvvQVHB-ejZDFMJTBKhY3fXaaDA",
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJKMTcwODUwODI4NzA4Njc5OTM3IiwiaWF0IjoxNzkzODg2MDAzLCJpc3MiOiJBQ0dLRVo1WDNTTFUzUjU1MjZPU1RMTlJQTTdCNU9aVTI0Rkg3N1dCVFQ1VUFLQkUzWUlJQlYzQSIsInN1YiI6IlVDUFBDQ0JISFBUR1E3Q05CU1lDV0FXRE40MktHSEs3Q0lMNE1YRFhOU1FIR1pVSUdJNE8zTUNaIiwibmF0cyI6eyJ0eXBlIjoidXNlciIsInZlcnNpb24iOjIsInB1YiI6eyJhbGxvdyI6WyJhIl19LCJzcmMiOiIxMC4wLjAuMC84Iiwic3VicyI6LTF9fQ.0ZmFIs0rZTCOx5oaV6X7jowt4ogYQ7K2BJkktNp0I6IFFXaEzP3NlPAMbW0idgCGq6t5o22usJVuhvbC6rfjCw",
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJKNTE2MjIzMzExMzQ0MjQzMzgzIiwiaWF0IjoxNzkzODg2MDAzLCJpc3MiOiJPQkFQMjU3WE1YWlY2M09QSkVSVTZRNFlONU9EREk0VDRYUTVKMlJGRUY1VFRPVEJKS01LT05BSiIsInN1YiI6Ik9CQVAyNTdYTVhaVjYzT1BKRVJVNlE0WU41T0RESTRUNFhRNUoyUkZFRjVUVE9UQkpLTUtPTkFKIiwibmF0cyI6eyJ0eXBlIjoib3BlcmF0b3IiLCJ2ZXJzaW9uIjoyfX0._LBHMLbRZbpaA7J3ywxTDECUDWn4uQiRrWQRaBGgkFR3oHue6TLFrRr3Gd3wkdPZs4WhQxCAp5-uOq8YbSUlAQ",
+            "eyJ0eXAiOiJKV1QifQ.e30.AAAA",
+            "a.b.c",
+        ],
         "leaf_wire" => &[
             "INFO {\"server_id\":\"h\",\"nonce\":\"abc\",\"info_on_connect\":true} \r\nPING\r\n",
             "LS+ foo\r\nLS+ bar.* q 3\r\nLS- bar.* q\r\nLS- foo\r\nLS+ $LDS.xyz\r\n",

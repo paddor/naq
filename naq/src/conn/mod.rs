@@ -214,6 +214,12 @@ pub(crate) enum Close {
     Auth,
     /// It did not authenticate in time.
     AuthTimeout,
+    /// Its account has as many connections as it may.
+    AccountConns,
+    /// Its user JWT expired, or its time window ended.
+    UserExpired,
+    /// It may have no subscriptions at all.
+    MaxSubs,
 }
 
 /// The refusal of a `CONNECT` with a protocol other than 0 and 1.
@@ -254,6 +260,21 @@ struct Conn {
     /// What it may sign to log in with an NKey.
     nonce: Option<Box<str>>,
     via: Via,
+    /// What its user may do, beyond the server's limits.
+    bounds: Bounds,
+}
+
+/// The limits of a connection's user, set as it logs in.
+#[derive(Debug)]
+struct Bounds {
+    /// The largest control line and payload it may send.
+    limits: naq_proto::client::Limits,
+    /// Most subscriptions it may have; -1 for no limit.
+    subs: i64,
+    /// When it is closed, and why: its JWT expires.
+    deadline: Option<(tokio::time::Instant, Close)>,
+    /// The account whose connection count holds it.
+    counted: Option<u32>,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -298,6 +319,7 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
         ip: &ip,
         nonce: nonce.as_deref(),
         ws,
+        max_payload: lane.shared.opts.max_payload,
     };
     handshake::info(&lane.shared, &to, None, &mut info);
     {
@@ -357,6 +379,10 @@ where
     let auth_by = lane.shared.auth_for(via.ws).map(|a| now + a.timeout);
     let out = Outs::new(&lane);
     let ip = client.meta.borrow().ip.clone();
+    let limits = naq_proto::client::Limits {
+        max_control_line: opts.max_control_line,
+        max_payload: opts.max_payload,
+    };
     let mut conn = Conn {
         lane,
         client,
@@ -371,6 +397,12 @@ where
         auth_by,
         nonce,
         via,
+        bounds: Bounds {
+            limits,
+            subs: -1,
+            deadline: None,
+            counted: None,
+        },
     };
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
@@ -406,6 +438,7 @@ impl Conn {
                 ip: &self.ip,
                 nonce: self.nonce.as_deref(),
                 ws: self.via.ws,
+                max_payload: self.bounds.limits.max_payload,
             };
             handshake::info(
                 shared,
@@ -432,6 +465,9 @@ impl Conn {
             self.client.unsubscribe(&self.lane, &sid);
         }
         self.lane.clients.borrow_mut().remove(&self.client.id);
+        if let Some(a) = self.bounds.counted.take() {
+            self.lane.shared.uncount(a);
+        }
         self.lane.shared.client_gone();
         self.lane.flush();
         self.client.ended.set(Some(close));
@@ -455,6 +491,9 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::Stale => Some("Stale Connection"),
         Close::Auth => Some("Authorization Violation"),
         Close::AuthTimeout => Some("Authentication Timeout"),
+        Close::AccountConns => Some("maximum account active connections exceeded"),
+        Close::UserExpired => Some("User Authentication Expired"),
+        Close::MaxSubs => Some("maximum subscriptions exceeded"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked

@@ -4,6 +4,7 @@ mod auth;
 mod cluster;
 mod imports;
 mod leaf;
+mod operator;
 mod parse;
 mod ws;
 
@@ -149,6 +150,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "system_account" | "system" | "no_system_account" | "no_system" | "no_sys_acc" => {
                 auth::system(o, &key, item)?;
             }
+            k if operator::KEYS.contains(&k) => operator::apply(o, k, item)?,
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }

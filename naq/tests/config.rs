@@ -1162,3 +1162,147 @@ fn the_system_account_comes_from_its_keys() {
         }
     }
 }
+
+/// An operator JWT, signed by a fresh operator key.
+fn operator_jwt() -> String {
+    use data_encoding::BASE64URL_NOPAD;
+    let op = nkeys::KeyPair::new_operator();
+    let h = BASE64URL_NOPAD.encode(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#);
+    let body = format!(
+        r#"{{"iss":"{k}","sub":"{k}","nats":{{"type":"operator","version":2}}}}"#,
+        k = op.public_key()
+    );
+    let p = BASE64URL_NOPAD.encode(body.as_bytes());
+    let sig = op.sign(format!("{h}.{p}").as_bytes()).unwrap();
+    format!("{h}.{p}.{}", BASE64URL_NOPAD.encode(&sig))
+}
+
+#[test]
+fn operator_mode_comes_from_its_keys() {
+    let op = operator_jwt();
+    let o: Options = format!("operator: {op}\nresolver: MEMORY\n")
+        .parse()
+        .unwrap();
+    assert_eq!(
+        (o.operators.len(), o.resolver),
+        (1, Some(naq::Resolver::Memory))
+    );
+    let key = nkeys::KeyPair::new_operator().public_key();
+    let o: Options = format!("trusted_keys: [{key}]\nresolver: mem\n")
+        .parse()
+        .unwrap();
+    assert_eq!(o.trusted_keys, [key]);
+    let d = dir("operator");
+    let file = d.join("op.jwt");
+    std::fs::write(
+        &file,
+        format!("-----BEGIN NATS OPERATOR JWT-----\n{op}\n------END NATS OPERATOR JWT------\n"),
+    )
+    .unwrap();
+    let o: Options = format!(
+        "operator: {:?}\nresolver: MEMORY\n",
+        file.display().to_string()
+    )
+    .parse()
+    .unwrap();
+    assert_eq!(o.operators, [op]);
+}
+
+#[test]
+fn operator_mode_that_cannot_run_is_an_error() {
+    let op = operator_jwt();
+    for (text, reason) in [
+        (
+            format!("operator: {op}\n"),
+            "operators require an account resolver to be configured",
+        ),
+        (
+            format!("operator: {op}\nresolver: MEMORY\naccounts [A]\n"),
+            "operators do not allow Accounts to be configured directly",
+        ),
+        (
+            format!("operator: {op}\nresolver: MEMORY\nauthorization {{ token: t }}\n"),
+            "operators do not allow users to be configured directly",
+        ),
+        (
+            "resolver: MEMORY\n".to_owned(),
+            "a resolver needs trusted operators",
+        ),
+        (
+            format!("operator: {op}\nresolver: MEMORY\nresolver_preload {{ ABC: x.y.z }}\n"),
+            "resolver_preload: \"ABC\" is not a public account key",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+    for (text, reason) in [
+        (
+            "trusted_keys: [ABC]\n",
+            "trusted_keys: \"ABC\" is not a public operator key",
+        ),
+        (
+            "resolver: URL(\"http://x\")\n",
+            "resolver: URL resolvers are not supported",
+        ),
+        (
+            "resolver: { type: full, dir: x }\n",
+            "resolver: directory resolvers are not supported",
+        ),
+        (
+            "operator: nothere.jwt\n",
+            "operator: cannot read \"nothere.jwt\": No such file or directory (os error 2)",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn operator_keys_naq_cannot_use_are_an_error() {
+    let (one, two) = (operator_jwt(), operator_jwt());
+    let o: Options = format!("operators: [{one}, {two}]\nresolver: MEMORY\n")
+        .parse()
+        .unwrap();
+    assert_eq!(o.operators.len(), 2);
+    for (text, reason) in [
+        (
+            "resolver_preload: 1\n".to_owned(),
+            "resolver_preload: expected a map of account keys to JWTs",
+        ),
+        (
+            "resolver_preload: { A: [1] }\n".to_owned(),
+            "resolver_preload: expected a JWT",
+        ),
+        ("resolver: 1\n".to_owned(), "resolver: should be MEMORY"),
+        (
+            "operator: 1\n".to_owned(),
+            "operator: expected JWTs or files",
+        ),
+        (
+            "trusted_keys: 1\n".to_owned(),
+            "trusted_keys: expected keys",
+        ),
+        (
+            format!("operator: {one}\nresolver: MEMORY\nsystem_account: X\n"),
+            "system_account: no account \"X\"",
+        ),
+        (
+            format!(
+                "operator: {one}\ntrusted_keys: {}\nresolver: MEMORY\n",
+                nkeys::KeyPair::new_operator().public_key()
+            ),
+            "conflicting options for 'TrustedKeys' and 'TrustedOperators'",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
