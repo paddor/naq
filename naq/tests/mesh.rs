@@ -832,12 +832,10 @@ fn a_server_that_stops_reading_is_let_go() {
     let _c = client(&servers[1], &subs);
     let port = servers[1].cluster_addr().unwrap().port();
     let deadline = Instant::now() + 4 * WAIT;
+    // Up still, or let go already where the subscriptions came slowly.
     let stuck = loop {
         let now = sockets(port);
-        if let Some(&(to, ..)) = now
-            .iter()
-            .find(|&&(_, state, unsent)| state == ESTABLISHED && unsent >= 1 << 20)
-        {
+        if let Some(&(to, ..)) = now.iter().find(|&&(_, _, unsent)| unsent >= 1 << 20) {
             break to;
         }
         assert!(Instant::now() < deadline, "nothing backs up: {now:?}");
