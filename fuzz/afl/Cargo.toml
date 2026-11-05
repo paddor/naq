@@ -12,9 +12,6 @@ afl = "0.18"
 naq-proto = { path = "../../naq-proto" }
 naq = { path = "../../naq", features = ["fuzzing"] }
 
-[patch.crates-io]
-zzq-tokio = { path = "../../../zzq.rs/zzq-tokio" }
-zzq-proto = { path = "../../../zzq.rs/zzq-proto" }
 
 [lints.rust]
 missing_debug_implementations = "deny"

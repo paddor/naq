@@ -10,7 +10,7 @@ edition = "2024"
 rust-version = "1.93"
 license = "ISC OR Apache-2.0"
 authors = ["Patrik Wenger <paddor@gmail.com>"]
-repository = "https://github.com/paddor/naq"
+repository = "https://github.com/paddor/naq.rs"
 readme = "README.md"
 
 [workspace.lints.rust]
@@ -68,6 +68,3 @@ codegen-units = 1
 [profile.bench]
 debug = "line-tables-only"
 
-[patch.crates-io]
-zzq-tokio = { path = "../zzq.rs/zzq-tokio" }
-zzq-proto = { path = "../zzq.rs/zzq-proto" }

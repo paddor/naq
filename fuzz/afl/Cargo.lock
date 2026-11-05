@@ -1622,6 +1622,8 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "zzq-proto"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cec5cf18f3f25df500fe9f09fca83982806e231724dedda37cd998bf042708db"
 dependencies = [
  "thiserror",
 ]
@@ -1629,6 +1631,8 @@ dependencies = [
 [[package]]
 name = "zzq-tokio"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d22ed689f3c21964766e621edceb55bf2b87db3fc130801f51d104ed79018a3c"
 dependencies = [
  "bytes",
  "socket2",
