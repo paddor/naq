@@ -110,8 +110,9 @@ jobs:
           workspaces: fuzz/afl
       - name: install cargo-afl
         run: |
-          cargo install cargo-afl --locked --version 0.18.2
-          # The install may have built AFL++ already, a cached one not.
+          # Again over a cached one: AFL++ builds from the sources the
+          # install fetches.
+          cargo install cargo-afl --locked --version 0.18.2 --force
           cargo afl config --build --force
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
