@@ -3,7 +3,7 @@
 
 use super::Peer;
 use super::told::ByOrigin;
-use crate::index::Index;
+use crate::index::{Index, Members};
 use crate::lane::{Slots, bit};
 
 /// What the routes hear of the interest in `filter`, in `queue` if given:
@@ -25,7 +25,7 @@ pub(super) fn routes(
         all.push((None, clients));
     }
     let leafs = slots.leafs();
-    for &(s, w) in g.servers.iter().filter(|&&(s, _)| leafs & bit(s) != 0) {
+    for &(s, Members { all: w, .. }) in g.servers.iter().filter(|&&(s, _)| leafs & bit(s) != 0) {
         let Some(l) = slots.linked(s) else {
             continue;
         };
@@ -88,7 +88,7 @@ pub(super) fn leaf(
     }
     let skips = bit(leaf.slot) | slots.of_cluster(leaf.cluster);
     let servers = g.servers.iter().filter(|&&(s, _)| skips & bit(s) == 0);
-    let mut n = g.weight() + servers.map(|&(_, w)| u64::from(w)).sum::<u64>();
+    let mut n = g.weight() + servers.map(|&(_, m)| u64::from(m.all)).sum::<u64>();
     n += g.peers.iter().map(|p| u64::from(p.weight)).sum::<u64>();
     if !leaf.cluster.is_empty() {
         for &(s, _) in g.servers.iter().filter(|&&(s, _)| slots.is_route(s)) {

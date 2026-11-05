@@ -12,6 +12,7 @@ use omq_tokio::{Message, MonitorEvent, Socket, SocketType};
 use super::interest::Change;
 use super::{Mesh, Peer, endpoint, route, socket_options};
 use crate::Cluster;
+use crate::index::Members;
 use crate::lane::Control as LaneControl;
 use crate::server::Shared;
 
@@ -150,7 +151,11 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
 
 /// Sets the interest of the server of route `i` on every lane, as change
 /// `c` says, if its account is one of this server's.
-fn server_interest(shared: &Shared, i: usize, (account, subject, queue, weight): Change<'_>) {
+fn server_interest(
+    shared: &Shared,
+    i: usize,
+    (account, subject, queue, all, of_leafs): Change<'_>,
+) {
     let Some(account) = shared.accounts.iter().position(|a| a.as_bytes() == account) else {
         return;
     };
@@ -162,7 +167,7 @@ fn server_interest(shared: &Shared, i: usize, (account, subject, queue, weight):
             subject: subject.into(),
             queue: queue.map(Into::into),
             server,
-            weight,
+            weight: Members { all, of_leafs },
         });
     }
 }

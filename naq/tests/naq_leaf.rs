@@ -1081,3 +1081,45 @@ fn leafz_counts_the_messages_of_naq_links() {
     assert_eq!(delta(counts(&h), hub0), [10, 50, 3, 6], "in, then out");
     assert_eq!(delta(counts(&l), leaf0), [3, 6, 10, 50]);
 }
+
+#[test]
+fn a_queue_group_takes_a_member_a_route_has_for_a_leaf_only_without_another() {
+    let hubs = pair("h", |i| Options {
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            ..Leafnodes::default()
+        }),
+        ..base(&format!("h{i}"))
+    });
+    let deadline = Instant::now() + WAIT;
+    while hubs.iter().any(|h| get(h, "/routez")["num_routes"] != 1) {
+        assert!(Instant::now() < deadline, "routes down");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let l = leaf("leaf", hubs[1].leafnode_addr().unwrap().port());
+    let mut far = client(&l, "SUB j q 1\r\nSUB mark 2\r\n");
+    hears(&hubs[1], "j");
+    let mut near = client(&hubs[0], "SUB j q 1\r\n");
+    // Hub 0 hears of the leaf's interest from hub 1.
+    let detail = || get(&hubs[0], "/routez?subs=detail").to_string();
+    let deadline = Instant::now() + WAIT;
+    while !(detail().contains("\"qgroup\":\"q\"") && detail().contains("\"subject\":\"mark\"")) {
+        assert!(Instant::now() < deadline, "{}", detail());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut p = client(&hubs[0], "");
+    for _ in 0..50 {
+        send(&mut p, "PUB j 1\r\nx\r\n");
+    }
+    for _ in 0..50 {
+        assert_eq!(line(&mut near), "MSG j 1 1");
+        line(&mut near);
+    }
+    // None went to the leaf.
+    send(&mut p, "PUB mark 1\r\nm\r\n");
+    assert_eq!(line(&mut far), "MSG mark 2 1");
+    send(&mut near, "UNSUB 1\r\nPING\r\n");
+    while line(&mut near) != "PONG" {}
+    until_heard(&mut p, &mut far, "j");
+}

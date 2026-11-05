@@ -3,6 +3,8 @@
 use naq_proto::peer::{Control, Interest};
 use rustc_hash::FxHashMap;
 
+use crate::index::Members;
+
 /// Interest by account, filter and queue group.
 type Key = (Box<[u8]>, Box<[u8]>, Option<Box<[u8]>>);
 
@@ -24,12 +26,12 @@ pub(crate) struct Heard {
     /// The other server's interest, as applied.
     view: Entries,
     /// The view summed over origins: what the lanes have.
-    sums: FxHashMap<Key, u32>,
+    sums: FxHashMap<Key, Members>,
 }
 
-/// A change of a server's interest: account name, filter, queue group and
-/// the members now, 0 for none.
-pub(crate) type Change<'a> = (&'a [u8], &'a [u8], Option<&'a [u8]>, u32);
+/// A change of a server's interest: account name, filter, queue group, the
+/// members now, 0 for none, and how many of them it has for its leafs.
+pub(crate) type Change<'a> = (&'a [u8], &'a [u8], Option<&'a [u8]>, u32, u32);
 
 impl Heard {
     /// The interest of a server of start `epoch`, none heard yet.
@@ -121,7 +123,7 @@ impl Heard {
     pub(crate) fn entries(&self) -> impl Iterator<Item = Change<'_>> {
         self.sums
             .iter()
-            .map(|(k, &w)| (&*k.0, &*k.1, k.2.as_deref(), w))
+            .map(|(k, m)| (&*k.0, &*k.1, k.2.as_deref(), m.all, m.of_leafs))
     }
 
     /// The members the other server told of in `subject` of `account`, in
@@ -143,16 +145,16 @@ impl Heard {
 
     /// Makes `entries` the view, applying what differs of the sums.
     fn replace(&mut self, entries: Entries, apply: &mut impl FnMut(Change<'_>)) {
-        let mut sums: FxHashMap<Key, u32> = FxHashMap::default();
-        for ((k, _), &w) in &entries {
+        let mut sums: FxHashMap<Key, Members> = FxHashMap::default();
+        for ((k, origin), &w) in &entries {
             let sum = sums.entry(k.clone()).or_default();
-            *sum = sum.saturating_add(w);
+            *sum = added(*sum, origin.is_some(), w);
         }
         for k in self.sums.keys().filter(|k| !sums.contains_key(*k)) {
-            apply((&k.0, &k.1, k.2.as_deref(), 0));
+            apply((&k.0, &k.1, k.2.as_deref(), 0, 0));
         }
-        for (k, &w) in sums.iter().filter(|(k, w)| self.sums.get(*k) != Some(*w)) {
-            apply((&k.0, &k.1, k.2.as_deref(), w));
+        for (k, m) in sums.iter().filter(|(k, m)| self.sums.get(*k) != Some(*m)) {
+            apply((&k.0, &k.1, k.2.as_deref(), m.all, m.of_leafs));
         }
         self.view = entries;
         self.sums = sums;
@@ -169,15 +171,43 @@ impl Heard {
         if was == weight {
             return;
         }
-        let (k, _) = k;
-        let sum = self.sums.get(&k).copied().unwrap_or(0);
-        let sum = sum.saturating_sub(was).saturating_add(weight);
-        apply((&k.0, &k.1, k.2.as_deref(), sum));
-        if sum == 0 {
+        let (k, origin) = k;
+        let sum = self.sums.get(&k).copied().unwrap_or_default();
+        let sum = added(
+            removed(sum, origin.is_some(), was),
+            origin.is_some(),
+            weight,
+        );
+        apply((&k.0, &k.1, k.2.as_deref(), sum.all, sum.of_leafs));
+        if sum.all == 0 {
             self.sums.remove(&k);
         } else {
             self.sums.insert(k, sum);
         }
+    }
+}
+
+/// `m` with `w` members more, of leafs if `of_leafs`.
+const fn added(m: Members, of_leafs: bool, w: u32) -> Members {
+    Members {
+        all: m.all.saturating_add(w),
+        of_leafs: if of_leafs {
+            m.of_leafs.saturating_add(w)
+        } else {
+            m.of_leafs
+        },
+    }
+}
+
+/// `m` with `w` members fewer, of leafs if `of_leafs`.
+const fn removed(m: Members, of_leafs: bool, w: u32) -> Members {
+    Members {
+        all: m.all.saturating_sub(w),
+        of_leafs: if of_leafs {
+            m.of_leafs.saturating_sub(w)
+        } else {
+            m.of_leafs
+        },
     }
 }
 
@@ -225,7 +255,7 @@ mod tests {
         let mut changes = Vec::new();
         let mut asks = Vec::new();
         for m in msgs {
-            let mut apply = |(_, s, _, w): Change<'_>| {
+            let mut apply = |(_, s, _, w, _): Change<'_>| {
                 changes.push((String::from_utf8_lossy(s).into_owned(), w));
             };
             asks.push(h.take(m, &mut apply));
@@ -353,7 +383,7 @@ mod tests {
         changes.sort();
         assert_eq!(changes, [("a".into(), 0), ("c".into(), 1)], "b stays");
         let mut gone = Vec::new();
-        h.forget(&mut |(_, s, _, w): Change<'_>| gone.push((s.to_vec(), w)));
+        h.forget(&mut |(_, s, _, w, _): Change<'_>| gone.push((s.to_vec(), w)));
         gone.sort();
         assert_eq!(gone, [(b"b".to_vec(), 0), (b"c".to_vec(), 0)]);
         assert_eq!(h.len(), 0);
@@ -396,8 +426,10 @@ mod tests {
         assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), Some(b"x")), 3);
         assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), Some(b"z")), 0);
         assert_eq!(h.len(), 1, "one entry, summed");
+        let parts: Vec<(u32, u32)> = h.entries().map(|e| (e.3, e.4)).collect();
+        assert_eq!(parts, [(4, 4)], "all of them of leafs now");
         let mut gone = Vec::new();
-        h.forget(&mut |(_, _, _, w): Change<'_>| gone.push(w));
+        h.forget(&mut |(_, _, _, w, _): Change<'_>| gone.push(w));
         assert_eq!(gone, [0]);
     }
 }

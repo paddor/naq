@@ -164,7 +164,7 @@ impl<'a, 'p> Routing<'a, 'p> {
     /// Sends the message once to each server with plain interest, but
     /// those it skips.
     #[inline(never)]
-    fn send_servers(&mut self, servers: &[(u16, u32)]) {
+    fn send_servers(&mut self, servers: &[(u16, crate::index::Members)]) {
         for &(s, _) in servers {
             let bit = super::bit(s);
             if self.sent & bit == 0 {

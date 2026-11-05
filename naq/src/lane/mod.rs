@@ -66,14 +66,14 @@ pub(crate) enum Control {
     Fence(oneshot::Sender<()>),
     /// Answered with the lane's clients, for monitoring.
     Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
-    /// Server `server` of the cluster, by route, has `weight` members in
-    /// `subject` of `account`, in `queue` if given; 0 for none.
+    /// The server in slot `server` has `weight` members in `subject` of
+    /// `account`, in `queue` if given; none to remove them.
     Server {
         account: u32,
         subject: Box<[u8]>,
         queue: Option<Box<[u8]>>,
         server: u16,
-        weight: u32,
+        weight: crate::index::Members,
     },
     /// Server `server` of the cluster takes this lane's data at `endpoint`.
     Push { server: u16, endpoint: String },

@@ -445,7 +445,7 @@ fn interest(
     slot: u16,
     account: u32,
     perms: Option<&LinkPerms>,
-    (_, subject, queue, weight): Change<'_>,
+    (_, subject, queue, weight, _): Change<'_>,
 ) {
     if subject == shared.lds[account as usize].as_bytes()
         || perms.is_some_and(|p| !p.takes_interest(subject))
@@ -458,7 +458,7 @@ fn interest(
             subject: subject.into(),
             queue: queue.map(Into::into),
             server: slot,
-            weight,
+            weight: weight.into(),
         });
     }
 }

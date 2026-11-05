@@ -67,9 +67,33 @@ pub(crate) struct Group {
     /// Links whose hubs have subscriptions. A queue group's message goes
     /// to one only when no client here or on another lane takes it.
     pub(crate) peers: Vec<Peer>,
-    /// Other servers of the cluster with subscriptions, by route, and how
-    /// many each has.
-    pub(crate) servers: Vec<(u16, u32)>,
+    /// Other servers with subscriptions, by slot, and how many each has.
+    pub(crate) servers: Vec<(u16, Members)>,
+}
+
+/// The members of a group at another server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Members {
+    /// All of them; 1 for plain interest.
+    pub(crate) all: u32,
+    /// Those a route has for its leafs: a queue group's message goes to
+    /// them only when no other member takes it, as in `nats-server`.
+    pub(crate) of_leafs: u32,
+}
+
+impl Members {
+    /// Those a queue group's message goes to first.
+    #[inline]
+    pub(crate) const fn first(self) -> u32 {
+        self.all.saturating_sub(self.of_leafs)
+    }
+}
+
+impl From<u32> for Members {
+    /// `all` members, none for leafs.
+    fn from(all: u32) -> Members {
+        Members { all, of_leafs: 0 }
+    }
 }
 
 impl Group {
@@ -80,16 +104,16 @@ impl Group {
             && self.servers.is_empty()
     }
 
-    /// Sets the members at server `server`; 0 removes it.
-    fn set_server(&mut self, server: u16, weight: u32) {
+    /// Sets the members at server `server`; none removes it.
+    fn set_server(&mut self, server: u16, m: Members) {
         let at = self.servers.iter().position(|&(s, _)| s == server);
-        match (at, weight) {
+        match (at, m.all) {
             (Some(at), 0) => {
                 self.servers.swap_remove(at);
             }
-            (Some(at), w) => self.servers[at].1 = w,
+            (Some(at), _) => self.servers[at].1 = m,
             (None, 0) => {}
-            (None, w) => self.servers.push((server, w)),
+            (None, _) => self.servers.push((server, m)),
         }
     }
 
@@ -124,7 +148,7 @@ impl Group {
             .servers
             .iter()
             .filter(|&&(s, _)| leafs & crate::lane::bit(s) != 0)
-            .map(|&(_, w)| u64::from(w))
+            .map(|&(_, m)| u64::from(m.all))
             .sum::<u64>();
         let mine = self.weight() + of_leafs;
         if !filter.starts_with(b"$LDS.") {
@@ -298,15 +322,20 @@ impl Index {
         }
     }
 
-    /// Sets the members server `server` has in `filter`, in `queue` if
-    /// given; 0 removes them.
-    pub(crate) fn server(&mut self, filter: &[u8], queue: Option<&[u8]>, server: u16, weight: u32) {
-        if weight > 0 {
-            self.interest(filter)
-                .group(queue)
-                .set_server(server, weight);
+    /// Sets the members `m` server `server` has in `filter`, in `queue` if
+    /// given; none removes them.
+    pub(crate) fn server(
+        &mut self,
+        filter: &[u8],
+        queue: Option<&[u8]>,
+        server: u16,
+        m: impl Into<Members>,
+    ) {
+        let m = m.into();
+        if m.all > 0 {
+            self.interest(filter).group(queue).set_server(server, m);
         } else {
-            self.change(filter, queue, |g| g.set_server(server, 0));
+            self.change(filter, queue, |g| g.set_server(server, m));
         }
     }
 
@@ -511,8 +540,8 @@ mod tests {
             panic!("a.* matches")
         };
         let i = f.iter().next().unwrap();
-        assert_eq!(i.plain.servers, [(2, 1)]);
-        assert_eq!(i.queues[0].1.servers, [(2, 5)]);
+        assert_eq!(i.plain.servers, [(2, 1.into())]);
+        assert_eq!(i.queues[0].1.servers, [(2, 5.into())]);
         assert_eq!(idx.clients(b"a.*", Some(b"q")), 0, "no client members");
         idx.server(b"a.*", None, 2, 0);
         idx.server(b"a.*", Some(b"q"), 2, 0);

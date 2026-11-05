@@ -8,7 +8,7 @@ use naq_proto::encode::Msg;
 
 use super::Lane;
 use crate::conn::Client;
-use crate::index::{Entry, Few, Group, Peer};
+use crate::index::{Entry, Few, Group, Members, Peer};
 
 /// Where a queue group's message went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,24 +149,22 @@ impl Lane {
     /// Picks the member of the queue group made of `groups` that gets the
     /// next message: each member on any lane as likely as the others, and
     /// those at the routes not in `skips`, each as many as its weight, as
-    /// in `nats-server`. Without one, a member at a naq hub or leaf not in
-    /// `skips`, by weight.
+    /// in `nats-server`. Without one, a member at a naq hub or leaf, or one
+    /// a route has for its leafs, not in `skips`, by weight.
     fn pick(&self, groups: &Few<'_, Group>, skips: u64) -> Option<Pick> {
         let fallback = self.slots.fallback();
-        let open = |s: u16, last: bool| {
+        let first = |s: u16, m: Members| -> u64 {
             let b = super::bit(s);
-            skips & b == 0 && (fallback & b != 0) == last
+            if (skips | fallback) & b == 0 {
+                u64::from(m.first())
+            } else {
+                0
+            }
         };
-        let remote = |g: &Group, last: bool| -> u64 {
-            g.servers
-                .iter()
-                .filter(|&&(s, _)| open(s, last))
-                .map(|&(_, w)| u64::from(w))
-                .sum()
-        };
-        let total: u64 = groups.iter().map(|g| g.weight() + remote(g, false)).sum();
+        let remote = |g: &Group| -> u64 { g.servers.iter().map(|&(s, m)| first(s, m)).sum() };
+        let total: u64 = groups.iter().map(|g| g.weight() + remote(g)).sum();
         if total == 0 {
-            return self.pick_last(groups, open);
+            return self.pick_last(groups, skips, fallback);
         }
         let mut n = self.below(total);
         let local = local_len(groups) as u64;
@@ -180,40 +178,44 @@ impl Lane {
             }
             n -= u64::from(count);
         }
-        let open = groups
-            .iter()
-            .flat_map(|g| &g.servers)
-            .filter(|&&(s, _)| open(s, false));
-        for &(s, w) in open {
-            if n < u64::from(w) {
+        for &(s, m) in groups.iter().flat_map(|g| &g.servers) {
+            let w = first(s, m);
+            if n < w {
                 return Some(Pick::Server(s));
             }
-            n -= u64::from(w);
+            n -= w;
         }
         None
     }
 
-    /// Picks a member at a naq hub or leaf that `open` lets through, each
-    /// as likely as its weight. Out of line: queue groups have members
-    /// here or at routes, mostly.
+    /// Picks a member at a naq hub or leaf, all in `fallback`, or one a
+    /// route has for its leafs, not in `skips`, each as likely as its
+    /// weight. Out of line: queue groups have members here or at routes,
+    /// mostly.
     #[inline(never)]
-    fn pick_last(&self, groups: &Few<'_, Group>, open: impl Fn(u16, bool) -> bool) -> Option<Pick> {
-        let last = || {
-            groups
-                .iter()
-                .flat_map(|g| &g.servers)
-                .filter(|&&(s, _)| open(s, true))
+    fn pick_last(&self, groups: &Few<'_, Group>, skips: u64, fallback: u64) -> Option<Pick> {
+        let last = |s: u16, m: Members| -> u64 {
+            let b = super::bit(s);
+            if skips & b != 0 {
+                0
+            } else if fallback & b != 0 {
+                u64::from(m.all)
+            } else {
+                u64::from(m.of_leafs)
+            }
         };
-        let total: u64 = last().map(|&(_, w)| u64::from(w)).sum();
+        let all = || groups.iter().flat_map(|g| &g.servers);
+        let total: u64 = all().map(|&(s, m)| last(s, m)).sum();
         if total == 0 {
             return None;
         }
         let mut n = self.below(total);
-        for &(s, w) in last() {
-            if n < u64::from(w) {
+        for &(s, m) in all() {
+            let w = last(s, m);
+            if n < w {
                 return Some(Pick::Server(s));
             }
-            n -= u64::from(w);
+            n -= w;
         }
         None
     }

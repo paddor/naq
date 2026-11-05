@@ -291,7 +291,7 @@ pub(crate) fn routes(lane: &Lane, subs: Subs) -> Vec<RouteInfo> {
                     r.subscriptions_list_detail = p
                         .heard
                         .entries()
-                        .map(|(account, subject, queue, weight)| SubDetail {
+                        .map(|(account, subject, queue, weight, _)| SubDetail {
                             account: text(account),
                             subject: text(subject),
                             qgroup: queue.map(text),

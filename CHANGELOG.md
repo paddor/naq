@@ -327,3 +327,6 @@ Notable changes to naq. The format follows
   `no_auth_user`.
 - `naq`: a naq leaf closes all its channels to a hub once the link is gone,
   not only those it sends on; the others dialed the hub on and on.
+- `naq`: a queue group's message goes to a member a route has for its
+  leafs only when no member elsewhere takes it, as in `nats-server`; such
+  members had counted as the route's own.
