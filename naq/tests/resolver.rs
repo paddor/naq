@@ -205,6 +205,11 @@ impl Client {
     /// Connects with user JWT `jwt`: the first line after the `CONNECT`
     /// and a `PING`.
     fn connect(t: &Target, jwt: &str) -> (Client, String) {
+        Client::connect_with(t, jwt, "")
+    }
+
+    /// As [`Client::connect`], with the CONNECT fields `extra` too.
+    fn connect_with(t: &Target, jwt: &str, extra: &str) -> (Client, String) {
         let w = TcpStream::connect(t.addr()).unwrap();
         w.set_read_timeout(Some(WAIT)).unwrap();
         let mut c = Client {
@@ -213,7 +218,7 @@ impl Client {
         };
         c.line();
         c.send(&format!(
-            "CONNECT {{\"verbose\":false,\"protocol\":0,\"jwt\":\"{jwt}\"}}\r\nPING\r\n"
+            "CONNECT {{\"verbose\":false,\"protocol\":0,\"jwt\":\"{jwt}\"{extra}}}\r\nPING\r\n"
         ));
         let first = c.line();
         (c, first)
@@ -264,6 +269,22 @@ impl Client {
         self.send("UNSUB 99\r\nPING\r\n");
         assert_eq!(self.line(), "PONG");
         all
+    }
+
+    /// The header lines of the status that comes back for `payload` on
+    /// `subject` asked with `SUB _R.> 99`: no one answered.
+    fn no_responders(&mut self, subject: &str, payload: &str) -> Vec<String> {
+        self.send(&format!(
+            "PUB {subject} _R.1 {}\r\n{payload}\r\n",
+            payload.len()
+        ));
+        let head = self.line();
+        assert!(head.starts_with("HMSG _R.1 99 "), "{subject}: {head}");
+        let status = std::iter::from_fn(|| Some(self.line()))
+            .take_while(|l| !l.is_empty())
+            .collect();
+        assert_eq!(self.line(), "", "{subject}: no payload");
+        status
     }
 
     /// The answer to `payload` on `subject`, in JSON, without the server
@@ -732,4 +753,133 @@ fn a_cache_drops_a_jwt_its_ttl_after_its_last_use() {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+/// Requests to the services of the system account: by a client of
+/// account `a`, to store `b`, close and delete `a`, list, look up and
+/// pack the JWTs, and ping the servers.
+fn system_requests(w: &World, a: &KeyPair, b: &KeyPair) -> Vec<(String, String)> {
+    let of_b = w.account(b, json!({}));
+    let closed = w.account(a, json!({"limits": {"conn": 0}}));
+    let delete = json!({"jti": "D", "iat": now(), "iss": w.op.public_key(), "sub": w.op.public_key(), "nats": {"accounts": [a.public_key()], "type": "generic", "version": 2}});
+    let (a, b) = (a.public_key(), b.public_key());
+    vec![
+        ("$SYS.REQ.CLAIMS.UPDATE".into(), of_b.clone()),
+        (format!("$SYS.REQ.ACCOUNT.{b}.CLAIMS.UPDATE"), of_b),
+        (format!("$SYS.REQ.ACCOUNT.{a}.CLAIMS.UPDATE"), closed),
+        ("$SYS.REQ.CLAIMS.LIST".into(), String::new()),
+        ("$SYS.REQ.CLAIMS.DELETE".into(), sign(&w.op, &delete)),
+        (format!("$SYS.REQ.ACCOUNT.{a}.CLAIMS.LOOKUP"), String::new()),
+        ("$SYS.REQ.CLAIMS.PACK".into(), String::new()),
+        ("$SYS.REQ.SERVER.PING".into(), String::new()),
+    ]
+}
+
+#[test]
+fn system_requests_from_another_account_reach_no_service() {
+    let w = World::new();
+    let (a, b) = (KeyPair::new_account(), KeyPair::new_account());
+    let resolver = "type: full, dir: DIR, allow_delete: true, timeout: \"300ms\"";
+    for (name, t) in targets(w.conf(resolver)) {
+        let mut sys = Client::login(&t, &bearer(&w.sys));
+        let jwt = w.account(&a, json!({}));
+        let ok = sys.json("$SYS.REQ.CLAIMS.UPDATE", &jwt);
+        assert_eq!(ok, stored(&a.public_key()), "{name}");
+        let no_responders = r#","headers":true,"no_responders":true"#;
+        let (mut c, first) = Client::connect_with(&t, &bearer(&a), no_responders);
+        assert_eq!(first, "PONG", "{name}");
+        c.send("SUB _R.> 99\r\n");
+        for (subject, payload) in system_requests(&w, &a, &b) {
+            let status = c.no_responders(&subject, &payload);
+            let want = [
+                "NATS/1.0 503".to_owned(),
+                format!("Nats-Subject: {subject}"),
+            ];
+            assert_eq!(status, want, "{name}");
+        }
+        // Nor does it hear what goes on in the system account.
+        c.send("UNSUB 99\r\nSUB $SYS.> 1\r\nPING\r\n");
+        assert_eq!(c.line(), "PONG", "{name}");
+        let list = sys.json("$SYS.REQ.CLAIMS.LIST", "");
+        let mut keys = [a.public_key(), w.sys.public_key()];
+        keys.sort();
+        assert_eq!(
+            list,
+            json!({"data": keys}),
+            "{name}: nothing stored or deleted"
+        );
+        let other = Client::login(&t, &bearer(&a));
+        drop(other);
+        let (_, refused) = Client::connect(&t, &bearer(&b));
+        assert_eq!(refused, "-ERR 'Authorization Violation'", "{name}");
+        sys.send("PING\r\n");
+        assert_eq!(sys.line(), "PONG", "{name}");
+        c.send("PING\r\n");
+        assert_eq!(c.line(), "PONG", "{name}: still in, and heard nothing");
+    }
+}
+
+#[test]
+fn a_client_of_an_account_no_server_has_is_refused_in_time() {
+    let w = World::new();
+    let a = KeyPair::new_account();
+    let dead = free_port();
+    // A route that is never up: each server of its own port.
+    let cluster = || {
+        format!(
+            "cluster {{ name: c, listen: \"127.0.0.1:{}\", routes: [\"nats-route://127.0.0.1:{dead}\"] }}\n",
+            free_port()
+        )
+    };
+    for (resolver, routed) in [
+        ("type: cache, dir: DIR, timeout: \"300ms\"", false),
+        ("type: full, dir: DIR, timeout: \"300ms\"", true),
+    ] {
+        let conf = w.conf(resolver);
+        let more = |dir: &Path| {
+            let routes = if routed { cluster() } else { String::new() };
+            format!("{routes}{}", conf(dir))
+        };
+        for (name, t) in targets(more) {
+            let started = Instant::now();
+            let (_, first) = Client::connect(&t, &bearer(&a));
+            assert_eq!(
+                first, "-ERR 'Authorization Violation'",
+                "{name}: {resolver}"
+            );
+            let took = started.elapsed();
+            assert!(
+                took < Duration::from_secs(2),
+                "{name}: {resolver}: {took:?}"
+            );
+            Client::login(&t, &bearer(&w.sys));
+        }
+    }
+}
+
+#[test]
+fn a_cache_whose_full_resolver_is_gone_refuses_the_accounts_it_lacks() {
+    let w = World::new();
+    let (a, b) = (KeyPair::new_account(), KeyPair::new_account());
+    let full = [
+        (&a, w.account(&a, json!({}))),
+        (&b, w.account(&b, json!({}))),
+    ];
+    let resolvers = [
+        "type: full, dir: DIR",
+        "type: cache, dir: DIR, timeout: \"300ms\"",
+    ];
+    let mut servers = cluster(&w, resolvers, [&full, &[]]);
+    login_until_in(&servers[1], &bearer(&a));
+    drop(servers.remove(0));
+    let started = Instant::now();
+    let (_, first) = Client::connect(&servers[0], &bearer(&b));
+    assert_eq!(first, "-ERR 'Authorization Violation'");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    // What it fetched before stays in use.
+    Client::login(&servers[0], &bearer(&a));
 }

@@ -15,6 +15,13 @@ use proxy::{OPEN, Proxy};
 /// Longest wait for anything a test expects.
 const WAIT: Duration = Duration::from_secs(5);
 
+/// A client of `s` that logged in as `name`, password `p`, sent `ops`
+/// and got its `PONG`.
+fn login(s: &Server, name: &str, ops: &str) -> Client {
+    let connect = format!("{{\"verbose\":false,\"user\":\"{name}\",\"pass\":\"p\"}}");
+    client_with(s, &connect, ops)
+}
+
 /// A free port, each once per run, below the kernel's ephemeral ports.
 fn free_port() -> u16 {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -153,9 +160,10 @@ fn send(c: &mut Client, s: &str) {
 }
 
 /// Publishes `subject` from `p` until `c` gets it, then a last one that
-/// `c` gets once, after those still on their way.
-fn until_heard(p: &mut Client, c: &mut Client, subject: &str) {
+/// `c` gets once, after those still on their way: the lines `c` got.
+fn until_heard(p: &mut Client, c: &mut Client, subject: &str) -> Vec<String> {
     let deadline = Instant::now() + WAIT;
+    let mut got = Vec::new();
     c.get_mut()
         .set_read_timeout(Some(Duration::from_millis(50)))
         .unwrap();
@@ -163,14 +171,18 @@ fn until_heard(p: &mut Client, c: &mut Client, subject: &str) {
         send(p, &format!("PUB {subject} 4\r\nwait\r\n"));
         let mut l = String::new();
         if c.read_line(&mut l).is_ok() && l.starts_with(&format!("MSG {subject} ")) {
-            line(c);
+            got.extend([l.trim_end().to_owned(), line(c)]);
             break;
         }
+        got.extend((!l.is_empty()).then(|| l.trim_end().to_owned()));
         assert!(Instant::now() < deadline, "nothing on {subject}");
     }
     c.get_mut().set_read_timeout(Some(WAIT)).unwrap();
     send(p, &format!("PUB {subject} 4\r\nsync\r\n"));
-    while line(c) != "sync" {}
+    while got.last().is_none_or(|l| l != "sync") {
+        got.push(line(c));
+    }
+    got
 }
 
 /// A hub and its leaf, linked.
@@ -355,21 +367,21 @@ fn a_leaf_links_again_to_a_hub_that_starts_again() {
 }
 
 #[test]
-fn a_leaf_binds_the_account_the_hub_gives() {
+fn a_leaf_binds_the_account_the_hub_gives_and_shares_no_other() {
     let hub = Server::start(&Options {
-        accounts: vec!["H".into()],
+        accounts: vec!["H".into(), "G".into()],
         leafnodes: Some(Leafnodes {
             host: "127.0.0.1".into(),
             port: 0,
             account: Some("H".into()),
             ..Leafnodes::default()
         }),
-        users: vec![user("u", "p", Some("H"))],
+        users: vec![user("u", "p", Some("H")), user("g", "p", Some("G"))],
         ..base("hub")
     })
     .unwrap();
     let spoke = Server::start(&Options {
-        accounts: vec!["L".into()],
+        accounts: vec!["L".into(), "M".into()],
         // Without users of its own for leafs, the hub's clients' stand in.
         remotes: vec![Remote {
             urls: vec![format!(
@@ -379,7 +391,7 @@ fn a_leaf_binds_the_account_the_hub_gives() {
             account: Some("L".into()),
             ..Remote::default()
         }],
-        users: vec![user("v", "p", Some("L"))],
+        users: vec![user("v", "p", Some("L")), user("m", "p", Some("M"))],
         ..base("leaf")
     })
     .unwrap();
@@ -387,22 +399,27 @@ fn a_leaf_binds_the_account_the_hub_gives() {
     assert_eq!(z["leafs"][0]["account"], "H");
     let z = leafz(&spoke, |z| z["leafnodes"] == 1);
     assert_eq!(z["leafs"][0]["account"], "L");
-    let user = |server: &Server, name: &str, ops: &str| {
-        let mut c = TcpStream::connect(server.addr()).unwrap();
-        c.set_read_timeout(Some(WAIT)).unwrap();
-        write!(
-            c,
-            "CONNECT {{\"verbose\":false,\"user\":\"{name}\",\"pass\":\"p\"}}\r\n{ops}PING\r\n"
-        )
-        .unwrap();
-        let mut r = BufReader::new(c);
-        while line(&mut r) != "PONG" {}
-        r
-    };
-    let mut at_hub = user(&hub, "u", "SUB x 1\r\n");
+    let mut at_hub = login(&hub, "u", "SUB x 1\r\n");
     hears(&spoke, "x");
-    let mut p = user(&spoke, "v", "");
-    until_heard(&mut p, &mut at_hub, "x");
+    let mut p = login(&spoke, "v", "SUB y 1\r\n");
+    hears(&hub, "y");
+    let (mut g, mut m) = (
+        login(&hub, "g", "SUB x 1\r\n"),
+        login(&spoke, "m", "SUB y 1\r\n"),
+    );
+    // What the other accounts of each side publish stays there.
+    send(&mut m, "PUB x 2\r\nno\r\nPING\r\n");
+    assert_eq!(line(&mut m), "PONG");
+    send(&mut g, "PUB y 2\r\nno\r\nPING\r\n");
+    assert_eq!(line(&mut g), "PONG");
+    let got = until_heard(&mut p, &mut at_hub, "x");
+    assert!(!got.contains(&"no".into()), "x: {got:?}");
+    let got = until_heard(&mut at_hub, &mut p, "y");
+    assert!(!got.contains(&"no".into()), "y: {got:?}");
+    for (c, side) in [(&mut g, "hub"), (&mut m, "leaf")] {
+        send(c, "PING\r\n");
+        assert_eq!(line(c), "PONG", "another account of the {side}");
+    }
 }
 
 /// Two servers of cluster `name`, each with `more` options, on fresh

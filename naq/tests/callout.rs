@@ -185,6 +185,8 @@ struct Service {
     signers: Vec<(&'static str, Arc<KeyPair>)>,
     /// The requests it got.
     seen: Arc<std::sync::Mutex<Vec<Value>>>,
+    /// How many answers it sent.
+    answered: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Service {
@@ -194,6 +196,7 @@ impl Service {
             xkey: None,
             signers: Vec::new(),
             seen: Arc::default(),
+            answered: Arc::default(),
         }
     }
 
@@ -214,6 +217,9 @@ impl Service {
                 if c.r.get_mut().write_all(&out).is_err() {
                     return;
                 }
+                // Relaxed: the test only waits for the count to grow.
+                self.answered
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         });
     }
@@ -285,6 +291,12 @@ impl Service {
                 respond(&stranger, user_nkey, server, json!({"jwt": granted()}))
             }
             "empty" => String::new(),
+            // In time, and past the callout's timeout.
+            "slow" | "late" => {
+                let ms = if name == "slow" { 300 } else { 1_300 };
+                std::thread::sleep(Duration::from_millis(ms));
+                grant(granted())
+            }
             "silent" => return None,
             _ => respond(issuer, user_nkey, server, json!({"error": "not you"})),
         })
@@ -801,5 +813,26 @@ fn a_client_that_acts_before_its_connect_is_refused() {
         let mut line = String::new();
         r.read_line(&mut line).unwrap();
         assert_eq!(line.trim_end(), DENIED, "{name}");
+    }
+}
+
+#[test]
+fn a_client_gone_or_timed_out_before_its_answer_leaves_nothing_behind() {
+    let issuer = Arc::new(KeyPair::new_account());
+    for (name, t) in targets(&conf(&issuer, "")) {
+        let service = Service::new(&issuer);
+        let answered = service.answered.clone();
+        service.run(&t, &json!({"user": "auth", "pass": "pwd"}), "AUTH", None);
+        drop(Client::login(&t, &json!({"user": "slow"})));
+        let got = Client::login(&t, &json!({"user": "late"})).outcome();
+        assert_eq!(got, DENIED, "{name}: answered too late");
+        let deadline = Instant::now() + WAIT;
+        // Relaxed: a count only.
+        while answered.load(std::sync::atomic::Ordering::Relaxed) < 2 {
+            assert!(Instant::now() < deadline, "{name}: not answered");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let got = Client::login(&t, &json!({"user": "letin"})).outcome();
+        assert_eq!(got, "FOO", "{name}: the next client");
     }
 }

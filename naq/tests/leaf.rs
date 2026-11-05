@@ -1931,3 +1931,102 @@ fn a_hub_linked_to_an_exporter_hears_of_the_replies_of_its_requests() {
     assert_eq!(replies.len(), 1, "{first:?}");
     assert!(replies[0].ends_with(".>") && replies[0].len() == "LS+ _R_.abcdef.>".len());
 }
+
+/// A client of the Go server on `port` that logs in as `user`, password
+/// `p`, subscribed as `subs` say.
+fn go_login(port: u16, user: &str, subs: &str) -> Peer {
+    let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(WAIT)).unwrap();
+    let mut c = Peer {
+        r: BufReader::new(s.try_clone().unwrap()),
+        w: s,
+    };
+    c.line();
+    c.send(&format!(
+        "CONNECT {{\"verbose\":false,\"user\":\"{user}\",\"pass\":\"p\"}}\r\n{subs}PING\r\n"
+    ));
+    assert_eq!(c.line(), "PONG");
+    c
+}
+
+/// Publishes `subject` from `p` until `c` gets it, then `done`, and the
+/// payloads `c` got until that one.
+fn heard_until_done(p: &mut Peer, c: &mut Peer, subject: &str) -> Vec<String> {
+    let deadline = Instant::now() + WAIT;
+    c.w.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        p.send(&format!("PUB {subject} 4\r\nwait\r\n"));
+        let mut l = String::new();
+        if c.r.read_line(&mut l).is_ok() && l.starts_with(&format!("MSG {subject} ")) {
+            c.line();
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing on {subject}");
+    }
+    c.w.set_read_timeout(Some(WAIT)).unwrap();
+    p.send(&format!("PUB {subject} 4\r\ndone\r\n"));
+    let mut got = Vec::new();
+    while got.last().is_none_or(|l| l != "done") {
+        let head = c.line();
+        assert!(head.starts_with(&format!("MSG {subject} ")), "{head}");
+        got.push(c.line());
+    }
+    got
+}
+
+#[test]
+fn a_leaf_bound_to_an_account_of_a_go_hub_shares_no_other() {
+    let (port, leafport, http) = (free_port(), free_port(), free_port());
+    let conf = format!(
+        "port: {port}\nhttp_port: {http}\naccounts {{\n  H {{ users: [{{user: h, password: p}}] }}\n  G {{ users: [{{user: g, password: p}}] }}\n}}\n\
+         leafnodes {{ port: {leafport}, authorization {{ users: [{{user: l, password: p, account: H}}] }} }}\n"
+    );
+    let Some(_hub) = go(&conf) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let opts: Options = "accounts {\n  L { users: [{user: l, password: p}] }\n  M { users: [{user: m, password: p}] }\n}\n"
+        .parse()
+        .unwrap();
+    let leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        leaf_reconnect: Duration::from_millis(50),
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://l:p@127.0.0.1:{leafport}")],
+            account: Some("L".into()),
+            ..Remote::default()
+        }],
+        ..opts
+    })
+    .unwrap();
+    leafz_until(http, |z| {
+        z["leafnodes"] == 1 && z["leafs"][0]["account"] == "H"
+    });
+    let (mut h, mut l) = (go_login(port, "h", "SUB x 1\r\n"), login(&leaf, "l"));
+    let (mut g, mut m) = (go_login(port, "g", "SUB x 1\r\n"), login(&leaf, "m"));
+    m.send("PUB x 2\r\nno\r\nPING\r\n");
+    assert_eq!(m.line(), "PONG");
+    let got = heard_until_done(&mut l, &mut h, "x");
+    assert!(
+        !got.contains(&"no".into()),
+        "another account of the leaf: {got:?}"
+    );
+    g.send("PING\r\n");
+    assert_eq!(g.line(), "PONG", "another account of the hub");
+    l.send("SUB y 1\r\nPING\r\n");
+    assert_eq!(l.line(), "PONG");
+    m.send("SUB y 1\r\nPING\r\n");
+    assert_eq!(m.line(), "PONG");
+    g.send("PUB y 2\r\nno\r\nPING\r\n");
+    assert_eq!(g.line(), "PONG");
+    let got = heard_until_done(&mut h, &mut l, "y");
+    assert!(
+        !got.contains(&"no".into()),
+        "another account of the hub: {got:?}"
+    );
+    m.send("PING\r\n");
+    assert_eq!(m.line(), "PONG", "another account of the leaf");
+}

@@ -293,6 +293,35 @@ fn a_user_of_a_jwt_logs_in_by_signing_the_nonce() {
 }
 
 #[test]
+fn a_signature_of_another_connection_s_nonce_is_refused() {
+    let w = World::new();
+    let nkey = KeyPair::new_user();
+    let config = format!(
+        "authorization {{ users: [{{nkey: {}}}] }}\n",
+        nkey.public_key()
+    );
+    let jwt_user = KeyPair::new_user();
+    let jwt = user(&w.a, &jwt_user, &json!({}), &json!({}));
+    let nkey_field = format!(r#","nkey":"{}""#, nkey.public_key());
+    for (conf, kp, jwt, extra) in [
+        (w.conf(), &jwt_user, jwt.as_str(), ""),
+        (config, &nkey, "", nkey_field.as_str()),
+    ] {
+        for (name, t) in targets(&conf) {
+            let mut first = Client::login(&t, Some(kp), jwt, extra);
+            assert_eq!(first.line(), "PONG", "{name}: {extra}");
+            let sig = BASE64URL_NOPAD.encode(&kp.sign(first.nonce.as_bytes()).unwrap());
+            let mut again = Client::dial(&t);
+            assert_ne!(again.nonce, first.nonce, "{name}: a fresh nonce");
+            again.send(&format!(
+                "CONNECT {{\"verbose\":false,\"protocol\":1,\"jwt\":\"{jwt}\",\"sig\":\"{sig}\"{extra}}}\r\nPING\r\n"
+            ));
+            refused(&mut again, name, "a signature of another nonce");
+        }
+    }
+}
+
+#[test]
 fn a_user_jwt_out_of_its_time_or_of_an_unknown_account_is_refused() {
     let w = World::new();
     let conf = w.conf();
