@@ -111,22 +111,60 @@ fn forward(
             break;
         };
         let now = state.load(Ordering::Relaxed);
-        if matches!(now, OPEN | STALLING) && to.write_all(&buf[..n]).is_err() {
+        // Stalling, it passes what comes up to the end of the first frame
+        // after a heartbeat, and drops the rest.
+        let stall = if dialer {
+            past_heartbeat(&buf[..n], &mut pinged).filter(|_| now == STALLING)
+        } else {
+            None
+        };
+        let len = stall.unwrap_or(n);
+        if matches!(now, OPEN | STALLING) && to.write_all(&buf[..len]).is_err() {
             break;
         }
-        if dialer {
-            // ZMTP command names come length first.
-            let ping = buf[..n].windows(5).any(|w| w == b"\x04PING");
-            if now == STALLING && pinged && !ping {
-                state.store(STALLED, Ordering::Relaxed);
-            }
-            pinged |= ping;
+        if stall.is_some() {
+            state.store(STALLED, Ordering::Relaxed);
         }
     }
     // A blackhole tells of no end either.
     if state.load(Ordering::Relaxed) != BLACKHOLE {
         let _ = to.shutdown(std::net::Shutdown::Both);
     }
+}
+
+/// Where the first ZMTP frame of `chunk` that is no heartbeat, after one,
+/// ends, if one does; `pinged` notes a heartbeat. Frames are taken to start
+/// the chunk, as they do on a quiet link; past what it can read, the rest
+/// of the chunk counts as one frame.
+fn past_heartbeat(chunk: &[u8], pinged: &mut bool) -> Option<usize> {
+    let mut at = 0;
+    while at < chunk.len() {
+        let flags = chunk[at];
+        // The flags, then the size: 8 bytes in a long frame, else 1.
+        let (head, size) = if flags & 0x02 == 0 {
+            (2, chunk.get(at + 1).map(|&s| usize::from(s)))
+        } else {
+            let long = chunk
+                .get(at + 1..at + 9)
+                .and_then(|s| <[u8; 8]>::try_from(s).ok());
+            (
+                9,
+                long.map(|s| usize::try_from(u64::from_be_bytes(s)).unwrap_or(usize::MAX)),
+            )
+        };
+        let end = size.map_or(chunk.len(), |s| {
+            (at + head).saturating_add(s).min(chunk.len())
+        });
+        // A command, its name length first.
+        let body = chunk.get(at + head..).unwrap_or_default();
+        let ping = flags & 0x04 != 0 && body.starts_with(b"\x04PING");
+        if *pinged && !ping {
+            return Some(end);
+        }
+        *pinged |= ping;
+        at = end;
+    }
+    None
 }
 
 impl Drop for Proxy {

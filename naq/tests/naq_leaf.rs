@@ -517,10 +517,11 @@ fn a_hub_cluster_carries_a_leaf_s_messages_to_its_other_servers_and_leafs() {
     until_heard(&mut q, &mut at_h0, "t");
 }
 
-/// The established TCP connections to `host` but to its `port`, by the
-/// kernel: of the channels of a naq leaf to the lanes of a hub there.
+/// The local ports of the established TCP connections to `host` but to
+/// its `port`, by the kernel: of the channels of a naq leaf to the lanes
+/// of a hub there.
 #[cfg(target_os = "linux")]
-fn channels_to(host: [u8; 4], port: u16) -> usize {
+fn channels_to(host: [u8; 4], port: u16) -> Vec<u16> {
     const ESTABLISHED: &str = "01";
     // Little-endian, as the kernel prints it.
     let addr = format!("{:08X}", u32::from_le_bytes(host));
@@ -528,12 +529,14 @@ fn channels_to(host: [u8; 4], port: u16) -> usize {
         .unwrap()
         .lines()
         .skip(1)
-        .filter(|l| {
+        .filter_map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
             let (at, p) = f[2].split_once(':').unwrap();
-            at == addr && u16::from_str_radix(p, 16).unwrap() != port && f[3] == ESTABLISHED
+            let to = u16::from_str_radix(p, 16).unwrap();
+            let local = u16::from_str_radix(f[1].split_once(':').unwrap().1, 16).unwrap();
+            (at == addr && to != port && f[3] == ESTABLISHED).then_some(local)
         })
-        .count()
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -562,25 +565,26 @@ fn a_leaf_closes_every_channel_of_a_hub_link_gone() {
         ..base("leaf")
     })
     .unwrap();
-    let channels = |n| {
+    let channels = |done: &dyn Fn(&[u16]) -> bool| {
         let deadline = Instant::now() + WAIT;
-        while channels_to(HOST, port) != n {
-            assert!(
-                Instant::now() < deadline,
-                "{} channels",
-                channels_to(HOST, port)
-            );
+        loop {
+            let now = channels_to(HOST, port);
+            if done(&now) {
+                return now;
+            }
+            assert!(Instant::now() < deadline, "channels: {now:?}");
             std::thread::sleep(Duration::from_millis(20));
         }
     };
     leafz(&h, |z| z["leafnodes"] == 1);
-    channels(4);
+    let old = channels(&|c| c.len() == 4);
     proxy.cut();
-    leafz(&l, |z| z["leafnodes"] == 0);
-    channels(0);
+    // The hub told the leaf where it listens, past the proxy: the leaf may
+    // link there at once, on new channels.
+    channels(&|c| !c.iter().any(|p| old.contains(p)));
     proxy.set(OPEN);
     leafz(&l, |z| z["leafnodes"] == 1);
-    channels(4);
+    channels(&|c| c.len() == 4);
     // The new channels carry what each lane of the hub sends: its clients
     // go to its lanes in turn.
     let mut sub = client(&l, "SUB s 1\r\n");
