@@ -161,7 +161,8 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
     Ok(())
 }
 
-/// `tls { cert_file, key_file, ca_file, verify, timeout, handshake_first }`.
+/// `tls { cert_file, key_file, ca_file, verify, verify_and_map, timeout,
+/// handshake_first }`.
 fn tls(item: &Item) -> Result<crate::Tls, Bad> {
     let Value::Map(m) = &item.value else {
         return Err((item.line, "tls: expected a map".into()));
@@ -172,6 +173,7 @@ fn tls(item: &Item) -> Result<crate::Tls, Bad> {
         key_file: std::path::PathBuf::default(),
         ca_file: None,
         verify: false,
+        map: false,
         timeout: Duration::from_secs(2),
         handshake_first: false,
         fallback: None,
@@ -193,6 +195,10 @@ fn tls(item: &Item) -> Result<crate::Tls, Bad> {
             "key_file" => key = Some(path()?),
             "ca_file" => ca = Some(path()?),
             "verify" => t.verify = flag()?,
+            "verify_and_map" => {
+                t.map = flag()?;
+                t.verify |= t.map;
+            }
             "handshake_first" | "first" | "immediate" => {
                 if let Value::Str(_) = v.value {
                     // Auto: TLS first if the client starts it in time.
@@ -227,6 +233,14 @@ pub(super) fn string(item: &Item) -> Option<String> {
     match &item.value {
         Value::Str(s) => Some(s.clone()),
         _ => None,
+    }
+}
+
+/// A string, or a list of them.
+pub(super) fn strings(item: &Item) -> Option<Vec<String>> {
+    match &item.value {
+        Value::Array(a) => a.iter().map(string).collect(),
+        _ => string(item).map(|s| vec![s]),
     }
 }
 

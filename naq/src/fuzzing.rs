@@ -52,6 +52,22 @@ pub fn jwt(data: &[u8]) {
     let _ = crate::jwt::decode::<crate::jwt::claims::Activation>(token);
 }
 
+/// Reads a client certificate as `verify_and_map` reads it, and the
+/// input as a DN.
+///
+/// # Panics
+///
+/// When a DN is not the same as itself, or a certificate names a user
+/// that is empty.
+pub fn cert(data: &[u8]) {
+    let names = crate::tls::cert::Names::of(data);
+    let user = names.user(|_| true, &[]);
+    assert!(user.is_none_or(|u| !u.is_empty()), "an empty name");
+    if let Some(dn) = crate::tls::dn::Dn::parse(&String::from_utf8_lossy(data)) {
+        assert!(dn.same(&dn) && dn.same_rdns(&dn), "{dn:?}");
+    }
+}
+
 fn check(idx: &Index, subj: &[u8], filters: &[&[u8]], kept: impl Fn(usize) -> bool) {
     let mut want: Vec<usize> = filters
         .iter()

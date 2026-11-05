@@ -6,17 +6,17 @@ wakes and writes.
 
 The server runs core publish and subscribe: wildcards, queue groups,
 `UNSUB` maximums, accounts with stream and service imports between them,
-users with passwords, tokens or NKeys, operator mode with JWTs,
-permissions, over TCP, TLS and WebSocket. It links to `nats-server` hubs
-as a leaf node, over TCP, TLS or WebSocket, with credentials, failover
-across a hub cluster and the hub's permissions. Servers of one cluster
-mesh over OMQ: they share their clients' interest, carry messages one hop
-and tell clients of each other for failover. naq leaf nodes link to naq
-hubs over OMQ too, by Go's leaf rules, clusters on either side, with
-credentials, permissions and failover across a hub cluster. It
-reads `nats-server` configuration files (`naq -c FILE`), the keys it
-serves so far, and serves `/healthz`, `/varz`, `/connz`, `/routez` and
-`/leafz` (`naq -m PORT`).
+users with passwords, tokens, NKeys or TLS certificates, operator mode
+with JWTs, permissions, over TCP, TLS and WebSocket. It links to
+`nats-server` hubs as a leaf node, over TCP, TLS or WebSocket, with
+credentials, failover across a hub cluster and the hub's permissions.
+Servers of one cluster mesh over OMQ: they share their clients'
+interest, carry messages one hop and tell clients of each other for
+failover. naq leaf nodes link to naq hubs over OMQ too, by Go's leaf
+rules, clusters on either side, with credentials, permissions and
+failover across a hub cluster. It reads `nats-server` configuration
+files (`naq -c FILE`), the keys it serves so far, and serves `/healthz`,
+`/varz`, `/connz`, `/routez` and `/leafz` (`naq -m PORT`).
 
 | Crate | Role |
 | --- | --- |

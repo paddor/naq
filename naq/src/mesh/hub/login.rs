@@ -11,7 +11,8 @@ use naq_proto::peer::{self, Connect, Hello};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use crate::auth::{Auth, Check, Creds, Grant};
+use crate::ConnectionType;
+use crate::auth::{Auth, Check, Creds, Grant, Origin};
 use crate::server::Shared;
 
 /// Leafs greeted and not logged in yet, at most: the oldest goes first.
@@ -119,7 +120,8 @@ impl Logins {
             };
             return Outcome::Pass(g, grant);
         };
-        match auth.check(&creds(c), g.nonce.as_bytes()) {
+        let leaf = Origin::of(ConnectionType::Leafnode);
+        match auth.check(&mut creds(c), g.nonce.as_bytes(), leaf) {
             Check::Pass(grant) => Outcome::Pass(g, grant),
             // Leafs give no JWT: they log in otherwise.
             Check::Fail | Check::User(_) => Outcome::Fail(g.who),

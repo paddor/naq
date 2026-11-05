@@ -100,6 +100,7 @@ fn authorization(l: &mut Leafnodes, item: &Item) -> Result<(), Bad> {
             login,
             account: l.account.clone(),
             permissions: None,
+            connection_types: Vec::new(),
         });
     }
     Ok(())
@@ -150,6 +151,7 @@ fn users(item: &Item) -> Result<Vec<User>, Bad> {
                 },
                 account,
                 permissions: None,
+                connection_types: Vec::new(),
             })
         })
         .collect()

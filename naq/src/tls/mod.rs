@@ -2,6 +2,9 @@
 //! handshake the client starts; or, with `handshake_first`, the handshake
 //! right away and `INFO` over it.
 
+pub(crate) mod cert;
+pub(crate) mod dn;
+
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +30,8 @@ pub(crate) struct Acceptor {
     timeout: Duration,
     /// Clients present certificates.
     pub(crate) verify: bool,
+    /// Their certificates name their users.
+    map: bool,
 }
 
 impl std::fmt::Debug for Acceptor {
@@ -35,6 +40,7 @@ impl std::fmt::Debug for Acceptor {
             .field("first", &self.first)
             .field("timeout", &self.timeout)
             .field("verify", &self.verify)
+            .field("map", &self.map)
             .finish_non_exhaustive()
     }
 }
@@ -81,6 +87,7 @@ impl Acceptor {
             fallback: o.fallback,
             timeout: o.timeout,
             verify: o.verify,
+            map: o.map,
         })
     }
 }
@@ -93,11 +100,26 @@ impl Acceptor {
     ) -> Option<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
         self.inner.accept(tcp).await.ok()
     }
+
+    /// What the certificate of the client of `tls` names, where clients
+    /// log in as the users their certificates name.
+    pub(crate) fn names(
+        &self,
+        tls: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    ) -> Option<Box<cert::Names>> {
+        if !self.map {
+            return None;
+        }
+        let first = tls.get_ref().1.peer_certificates().and_then(<[_]>::first);
+        Some(Box::new(
+            first.map(|c| cert::Names::of(c)).unwrap_or_default(),
+        ))
+    }
 }
 
 /// Runs a TLS client:  `info` goes out in the clear before the handshake, or
 /// over TLS after it, as the server is set up.
-pub(crate) async fn serve(lane: Rc<Lane>, hello: Hello, info: Vec<u8>, stream: Stream) {
+pub(crate) async fn serve(lane: Rc<Lane>, mut hello: Hello, info: Vec<u8>, stream: Stream) {
     let Some(acc) = lane.shared.tls.as_ref() else {
         return;
     };
@@ -108,6 +130,7 @@ pub(crate) async fn serve(lane: Rc<Lane>, hello: Hello, info: Vec<u8>, stream: S
     if !sent {
         hello.client.out.borrow_mut().extend_from_slice(&info);
     }
+    hello.via.cert = acc.names(&tls);
     let (r, w) = tokio::io::split(tls);
     crate::conn::serve(lane, hello, r, w).await;
 }
@@ -163,6 +186,7 @@ mod tests {
             key_file: dir.join("k.pem"),
             ca_file: Some(dir.join("c.pem")),
             verify: true,
+            map: false,
             timeout: Duration::from_secs(1),
             handshake_first: true,
             fallback: None,

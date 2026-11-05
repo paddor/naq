@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use super::parse::{Item, Value};
-use super::{Bad, string};
-use crate::{Login, Options, Permissions, Responses, Rules, User};
+use super::{Bad, string, strings};
+use crate::{ConnectionType, Login, Options, Permissions, Responses, Rules, User};
 
 /// `authorization { user, password, token, timeout, users }`.
 pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
@@ -94,6 +94,7 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
     list.iter()
         .map(|u| {
             let (mut user, mut password, mut nkey, mut perms) = (None, None, None, None);
+            let mut types = Vec::new();
             for (key, v) in map(u, "users")? {
                 let key = key.to_ascii_lowercase();
                 let bad = |reason: &str| (v.line, format!("users: {key}: {reason}"));
@@ -105,6 +106,9 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                         password = Some(string(v).ok_or_else(|| bad("expected a string"))?);
                     }
                     "permissions" | "permission" | "authorization" => perms = Some(permissions(v)?),
+                    "allowed_connection_types" | "connection_types" | "clients" => {
+                        types = connection_types(v)?;
+                    }
                     "nkey" => {
                         let k = string(v).ok_or_else(|| bad("expected a string"))?;
                         if !crate::auth::is_user_nkey(&k) {
@@ -124,6 +128,7 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                     login: Login::Nkey(key),
                     account,
                     permissions: perms,
+                    connection_types: types,
                 });
             }
             let user = user.ok_or_else(|| (u.line, "users: a user needs a name".to_owned()))?;
@@ -134,9 +139,29 @@ fn users(item: &Item, account: Option<&str>) -> Result<Vec<User>, Bad> {
                 },
                 account,
                 permissions: perms,
+                connection_types: types,
             })
         })
         .collect()
+}
+
+/// A user's `allowed_connection_types`: names `nats-server` knows, in any
+/// case.
+fn connection_types(item: &Item) -> Result<Vec<ConnectionType>, Bad> {
+    let bad = |why: String| (item.line, format!("users: allowed_connection_types: {why}"));
+    let names = strings(item).ok_or_else(|| bad("expected strings".into()))?;
+    let unknown: Vec<String> = names
+        .iter()
+        .filter(|n| ConnectionType::named(n).is_none())
+        .map(|n| n.to_ascii_uppercase())
+        .collect();
+    if !unknown.is_empty() {
+        return Err(bad(format!("invalid connection types {unknown:?}")));
+    }
+    Ok(names
+        .iter()
+        .filter_map(|n| ConnectionType::named(n))
+        .collect())
 }
 
 fn map<'i>(item: &'i Item, what: &str) -> Result<&'i [(String, Item)], Bad> {

@@ -51,14 +51,8 @@ fn connection_types_drop_those_unknown() {
         allowed_connection_types: types.iter().map(|t| (*t).to_owned()).collect(),
         ..claims::UserLimits::default()
     };
-    let tcp = Origin {
-        ip: None,
-        websocket: false,
-    };
-    let ws = Origin {
-        ip: None,
-        websocket: true,
-    };
+    let tcp = ConnectionType::Standard;
+    let ws = ConnectionType::Websocket;
     assert!(connects_as(&limits(&[]), tcp));
     assert!(connects_as(&limits(&["standard"]), tcp));
     assert!(!connects_as(&limits(&["WEBSOCKET"]), tcp) && connects_as(&limits(&["WEBSOCKET"]), ws));

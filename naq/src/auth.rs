@@ -1,5 +1,6 @@
 //! Who may connect, and the account each client gets.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,7 +8,9 @@ use data_encoding::{BASE64, BASE64URL_NOPAD};
 use rustc_hash::FxHashMap;
 
 use crate::perms::Perms;
-use crate::{Login, Options};
+use crate::tls::cert::Names;
+use crate::tls::dn::Dn;
+use crate::{ConnectionType, Login, Options};
 
 /// The account id of `$G`, the global account.
 pub(crate) const GLOBAL: u32 = 0;
@@ -15,10 +18,15 @@ pub(crate) const GLOBAL: u32 = 0;
 /// The users and token clients must authenticate with.
 #[derive(Debug, Clone)]
 pub(crate) struct Auth {
-    /// By user name: the password or its hash, and the account id.
-    users: FxHashMap<String, (String, Grant)>,
+    /// By user name: the password or its hash, and what it gets.
+    users: FxHashMap<String, (String, Listed)>,
     /// By public NKey.
-    nkeys: FxHashMap<String, Grant>,
+    nkeys: FxHashMap<String, Listed>,
+    /// The users whose names are DNs, for certificates to name.
+    dns: Vec<(Dn, String)>,
+    /// The users come in a list, not alone: certificates name them, where
+    /// a listener maps certificates to users.
+    listed: bool,
     /// For token clients.
     token_grant: Grant,
     token: Option<String>,
@@ -27,6 +35,57 @@ pub(crate) struct Auth {
     trust: Option<Arc<crate::jwt::trust::Trust>>,
     /// How long a client has to authenticate.
     pub(crate) timeout: Duration,
+}
+
+/// A user of a list: what it gets, and how it may log in.
+#[derive(Debug, Clone)]
+struct Listed {
+    grant: Grant,
+    /// The kinds of connection it may log in over.
+    kinds: Kinds,
+    /// It has no password and a listener maps certificates to it: it
+    /// logs in with its certificate only.
+    cert_only: bool,
+}
+
+/// Kinds of connection, as a set; none at all is any.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Kinds(u8);
+
+impl Kinds {
+    fn of(types: &[ConnectionType]) -> Kinds {
+        Kinds(types.iter().fold(0, |k, &t| k | Kinds::bit(t)))
+    }
+
+    const fn bit(t: ConnectionType) -> u8 {
+        1 << t as u8
+    }
+
+    const fn allows(self, t: ConnectionType) -> bool {
+        self.0 == 0 || self.0 & Kinds::bit(t) != 0
+    }
+}
+
+/// How a client connects, for the checks that depend on it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Origin<'a> {
+    /// Its address, if known.
+    pub(crate) ip: Option<IpAddr>,
+    pub(crate) kind: ConnectionType,
+    /// What its certificate names, where its listener maps certificates
+    /// to users (`verify_and_map`).
+    pub(crate) cert: Option<&'a Names>,
+}
+
+impl Origin<'_> {
+    /// A client of kind `kind`, from nowhere known.
+    pub(crate) const fn of(kind: ConnectionType) -> Origin<'static> {
+        Origin {
+            ip: None,
+            kind,
+            cert: None,
+        }
+    }
 }
 
 /// What a client gave in its `CONNECT`.
@@ -228,70 +287,105 @@ pub(crate) fn nonce() -> String {
 }
 
 impl Auth {
+    /// Nobody known yet, and clients have `timeout` to log in.
+    fn empty(timeout: Duration) -> Auth {
+        Auth {
+            users: FxHashMap::default(),
+            nkeys: FxHashMap::default(),
+            dns: Vec::new(),
+            listed: false,
+            token_grant: Grant {
+                account: GLOBAL,
+                perms: None,
+            },
+            token: None,
+            no_auth_user: None,
+            trust: None,
+            timeout,
+        }
+    }
+
     /// The authentication `opts` ask for, if any. `opts` are valid.
     pub(crate) fn new(opts: &Options, accounts: &[String]) -> Option<Auth> {
         if let Some(t) = crate::jwt::trust::Trust::new(opts, accounts) {
             return Some(Auth {
-                users: FxHashMap::default(),
-                nkeys: FxHashMap::default(),
-                token_grant: Grant {
-                    account: GLOBAL,
-                    perms: None,
-                },
-                token: None,
-                no_auth_user: None,
                 trust: Some(Arc::new(t)),
-                timeout: opts.auth_timeout,
+                ..Auth::empty(opts.auth_timeout)
             });
         }
         if opts.users.is_empty() && opts.user.is_none() && opts.token.is_none() {
             return None;
         }
-        let id = |name: Option<&String>| {
-            name.and_then(|n| accounts.iter().position(|a| a == n))
-                .map_or(GLOBAL, |i| i as u32)
+        let mut auth = Auth {
+            token: opts.token.clone(),
+            no_auth_user: opts.no_auth_user.clone(),
+            ..Auth::empty(opts.auth_timeout)
         };
+        auth.list(opts, accounts);
+        // As in `nats-server`, the single user and token clients have no
+        // permissions: defaults are for users of lists.
+        if let Some((user, password)) = &opts.user {
+            let alone = Listed {
+                grant: auth.token_grant.clone(),
+                kinds: Kinds::default(),
+                cert_only: false,
+            };
+            auth.users.insert(user.clone(), (password.clone(), alone));
+        }
+        Some(auth)
+    }
+
+    /// Takes in the users `opts` list, into their accounts among
+    /// `accounts`.
+    fn list(&mut self, opts: &Options, accounts: &[String]) {
         let defaults = opts
             .default_permissions
             .as_ref()
             .map(|p| Arc::new(Perms::new(p)));
-        let (mut users, mut nkeys) = (FxHashMap::default(), FxHashMap::default());
+        let maps = (
+            opts.tls.as_ref().is_some_and(|t| t.map),
+            opts.websocket
+                .as_ref()
+                .and_then(|w| w.tls.as_ref())
+                .is_some_and(|t| t.map),
+        );
         for u in &opts.users {
             let grant = Grant {
-                account: id(u.account.as_ref()),
+                account: id(accounts, u.account.as_ref()),
                 perms: u
                     .permissions
                     .as_ref()
                     .map(|p| Arc::new(Perms::new(p)))
                     .or_else(|| defaults.clone()),
             };
+            let kinds = Kinds::of(&u.connection_types);
             match &u.login {
                 Login::Password { user, password } => {
-                    users.insert(user.clone(), (password.clone(), grant));
+                    let cert_only = password.is_empty()
+                        && self.no_auth_user.as_ref() != Some(user)
+                        && ((maps.0 && kinds.allows(ConnectionType::Standard))
+                            || (maps.1 && kinds.allows(ConnectionType::Websocket)));
+                    if let Some(dn) = Dn::parse(user) {
+                        self.dns.push((dn, user.clone()));
+                    }
+                    let l = Listed {
+                        grant,
+                        kinds,
+                        cert_only,
+                    };
+                    self.users.insert(user.clone(), (password.clone(), l));
+                    self.listed = true;
                 }
                 Login::Nkey(key) => {
-                    nkeys.insert(key.clone(), grant);
+                    let l = Listed {
+                        grant,
+                        kinds,
+                        cert_only: false,
+                    };
+                    self.nkeys.insert(key.clone(), l);
                 }
             }
         }
-        // As in `nats-server`, the single user and token clients have no
-        // permissions: defaults are for users of lists.
-        let bare = Grant {
-            account: GLOBAL,
-            perms: None,
-        };
-        if let Some((user, password)) = &opts.user {
-            users.insert(user.clone(), (password.clone(), bare.clone()));
-        }
-        Some(Auth {
-            users,
-            nkeys,
-            token_grant: bare,
-            token: opts.token.clone(),
-            no_auth_user: opts.no_auth_user.clone(),
-            trust: None,
-            timeout: opts.auth_timeout,
-        })
     }
 
     /// What WebSocket clients authenticate with, where it is not
@@ -302,23 +396,19 @@ impl Auth {
         let timeout = ws.timeout.unwrap_or(opts.auth_timeout);
         if ws.user.is_some() || ws.token.is_some() {
             // As `nats-server`, without permissions: those come with users.
-            let grant = Grant {
-                account: GLOBAL,
-                perms: None,
-            };
-            let users = ws
-                .user
-                .iter()
-                .map(|(u, p)| (u.clone(), (p.clone(), grant.clone())));
-            return Some(Auth {
-                users: users.collect(),
-                nkeys: FxHashMap::default(),
-                token_grant: grant,
+            let mut auth = Auth {
                 token: ws.token.clone(),
-                no_auth_user: None,
-                trust: None,
-                timeout,
-            });
+                ..Auth::empty(timeout)
+            };
+            if let Some((u, p)) = &ws.user {
+                let alone = Listed {
+                    grant: auth.token_grant.clone(),
+                    kinds: Kinds::default(),
+                    cert_only: false,
+                };
+                auth.users.insert(u.clone(), (p.clone(), alone));
+            }
+            return Some(auth);
         }
         if ws.no_auth_user.is_none() && ws.timeout.is_none() {
             return None;
@@ -345,39 +435,26 @@ impl Auth {
             auth.timeout = l.auth_timeout;
             return Some(auth);
         }
-        let (mut users, mut nkeys) = (FxHashMap::default(), FxHashMap::default());
+        let mut auth = Auth::empty(l.auth_timeout);
         for u in &l.users {
-            let account = u
-                .account
-                .as_ref()
-                .and_then(|n| accounts.iter().position(|a| a == n))
-                // Accounts are few: their count fits.
-                .map_or(GLOBAL, |i| i as u32);
-            let grant = Grant {
-                account,
-                perms: None,
+            let listed = Listed {
+                grant: Grant {
+                    account: id(accounts, u.account.as_ref()),
+                    perms: None,
+                },
+                kinds: Kinds::default(),
+                cert_only: false,
             };
             match &u.login {
                 Login::Password { user, password } => {
-                    users.insert(user.clone(), (password.clone(), grant));
+                    auth.users.insert(user.clone(), (password.clone(), listed));
                 }
                 Login::Nkey(key) => {
-                    nkeys.insert(key.clone(), grant);
+                    auth.nkeys.insert(key.clone(), listed);
                 }
             }
         }
-        Some(Auth {
-            users,
-            nkeys,
-            token_grant: Grant {
-                account: GLOBAL,
-                perms: None,
-            },
-            token: None,
-            no_auth_user: None,
-            trust: None,
-            timeout: l.auth_timeout,
-        })
+        Some(auth)
     }
 
     /// Whether clients may connect without credentials, as the
@@ -392,54 +469,77 @@ impl Auth {
         !self.nkeys.is_empty() || self.trust.is_some()
     }
 
-    /// Checks what a client that connects from `origin` gave, after an
-    /// `INFO` with `nonce`: in operator mode, its user JWT.
-    pub(crate) fn check_from(
-        &self,
-        c: &Creds,
-        nonce: &[u8],
-        origin: crate::jwt::trust::Origin,
-    ) -> Check {
-        let Some(t) = &self.trust else {
-            return self.check(c, nonce);
-        };
-        let user = c
-            .jwt
-            .as_deref()
-            .and_then(|jwt| t.login(jwt, c.sig.as_deref(), nonce, origin));
-        user.map_or(Check::Fail, |u| Check::User(Box::new(u)))
-    }
-
-    /// Checks what a client gave, after an `INFO` with `nonce`.
-    pub(crate) fn check(&self, c: &Creds, nonce: &[u8]) -> Check {
-        if c.is_blank()
-            && let Some(u) = &self.no_auth_user
-        {
-            // Known to exist: the options were validated.
-            let account = self
-                .users
-                .get(u)
-                .map(|(_, g)| g)
-                .or_else(|| self.nkeys.get(u));
-            return account.map_or(Check::Fail, |g| Check::Pass(g.clone()));
+    /// Checks what a client that connects as `origin` gave, after an
+    /// `INFO` with `nonce`: in operator mode, its user JWT. The user its
+    /// certificate names becomes its user, as in `nats-server`.
+    pub(crate) fn check(&self, c: &mut Creds, nonce: &[u8], origin: Origin<'_>) -> Check {
+        if let Some(t) = &self.trust {
+            let user = c
+                .jwt
+                .as_deref()
+                .and_then(|jwt| t.login(jwt, c.sig.as_deref(), nonce, origin));
+            return user.map_or(Check::Fail, |u| Check::User(Box::new(u)));
         }
-        if let Some(key) = &c.nkey {
-            return match self.nkeys.get(key) {
-                Some(g) if signed(key, nonce, c.sig.as_deref()) => Check::Pass(g.clone()),
-                _ => Check::Fail,
+        let free = self.no_auth_user.as_ref().filter(|_| c.is_blank());
+        // NKeys first, where there are any, as `nats-server` takes them.
+        let key = c
+            .nkey
+            .as_ref()
+            .or_else(|| free.filter(|u| self.nkeys.contains_key(*u)));
+        if !self.nkeys.is_empty()
+            && let Some(key) = key
+        {
+            let Some(l) = self.nkeys.get(key).filter(|l| l.kinds.allows(origin.kind)) else {
+                return Check::Fail;
+            };
+            // The `no_auth_user` signs nothing.
+            let free = self.no_auth_user.as_ref() == Some(key);
+            return if free || signed(key, nonce, c.sig.as_deref()) {
+                Check::Pass(l.grant.clone())
+            } else {
+                Check::Fail
             };
         }
-        let user = c.user.as_ref();
-        if let Some(name) = user
-            && let Some((secret, grant)) = self.users.get(name)
+        if self.listed
+            && let Some(names) = origin.cert
         {
-            return compare(secret, c.pass.as_deref().unwrap_or_default(), grant);
+            return self.mapped(c, names, origin.kind);
+        }
+        if let Some(name) = free.or(c.user.as_ref())
+            && let Some((secret, l)) = self.users.get(name)
+        {
+            if !l.kinds.allows(origin.kind) || l.cert_only {
+                return Check::Fail;
+            }
+            if free.is_some() {
+                return Check::Pass(l.grant.clone());
+            }
+            return compare(secret, c.pass.as_deref().unwrap_or_default(), &l.grant);
         }
         match (&self.token, &c.token) {
             (Some(t), Some(given)) => compare(t, given, &self.token_grant),
             _ => Check::Fail,
         }
     }
+
+    /// The login of the user certificate `names` names, over a connection
+    /// of kind `kind`: with its password, if it has one.
+    fn mapped(&self, c: &mut Creds, names: &Names, kind: ConnectionType) -> Check {
+        let known = |u: &str| self.users.get(u).is_some_and(|(_, l)| l.kinds.allows(kind));
+        let user = names.user(known, &self.dns);
+        let Some((name, (secret, l))) = user.and_then(|u| self.users.get_key_value(&u)) else {
+            return Check::Fail;
+        };
+        c.user = Some(name.clone());
+        compare(secret, c.pass.as_deref().unwrap_or_default(), &l.grant)
+    }
+}
+
+/// The id of account `name` among `accounts`; `$G` for none.
+fn id(accounts: &[String], name: Option<&String>) -> u32 {
+    name.and_then(|n| accounts.iter().position(|a| a == n))
+        // Accounts are few: their count fits.
+        .map_or(GLOBAL, |i| i as u32)
 }
 
 /// Whether `sig` is `nonce` signed with the seed of public NKey `key`.
@@ -504,7 +604,13 @@ mod tests {
             },
             account: account.map(Into::into),
             permissions: None,
+            connection_types: Vec::new(),
         }
+    }
+
+    /// What `auth` makes of `c` from a plain client.
+    fn check(auth: &Auth, c: &Creds, nonce: &[u8]) -> Check {
+        auth.check(&mut c.clone(), nonce, Origin::of(ConnectionType::Standard))
     }
 
     fn creds(user: Option<&str>, pass: Option<&str>, token: Option<&str>) -> Creds {
@@ -527,24 +633,30 @@ mod tests {
         validate(&opts).unwrap();
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
         assert_eq!(
-            auth.check(&creds(Some("a"), Some("pa"), None), b""),
+            check(&auth, &creds(Some("a"), Some("pa"), None), b""),
             pass(1)
         );
         assert_eq!(
-            auth.check(&creds(Some("a"), Some("pg"), None), b""),
+            check(&auth, &creds(Some("a"), Some("pg"), None), b""),
             Check::Fail
         );
         assert_eq!(
-            auth.check(&creds(Some("x"), Some("pa"), None), b""),
+            check(&auth, &creds(Some("x"), Some("pa"), None), b""),
             Check::Fail
         );
         assert_eq!(
-            auth.check(&creds(None, None, None), b""),
+            check(&auth, &creds(None, None, None), b""),
             pass(GLOBAL),
             "no_auth_user"
         );
-        assert_eq!(auth.check(&creds(None, Some("pa"), None), b""), Check::Fail);
-        assert_eq!(auth.check(&creds(None, None, Some("t")), b""), Check::Fail);
+        assert_eq!(
+            check(&auth, &creds(None, Some("pa"), None), b""),
+            Check::Fail
+        );
+        assert_eq!(
+            check(&auth, &creds(None, None, Some("t")), b""),
+            Check::Fail
+        );
     }
 
     #[test]
@@ -555,14 +667,14 @@ mod tests {
         };
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
         assert_eq!(
-            auth.check(&creds(None, None, Some("s3cret")), b""),
+            check(&auth, &creds(None, None, Some("s3cret")), b""),
             pass(GLOBAL)
         );
         assert_eq!(
-            auth.check(&creds(None, None, Some("s3cre")), b""),
+            check(&auth, &creds(None, None, Some("s3cre")), b""),
             Check::Fail
         );
-        assert_eq!(auth.check(&creds(None, None, None), b""), Check::Fail);
+        assert_eq!(check(&auth, &creds(None, None, None), b""), Check::Fail);
     }
 
     #[test]
@@ -573,12 +685,12 @@ mod tests {
             ..Options::default()
         };
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
-        let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("pw"), None), b"") else {
+        let Check::Bcrypt(p) = check(&auth, &creds(Some("b"), Some("pw"), None), b"") else {
             panic!("not deferred");
         };
         assert_eq!(p.grant.account, GLOBAL);
         assert!(p.holds());
-        let Check::Bcrypt(p) = auth.check(&creds(Some("b"), Some("nope"), None), b"") else {
+        let Check::Bcrypt(p) = check(&auth, &creds(Some("b"), Some("nope"), None), b"") else {
             panic!("not deferred");
         };
         assert!(!p.holds());
@@ -605,6 +717,7 @@ mod tests {
                 login: Login::Nkey(PUBLIC.into()),
                 account: Some("A".into()),
                 permissions: None,
+                connection_types: Vec::new(),
             }],
             ..Options::default()
         };
@@ -624,21 +737,21 @@ mod tests {
         };
         let n = nonce.as_bytes();
         assert_eq!(
-            auth.check(&with(Some(BASE64URL_NOPAD.encode(&sig))), n),
+            check(&auth, &with(Some(BASE64URL_NOPAD.encode(&sig))), n),
             pass(1)
         );
-        assert_eq!(auth.check(&with(Some(BASE64.encode(&sig))), n), pass(1));
+        assert_eq!(check(&auth, &with(Some(BASE64.encode(&sig))), n), pass(1));
         assert_eq!(
-            auth.check(&with(Some(BASE64URL_NOPAD.encode(&sig))), b"other"),
+            check(&auth, &with(Some(BASE64URL_NOPAD.encode(&sig))), b"other"),
             Check::Fail
         );
-        assert_eq!(auth.check(&with(None), n), Check::Fail);
-        assert_eq!(auth.check(&with(Some("!!".into())), n), Check::Fail);
+        assert_eq!(check(&auth, &with(None), n), Check::Fail);
+        assert_eq!(check(&auth, &with(Some("!!".into())), n), Check::Fail);
         let stranger = Creds {
             nkey: Some("UNKNOWN".into()),
             ..with(None)
         };
-        assert_eq!(auth.check(&stranger, n), Check::Fail);
+        assert_eq!(check(&auth, &stranger, n), Check::Fail);
         assert!(is_user_nkey(PUBLIC));
         assert!(!is_user_nkey(SEED));
         assert!(!is_user_nkey("UABC"));
@@ -651,13 +764,14 @@ mod tests {
                 login: Login::Nkey(PUBLIC.into()),
                 account: None,
                 permissions: None,
+                connection_types: Vec::new(),
             }],
             no_auth_user: Some(PUBLIC.into()),
             ..Options::default()
         };
         validate(&opts).unwrap();
         let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
-        assert_eq!(auth.check(&Creds::default(), b"x"), pass(GLOBAL));
+        assert_eq!(check(&auth, &Creds::default(), b"x"), pass(GLOBAL));
     }
 
     #[test]
@@ -684,14 +798,14 @@ mod tests {
         });
         let ws = Auth::websocket(&o, Auth::new(&o, &accounts).as_ref()).unwrap();
         assert_eq!(
-            ws.check(&creds(Some("web"), Some("pw"), None), b""),
+            check(&ws, &creds(Some("web"), Some("pw"), None), b""),
             pass(0)
         );
         assert_eq!(
-            ws.check(&creds(Some("al"), Some("pa"), None), b""),
+            check(&ws, &creds(Some("al"), Some("pa"), None), b""),
             Check::Fail
         );
-        assert_eq!(ws.check(&Creds::default(), b""), Check::Fail);
+        assert_eq!(check(&ws, &Creds::default(), b""), Check::Fail);
         assert_eq!(ws.timeout, Duration::from_secs(1));
 
         let o = with(crate::WebsocketAuth {
@@ -699,7 +813,7 @@ mod tests {
             ..crate::WebsocketAuth::default()
         });
         let ws = Auth::websocket(&o, None).unwrap();
-        assert_eq!(ws.check(&creds(None, None, Some("t")), b""), pass(0));
+        assert_eq!(check(&ws, &creds(None, None, Some("t")), b""), pass(0));
         assert_eq!(ws.timeout, Duration::from_secs(5));
 
         // A no_auth_user of their own, among the same users.
@@ -710,7 +824,10 @@ mod tests {
         let general = Auth::new(&o, &accounts);
         let ws = Auth::websocket(&o, general.as_ref()).unwrap();
         assert_eq!(ws.no_auth_user.as_deref(), Some("bo"));
-        assert_eq!(ws.check(&creds(Some("al"), Some("pa"), None), b""), pass(0));
+        assert_eq!(
+            check(&ws, &creds(Some("al"), Some("pa"), None), b""),
+            pass(0)
+        );
         assert!(validate(&o).is_ok());
 
         // A timeout alone, where clients authenticate at all.
@@ -736,24 +853,155 @@ mod tests {
             ..Options::default()
         };
         let auth = Auth::new(&single, &accounts).unwrap();
-        assert_eq!(auth.check(&creds(Some("u"), Some("p"), None), b""), pass(0));
+        assert_eq!(
+            check(&auth, &creds(Some("u"), Some("p"), None), b""),
+            pass(0)
+        );
         let token = Options {
             token: Some("t".into()),
             default_permissions: defaults.clone(),
             ..Options::default()
         };
         let auth = Auth::new(&token, &accounts).unwrap();
-        assert_eq!(auth.check(&creds(None, None, Some("t")), b""), pass(0));
+        assert_eq!(check(&auth, &creds(None, None, Some("t")), b""), pass(0));
         let listed = Options {
             users: vec![user("a", "p", None)],
             default_permissions: defaults,
             ..Options::default()
         };
         let auth = Auth::new(&listed, &accounts).unwrap();
-        let Check::Pass(g) = auth.check(&creds(Some("a"), Some("p"), None), b"") else {
+        let Check::Pass(g) = check(&auth, &creds(Some("a"), Some("p"), None), b"") else {
             panic!("a list user passes");
         };
         assert!(g.perms.is_some());
+    }
+
+    /// The names of a certificate of common name `cn`.
+    fn names_of(cn: &str) -> Names {
+        let mut p = rcgen::CertificateParams::default();
+        p.distinguished_name = rcgen::DistinguishedName::new();
+        p.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        let key = rcgen::KeyPair::generate().unwrap();
+        Names::of(p.self_signed(&key).unwrap().der())
+    }
+
+    /// Options with a client listener that maps certificates, and `users`.
+    fn mapping(users: Vec<User>) -> Options {
+        Options {
+            tls: Some(crate::Tls {
+                cert_file: "c".into(),
+                key_file: "k".into(),
+                ca_file: Some("ca".into()),
+                verify: true,
+                map: true,
+                timeout: Duration::from_secs(1),
+                handshake_first: false,
+                fallback: None,
+            }),
+            users,
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn a_certificate_names_the_user_where_its_listener_maps_them() {
+        let opts = mapping(vec![
+            user("CN=alice", "", Some("A")),
+            user("bob", "p", None),
+        ]);
+        let opts = Options {
+            accounts: vec!["A".into()],
+            ..opts
+        };
+        let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
+        let alice = names_of("alice");
+        let mapped = |c: &mut Creds, n: &Names| {
+            let origin = Origin {
+                cert: Some(n),
+                ..Origin::of(ConnectionType::Standard)
+            };
+            auth.check(c, b"", origin)
+        };
+        let mut c = creds(Some("bob"), None, None);
+        assert_eq!(mapped(&mut c, &alice), pass(1), "the certificate wins");
+        assert_eq!(c.user.as_deref(), Some("CN=alice"));
+        let mut c = creds(Some("bob"), Some("p"), None);
+        assert_eq!(mapped(&mut c, &alice), Check::Fail, "a password it has not");
+        let mut c = creds(Some("bob"), Some("p"), None);
+        assert_eq!(mapped(&mut c, &names_of("bob")), Check::Fail);
+        assert_eq!(
+            mapped(&mut Creds::default(), &Names::default()),
+            Check::Fail
+        );
+        // Elsewhere, a user certificates name logs in with them only.
+        assert_eq!(
+            check(&auth, &creds(Some("CN=alice"), None, None), b""),
+            Check::Fail
+        );
+        assert_eq!(
+            check(&auth, &creds(Some("bob"), Some("p"), None), b""),
+            pass(0)
+        );
+    }
+
+    #[test]
+    fn the_no_auth_user_needs_no_certificate() {
+        let mut opts = mapping(vec![user("CN=alice", "", None)]);
+        opts.no_auth_user = Some("CN=alice".into());
+        let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
+        assert_eq!(check(&auth, &Creds::default(), b""), pass(0));
+        assert_eq!(
+            check(&auth, &creds(Some("CN=alice"), None, None), b""),
+            pass(0)
+        );
+    }
+
+    #[test]
+    fn users_log_in_over_the_kinds_of_connection_they_may() {
+        let ws_only = vec![ConnectionType::Websocket];
+        let opts = Options {
+            users: vec![
+                User {
+                    connection_types: ws_only.clone(),
+                    ..user("w", "p", None)
+                },
+                User {
+                    login: Login::Nkey(PUBLIC.into()),
+                    account: None,
+                    permissions: None,
+                    connection_types: ws_only,
+                },
+            ],
+            ..Options::default()
+        };
+        let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
+        let as_ws =
+            |c: &Creds| auth.check(&mut c.clone(), b"n", Origin::of(ConnectionType::Websocket));
+        let w = creds(Some("w"), Some("p"), None);
+        assert_eq!(check(&auth, &w, b""), Check::Fail);
+        assert_eq!(as_ws(&w), pass(0));
+        let sig = nkeys::KeyPair::from_seed(SEED).unwrap().sign(b"n").unwrap();
+        let nkey = Creds {
+            nkey: Some(PUBLIC.into()),
+            sig: Some(BASE64URL_NOPAD.encode(&sig)),
+            ..Creds::default()
+        };
+        assert_eq!(check(&auth, &nkey, b"n"), Check::Fail);
+        assert_eq!(as_ws(&nkey), pass(0));
+    }
+
+    #[test]
+    fn an_nkey_is_passed_over_where_no_user_has_one() {
+        let opts = Options {
+            users: vec![user("a", "p", None)],
+            ..Options::default()
+        };
+        let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
+        let c = Creds {
+            nkey: Some(PUBLIC.into()),
+            ..creds(Some("a"), Some("p"), None)
+        };
+        assert_eq!(check(&auth, &c, b""), pass(0));
     }
 
     #[test]

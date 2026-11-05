@@ -13,7 +13,8 @@ use tokio::time::Instant;
 
 use super::ping::Tick;
 use super::{Client, Close, Conn, Stage};
-use crate::auth::{Check, Creds, Grant, Pending};
+use crate::ConnectionType;
+use crate::auth::{Check, Creds, Grant, Origin, Pending};
 use crate::index::{Entry, Found, Index, Interest};
 use crate::lane::Routing;
 use crate::perms::{Held, quoted};
@@ -275,25 +276,23 @@ impl Conn {
         if let Some(cookies) = &self.via.cookies {
             creds.fill(cookies);
         }
+        self.client.headers.set(self.opts.headers);
+        let check = self.lane.shared.auth_for(self.via.ws).map(|auth| {
+            let nonce = self.nonce.as_deref().unwrap_or_default();
+            auth.check(&mut creds, nonce.as_bytes(), self.origin())
+        });
         {
             let mut meta = self.client.meta.borrow_mut();
             (meta.name, meta.lang, meta.version) = names;
             meta.websocket = self.via.ws;
-            meta.user = creds.user.clone().or_else(|| creds.nkey.clone());
+            meta.user = creds.user.or(creds.nkey);
         }
-        self.client.headers.set(self.opts.headers);
-        if let Some(auth) = self.lane.shared.auth_for(self.via.ws) {
-            let nonce = self.nonce.as_deref().unwrap_or_default();
-            let origin = crate::jwt::trust::Origin {
-                ip: self.ip.parse().ok(),
-                websocket: self.via.ws,
-            };
-            match auth.check_from(&creds, nonce.as_bytes(), origin) {
-                Check::Pass(account) => self.bind(account),
-                Check::Fail => return Err(Close::Auth),
-                Check::Bcrypt(p) => return Ok(Step::Verify(Box::new(p))),
-                Check::User(u) => self.bind_user(&u)?,
-            }
+        match check {
+            None => {}
+            Some(Check::Pass(account)) => self.bind(account),
+            Some(Check::Fail) => return Err(Close::Auth),
+            Some(Check::Bcrypt(p)) => return Ok(Step::Verify(Box::new(p))),
+            Some(Check::User(u)) => self.bind_user(&u)?,
         }
         self.connected()?;
         Ok(Step::Next)
@@ -305,12 +304,25 @@ impl Conn {
     #[inline(never)]
     fn without_connect(&mut self) -> Result<(), Close> {
         let auth = self.lane.shared.auth_for(self.via.ws);
-        match auth.map(|a| a.check(&Creds::default(), b"")) {
+        match auth.map(|a| a.check(&mut Creds::default(), b"", self.origin())) {
             Some(Check::Pass(account)) => {
                 self.bind(account);
                 Ok(())
             }
             _ => Err(Close::Auth),
+        }
+    }
+
+    /// How the client connects, for the checks of its login.
+    fn origin(&self) -> Origin<'_> {
+        Origin {
+            ip: self.ip.parse().ok(),
+            kind: if self.via.ws {
+                ConnectionType::Websocket
+            } else {
+                ConnectionType::Standard
+            },
+            cert: self.via.cert.as_deref(),
         }
     }
 

@@ -10,8 +10,9 @@ use rustc_hash::FxHashMap;
 
 use super::claims::{self, NO_LIMIT};
 use super::{Claims, decode, now};
-use crate::Options;
+use crate::auth::Origin;
 use crate::perms::Perms;
+use crate::{ConnectionType, Options};
 
 /// The operators a server trusts, and the accounts they signed.
 #[derive(Debug)]
@@ -33,13 +34,6 @@ pub(crate) struct JwtAccount {
     pub(crate) claims: Claims<claims::Account>,
     /// The permissions of its users that have none of their own.
     defaults: Option<Arc<Perms>>,
-}
-
-/// Where a client connects from, for the checks of a user JWT.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Origin {
-    pub(crate) ip: Option<IpAddr>,
-    pub(crate) websocket: bool,
 }
 
 /// A user that logged in with a JWT.
@@ -199,7 +193,7 @@ impl Trust {
         jwt: &str,
         sig: Option<&str>,
         nonce: &[u8],
-        origin: Origin,
+        origin: Origin<'_>,
     ) -> Option<User> {
         let user = decode::<claims::User>(jwt).ok()?;
         let at = now();
@@ -219,7 +213,7 @@ impl Trust {
         let templated = self.template(&user, key, a)?;
         let limits = templated.as_ref().unwrap_or(&user.nats.limits);
         let bearer = limits.bearer_token;
-        if (bearer && a.nats.limits.disallow_bearer) || !connects_as(limits, origin) {
+        if (bearer && a.nats.limits.disallow_bearer) || !connects_as(limits, origin.kind) {
             return None;
         }
         if !bearer && !super::super::auth::signed(&user.sub, nonce, sig) {
@@ -328,34 +322,16 @@ fn defaults(p: &claims::Permissions) -> Option<Arc<Perms>> {
     })))
 }
 
-/// Whether a user of `limits` may connect as a client of `origin`: by its
-/// allowed connection types, of which `nats-server` drops those it does
-/// not know.
-fn connects_as(limits: &claims::UserLimits, origin: Origin) -> bool {
-    const KNOWN: &[&str] = &[
-        "STANDARD",
-        "WEBSOCKET",
-        "LEAFNODE",
-        "LEAFNODE_WS",
-        "MQTT",
-        "MQTT_WS",
-        "IN_PROCESS",
-    ];
+/// Whether a user of `limits` may connect as `kind`: by its allowed
+/// connection types, of which `nats-server` drops those it does not know.
+/// None known of some given is none allowed.
+fn connects_as(limits: &claims::UserLimits, kind: ConnectionType) -> bool {
     let types = &limits.allowed_connection_types;
-    if types.is_empty() {
-        return true;
-    }
-    let mine = if origin.websocket {
-        "WEBSOCKET"
-    } else {
-        "STANDARD"
-    };
-    let known: Vec<String> = types
-        .iter()
-        .map(|t| t.to_ascii_uppercase())
-        .filter(|t| KNOWN.contains(&t.as_str()))
-        .collect();
-    known.iter().any(|t| t == mine)
+    types.is_empty()
+        || types
+            .iter()
+            .filter_map(|t| ConnectionType::named(t))
+            .any(|t| t == kind)
 }
 
 /// Whether `ip` is in one of `cidrs`; any IP is with none.

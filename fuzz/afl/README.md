@@ -6,7 +6,9 @@ the workspace, so AFL's instrumentation stays out of normal builds.
 | Target | Input | Checks |
 | --- | --- | --- |
 | `client_wire` | What a client sends | no panic, operations take what they say, a publish encodes as a message of the length given, a tab after the verb parses as a space |
+| `certs` | A client certificate, or a DN user name | no panic, a certificate names no empty user, a DN equals itself |
 | `config` | A configuration file, without includes | no panic |
+| `jwts` | A JWT, decoded as each kind of claims | no panic |
 | `leaf_wire` | What a leaf or its hub sends on a link | no panic, operations take what they say, messages and interest encode back to the same |
 | `peer_frames` | A peer control message or data batch | no panic, what decodes encodes back to the same bytes |
 | `subjects` | A subject and filters, one per line | the index and matching by hand agree |

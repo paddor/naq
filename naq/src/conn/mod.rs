@@ -232,6 +232,9 @@ pub(crate) struct Via {
     pub(crate) ws: bool,
     /// Credentials from its cookies, for a `CONNECT` without them.
     pub(crate) cookies: Option<Box<Creds>>,
+    /// What its certificate names, where its listener maps certificates
+    /// to users.
+    pub(crate) cert: Option<Box<crate::tls::cert::Names>>,
 }
 
 /// The reader's side of a connection.
@@ -327,7 +330,11 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
         meta.ip = ip;
         meta.port = port;
     }
-    let via = Via { ws, cookies: None };
+    let via = Via {
+        ws,
+        cookies: None,
+        cert: None,
+    };
     (Hello { client, nonce, via }, info)
 }
 

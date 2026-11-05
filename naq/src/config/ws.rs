@@ -1,7 +1,7 @@
 //! The `websocket` block.
 
 use super::parse::{Item, Value};
-use super::{Bad, duration, string};
+use super::{Bad, duration, string, strings};
 use crate::{Websocket, WebsocketAuth};
 
 /// `websocket { listen, host, port, no_tls, tls, same_origin,
@@ -111,15 +111,6 @@ fn auth(a: &mut WebsocketAuth, item: &Item) -> Result<(), Bad> {
 fn port(item: &Item) -> Option<i64> {
     match item.value {
         Value::Int(n) if (-1..=65_535).contains(&n) => Some(n),
-        _ => None,
-    }
-}
-
-/// A string or an array of them.
-fn strings(item: &Item) -> Option<Vec<String>> {
-    match &item.value {
-        Value::Str(s) => Some(vec![s.clone()]),
-        Value::Array(a) => a.iter().map(string).collect(),
         _ => None,
     }
 }

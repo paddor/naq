@@ -143,6 +143,13 @@ fn users_tokens_and_accounts_come_from_their_blocks() {
         })
         .collect();
     assert_eq!(users, [("v", "q", None), ("a", "x", Some("A"))]);
+    let typed: Options =
+        "authorization { users: [{user: w, clients: [websocket, Leafnode_WS, mqtt_ws, in_process]}] }\n"
+            .parse()
+            .unwrap();
+    let kinds = &typed.users[0].connection_types;
+    let named: Vec<String> = kinds.iter().map(ToString::to_string).collect();
+    assert_eq!(named, ["WEBSOCKET", "LEAFNODE_WS", "MQTT_WS", "IN_PROCESS"]);
     let one: Options = "authorization { user: u, password: p }\n".parse().unwrap();
     assert_eq!(one.user, Some(("u".into(), "p".into())));
     assert_eq!(one.users.len(), 0);
@@ -170,6 +177,10 @@ fn users_lists_naq_cannot_read_are_an_error() {
             "users: an NKey user has no name or password",
         ),
         ("authorization { users: 1 }\n", "users: expected a list"),
+        (
+            "authorization { users: [{user: a, allowed_connection_types: 1}] }\n",
+            "users: allowed_connection_types: expected strings",
+        ),
         ("authorization { users: [1] }\n", "users: expected a map"),
     ] {
         match text.parse::<Options>() {
@@ -625,6 +636,7 @@ fn naq_leafs_log_in_as_the_leafnodes_block_says() {
         login,
         account: account.map(Into::into),
         permissions: None,
+        connection_types: Vec::new(),
     };
     let password = |u: &str, p: &str| naq::Login::Password {
         user: u.into(),

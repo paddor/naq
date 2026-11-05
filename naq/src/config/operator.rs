@@ -2,7 +2,7 @@
 //! operators a server trusts, and where their accounts come from.
 
 use super::parse::{Item, Value};
-use super::{Bad, string};
+use super::{Bad, string, strings};
 use crate::{Options, Resolver};
 
 /// The keys this module reads, with their `nats-server` aliases.
@@ -54,14 +54,6 @@ pub(super) fn apply(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> 
         }
     }
     Ok(())
-}
-
-/// A string, or a list of them.
-fn strings(item: &Item) -> Option<Vec<String>> {
-    match &item.value {
-        Value::Array(a) => a.iter().map(string).collect(),
-        _ => string(item).map(|s| vec![s]),
-    }
 }
 
 /// An operator JWT given as it is, or in a file, decorated or not.

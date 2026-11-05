@@ -12,7 +12,8 @@ use naq_proto::peer;
 pub type Target = fn(&[u8]);
 
 /// Every target, by name.
-pub const TARGETS: [(&str, Target); 7] = [
+pub const TARGETS: [(&str, Target); 8] = [
+    ("certs", certs),
     ("client_wire", client_wire),
     ("config", config),
     ("jwts", jwts),
@@ -137,6 +138,12 @@ pub fn config(data: &[u8]) {
 /// Decodes a JWT as operator, account, user and activation claims.
 pub fn jwts(data: &[u8]) {
     naq::fuzzing::jwt(data);
+}
+
+/// A client certificate, read for the user it names, and the input as a
+/// DN user name.
+pub fn certs(data: &[u8]) {
+    naq::fuzzing::cert(data);
 }
 
 /// A subject and filters, one per line: the index finds what matching by

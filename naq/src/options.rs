@@ -301,6 +301,62 @@ pub struct User {
     /// What it may publish and subscribe to; `None` for the default
     /// permissions, if any, else anything.
     pub permissions: Option<Permissions>,
+    /// The kinds of connection it may log in over
+    /// (`allowed_connection_types`); empty allows any.
+    pub connection_types: Vec<ConnectionType>,
+}
+
+/// A kind of connection a user may be limited to, as `nats-server` names
+/// them. naq serves no MQTT or in-process clients, so users limited to
+/// those never log in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ConnectionType {
+    /// Clients over TCP, with TLS or without (`STANDARD`).
+    Standard,
+    /// Clients over WebSocket (`WEBSOCKET`).
+    Websocket,
+    /// Leaf nodes and naq links (`LEAFNODE`).
+    Leafnode,
+    /// Leaf nodes over WebSocket (`LEAFNODE_WS`).
+    LeafnodeWs,
+    /// MQTT clients (`MQTT`).
+    Mqtt,
+    /// MQTT clients over WebSocket (`MQTT_WS`).
+    MqttWs,
+    /// Clients in the same process (`IN_PROCESS`).
+    InProcess,
+}
+
+impl ConnectionType {
+    /// Every kind, by its name.
+    const ALL: [(&str, ConnectionType); 7] = [
+        ("STANDARD", ConnectionType::Standard),
+        ("WEBSOCKET", ConnectionType::Websocket),
+        ("LEAFNODE", ConnectionType::Leafnode),
+        ("LEAFNODE_WS", ConnectionType::LeafnodeWs),
+        ("MQTT", ConnectionType::Mqtt),
+        ("MQTT_WS", ConnectionType::MqttWs),
+        ("IN_PROCESS", ConnectionType::InProcess),
+    ];
+
+    /// The kind named `name`, in any case.
+    pub(crate) fn named(name: &str) -> Option<ConnectionType> {
+        Self::ALL
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, t)| t)
+    }
+}
+
+impl std::fmt::Display for ConnectionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = Self::ALL
+            .iter()
+            .find(|(_, t)| t == self)
+            .map_or("", |(n, _)| n);
+        f.write_str(name)
+    }
 }
 
 /// What a user may publish and subscribe to (`permissions`).
@@ -414,6 +470,10 @@ pub struct Tls {
     /// Clients must present a certificate that chains to `ca_file`
     /// (`verify`).
     pub verify: bool,
+    /// Clients log in as the user their certificate names, as
+    /// `nats-server` maps it: by e-mail address, DNS name or URI, then by
+    /// subject (`verify_and_map`). It needs `verify`.
+    pub map: bool,
     /// How long a handshake may take (`timeout`).
     pub timeout: Duration,
     /// The handshake comes first, before `INFO` (`handshake_first`).

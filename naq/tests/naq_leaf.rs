@@ -364,14 +364,7 @@ fn a_leaf_binds_the_account_the_hub_gives() {
             account: Some("H".into()),
             ..Leafnodes::default()
         }),
-        users: vec![naq::User {
-            login: naq::Login::Password {
-                user: "u".into(),
-                password: "p".into(),
-            },
-            account: Some("H".into()),
-            permissions: None,
-        }],
+        users: vec![user("u", "p", Some("H"))],
         ..base("hub")
     })
     .unwrap();
@@ -386,14 +379,7 @@ fn a_leaf_binds_the_account_the_hub_gives() {
             account: Some("L".into()),
             ..Remote::default()
         }],
-        users: vec![naq::User {
-            login: naq::Login::Password {
-                user: "v".into(),
-                password: "p".into(),
-            },
-            account: Some("L".into()),
-            permissions: None,
-        }],
+        users: vec![user("v", "p", Some("L"))],
         ..base("leaf")
     })
     .unwrap();
@@ -688,6 +674,7 @@ fn user(name: &str, password: &str, account: Option<&str>) -> naq::User {
         },
         account: account.map(Into::into),
         permissions: None,
+        connection_types: Vec::new(),
     }
 }
 
@@ -730,6 +717,7 @@ fn naq_leafs_log_in_as_the_users_of_the_leafnodes_block() {
                 login: naq::Login::Nkey(key.public_key()),
                 account: Some("B".into()),
                 permissions: None,
+                connection_types: Vec::new(),
             },
         ],
         base("hub"),

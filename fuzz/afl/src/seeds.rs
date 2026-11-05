@@ -46,6 +46,7 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
             "x\n*\n>\nx.y\n",
         ],
         "websocket" => return websocket(),
+        "certs" => return certs(),
         "peer_frames" => return peer_frames(),
         _ => &[],
     };
@@ -54,7 +55,22 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
 
 const UPGRADE: &str = "GET / HTTP/1.1\r\nHost: a.example\r\nOrigin: http://a.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Extensions: permessage-deflate\r\nCookie: u=al; p=pw\r\n\r\n";
 
-/// Upgrades, then frames: data, fragments, control, compressed and broken.
+/// A certificate with a subject of a domain component and every kind of
+/// alternative name, made by Go, and DN user names.
+fn certs() -> Vec<Vec<u8>> {
+    const CERT: &str = "308201403081f3a003020102020101300506032b65703031310d300b060355040a130441636d65310a3008060355040313016131143012060a0992268993f22c640119130461636d653020170d3730303130313030303030305a180f32313030303130313030303030305a3031310d300b060355040a130441636d65310a3008060355040313016131143012060a0992268993f22c640119130461636d65302a300506032b65700321009f9ef0164d66b11452c2dad7fca3a8530734955e031d5201251615f6c190a568a32e302c302a0603551d11042330218206612e61636d658106614061636d65860f7370696666653a2f2f61636d652f61300506032b6570034100e42115be3cf6d763ded0403d50ceb4b97094c316e66ea554ddee7089b31f9f2acc35e98673528f6f4be6321ecdb01a43c81ddb8b9ace0cd26c9e8b3e35eb2c0e";
+    let der = (0..CERT.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&CERT[i..i + 2], 16).unwrap_or_default())
+        .collect();
+    vec![
+        der,
+        b"CN=alice, O=Acme+OU=Eng,DC=acme".to_vec(),
+        br"CN=a,b! +O=#x,C=".to_vec(),
+    ]
+}
+
+/// Upgrades, then frames:  data, fragments, control, compressed and broken.
 fn websocket() -> Vec<Vec<u8>> {
     let frames: [&[u8]; 5] = [
         b"\x82\x86\0\0\0\0PING\r\n",

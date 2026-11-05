@@ -91,6 +91,7 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
     let mut arrival = Arrival {
         peer,
         tls: false,
+        cert: None,
         deadline,
     };
     match &door.tls {
@@ -102,6 +103,7 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
             let Some(Some(tls)) = within(deadline, acc.accept(tcp)).await else {
                 return;
             };
+            arrival.cert = acc.names(&tls);
             let (r, w) = tokio::io::split(tls);
             arrival.tls = true;
             open(lane, r, w, arrival).await;
@@ -123,6 +125,8 @@ struct Arrival {
     peer: (String, u16),
     /// Over TLS.
     tls: bool,
+    /// What its certificate names, where certificates name users.
+    cert: Option<Box<crate::tls::cert::Names>>,
     /// When its upgrade must be done by, if ever.
     deadline: Option<Instant>,
 }
@@ -167,6 +171,7 @@ where
     let reader = stream::Reader::new(r, link.clone(), &u, shared.opts.max_payload);
     let writer = stream::Writer::new(w, link, &u);
     hello.via.cookies = Some(Box::new(u.cookies));
+    hello.via.cert = arrival.cert;
     conn::serve(lane, hello, reader, writer).await;
 }
 

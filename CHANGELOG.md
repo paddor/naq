@@ -344,6 +344,18 @@ Notable changes to naq. The format follows
   config does, with activation tokens for exports that need them; an
   import that does not link is left out. Accounts with subject mappings or
   auth callout are refused, and v1 JWTs are not taken.
+- `naq`: TLS clients log in as the users their certificates name
+  (`verify_and_map`; `Tls::map`), on the client and WebSocket listeners,
+  as `nats-server` maps them: by e-mail address, DNS name or URI, then
+  the subject as a DN, in order or not, then as text with domain
+  components and without. A user with no password that a listener maps
+  logs in elsewhere with a certificate only.
+- `naq`: users of lists may be limited to kinds of connection
+  (`allowed_connection_types`; `User::connection_types`,
+  `ConnectionType`): `STANDARD`, `WEBSOCKET` and `LEAFNODE` for naq links
+  are served; unknown kinds are a config error.
+- `naq`: an NKey in a `CONNECT` is passed over where no user has one, as
+  in `nats-server`, so the user and password log in.
 - `naq`: clients may not publish to `_GR_.`, `$GR.` or `$NRG.` subjects,
   nor with `_R_.`, `$JS.ACK.`, `_GR_.` or `$GR.` replies, as in
   `nats-server`: the message is dropped with a permissions violation.

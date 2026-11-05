@@ -220,6 +220,7 @@ fn wss_runs_tls_before_the_upgrade() {
             timeout: Duration::from_secs(2),
             handshake_first: false,
             fallback: None,
+            map: false,
         }),
         ..Websocket::default()
     });
@@ -250,5 +251,88 @@ fn wss_runs_tls_before_the_upgrade() {
     assert!(got.contains(r#""tls_required":true"#), "{got}");
     assert!(got.contains(r#""tls_available":true"#), "{got}");
     assert!(got.ends_with("MSG a 1 2\r\nhi\r\nPONG\r\n"), "{got}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// What a `wss://` client of certificate `cn` gets for `CONNECT {}` and
+/// `PING`: a server that maps certificates to users, of CA `ca`, serves
+/// it at `s`.
+fn wss_login(
+    s: &Server,
+    dir: &std::path::Path,
+    ca: &rcgen::Issuer<'_, rcgen::KeyPair>,
+    cn: &str,
+) -> String {
+    use rustls::pki_types::PrivateKeyDer;
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut p = rcgen::CertificateParams::default();
+    p.distinguished_name = rcgen::DistinguishedName::new();
+    p.distinguished_name.push(rcgen::DnType::CommonName, cn);
+    let cert = p.signed_by(&key, ca).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_file(dir.join("ca.pem")).unwrap())
+        .unwrap();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let cfg = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(
+            vec![cert.der().clone()],
+            PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
+        )
+        .unwrap();
+    let name = ServerName::try_from("localhost").unwrap();
+    let conn = ClientConnection::new(Arc::new(cfg), name).unwrap();
+    let mut tls = StreamOwned::new(conn, tcp(s));
+    assert!(upgrade(&mut tls).starts_with("HTTP/1.1 101 "));
+    tls.write_all(&frame(0x2, b"CONNECT {\"verbose\":false}\r\nPING\r\n"))
+        .unwrap();
+    let mut got = String::new();
+    while let Some((op, p)) = next(&mut tls) {
+        got += &String::from_utf8_lossy(&p);
+        if op == 0x8 || got.ends_with("PONG\r\n") || got.contains("-ERR") {
+            break;
+        }
+    }
+    got.lines().last().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn wss_clients_log_in_as_the_users_their_certificates_name() {
+    let dir = std::env::temp_dir().join(format!("naq-wss-map-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    std::fs::write(dir.join("ca.pem"), ca.self_signed(&ca_key).unwrap().pem()).unwrap();
+    let ca = rcgen::Issuer::new(ca, ca_key);
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .signed_by(&key, &ca)
+        .unwrap();
+    std::fs::write(dir.join("cert.pem"), cert.pem()).unwrap();
+    std::fs::write(dir.join("key.pem"), key.serialize_pem()).unwrap();
+    let conf = format!(
+        "websocket {{\n  host: 127.0.0.1\n  port: -1\n  tls {{ cert_file: \"{0}/cert.pem\", key_file: \"{0}/key.pem\", ca_file: \"{0}/ca.pem\", verify_and_map: true }}\n}}\n\
+         authorization {{ users: [{{user: \"CN=web\", allowed_connection_types: [WEBSOCKET]}}, {{user: \"CN=tcp\", allowed_connection_types: [STANDARD]}}] }}\n",
+        dir.display()
+    );
+    let mut opts: Options = conf.parse().unwrap();
+    opts.host = "127.0.0.1".into();
+    opts.port = 0;
+    opts.lanes = 1;
+    let s = Server::start(&opts).unwrap();
+    assert_eq!(wss_login(&s, &dir, &ca, "web"), "PONG");
+    assert_eq!(
+        wss_login(&s, &dir, &ca, "tcp"),
+        "-ERR 'Authorization Violation'"
+    );
+    assert_eq!(
+        wss_login(&s, &dir, &ca, "nobody"),
+        "-ERR 'Authorization Violation'"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }

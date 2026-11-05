@@ -58,6 +58,7 @@ impl Pki {
             timeout: Duration::from_secs(2),
             handshake_first: first,
             fallback: None,
+            map: false,
         }
     }
 
@@ -222,12 +223,18 @@ fn the_config_file_names_the_files() {
     let t = o.tls.unwrap();
     assert_eq!(t.cert_file, PathBuf::from("a.pem"));
     assert_eq!(t.ca_file, Some(PathBuf::from("c.pem")));
-    assert!(t.verify && t.handshake_first);
+    assert!(t.verify && t.handshake_first && !t.map);
     assert_eq!(t.timeout, Duration::from_millis(500));
+    let mapped: Options = "tls { cert_file: a, key_file: b, ca_file: c, verify_and_map: true }\n"
+        .parse()
+        .unwrap();
+    let t = mapped.tls.unwrap();
+    assert!(t.verify && t.map, "mapping verifies");
     for bad in [
         "tls { key_file: b }\n",
         "tls { cert_file: a }\n",
         "tls { cert_file: a, key_file: b, verify: 1 }\n",
+        "tls { cert_file: a, key_file: b, verify_and_map: 1 }\n",
         "tls { bogus: 1 }\n",
         "tls: 1\n",
     ] {
