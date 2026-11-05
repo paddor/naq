@@ -1142,3 +1142,23 @@ fn imports_their_exports_do_not_allow_are_an_error() {
     });
     assert!(matches!(naq::Server::start(&opts), Err(Error::Options(_))));
 }
+
+#[test]
+fn the_system_account_comes_from_its_keys() {
+    let o: Options = "system_account: S\naccounts { S {} }\n".parse().unwrap();
+    assert_eq!(o.system_account.as_deref(), Some("S"));
+    let o: Options = "no_sys_acc: true\n".parse().unwrap();
+    assert!(o.no_system_account);
+    for (text, reason) in [
+        ("system_account: 1\n", "system_account: expected a string"),
+        (
+            "no_system_account: 1\n",
+            "no_system_account: expected true or false",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}

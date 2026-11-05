@@ -105,11 +105,33 @@ impl Pending {
     }
 }
 
-/// Account names by id: `$G` first, then those of `opts`.
+/// The name of the system account `nats-server` makes.
+pub(crate) const SYSTEM: &str = "$SYS";
+
+/// Account names by id: `$G` first, then those of `opts`, then `$SYS` if
+/// the server makes it.
 pub(crate) fn accounts(opts: &Options) -> Box<[String]> {
+    let made = opts.system_account.is_none()
+        && !opts.no_system_account
+        && !opts.accounts.iter().any(|a| a.name == SYSTEM);
     std::iter::once("$G".to_owned())
         .chain(opts.accounts.iter().map(|a| a.name.clone()))
+        .chain(made.then(|| SYSTEM.to_owned()))
         .collect()
+}
+
+/// The id of the system account among `names`, the server's accounts, if
+/// it has one.
+pub(crate) fn system(opts: &Options, names: &[String]) -> Option<u32> {
+    let name = match &opts.system_account {
+        Some(n) => n.as_str(),
+        None if opts.no_system_account && !opts.accounts.iter().any(|a| a.name == SYSTEM) => {
+            return None;
+        }
+        None => SYSTEM,
+    };
+    // Accounts are few: their count fits.
+    names.iter().position(|n| n == name).map(|i| i as u32)
 }
 
 /// Why `opts` cannot run as given.
@@ -140,6 +162,11 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
         && !seen.contains(&n)
     {
         return Err(format!("no_auth_user {n:?} is not a user"));
+    }
+    if let Some(a) = &opts.system_account
+        && !opts.accounts.iter().any(|x| x.name == *a)
+    {
+        return Err(format!("system_account: no account {a:?}"));
     }
     let Some(ws) = opts.websocket.as_ref().map(|w| &w.auth) else {
         return Ok(());

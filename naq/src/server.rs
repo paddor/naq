@@ -38,6 +38,11 @@ pub(crate) struct Shared {
     /// The requests this server sent into each account through service
     /// imports, by id.
     pub(crate) responses: Box<[Arc<crate::imports::service::Responses>]>,
+    /// The system account, if there is one.
+    pub(crate) system: Option<u32>,
+    /// The hash of the server's name that replies tracked for latency end
+    /// in, with a system account, as `nats-server` makes it.
+    pub(crate) node: Option<[u8; 8]>,
     /// What clients must authenticate with, if anything.
     pub(crate) auth: Option<Auth>,
     /// What WebSocket clients authenticate with, where it is not `auth`.
@@ -117,6 +122,7 @@ impl Server {
     pub fn start(opts: &Options) -> Result<Server, Error> {
         let setup = check(opts)?;
         let accounts = auth::accounts(opts);
+        let system = auth::system(opts, &accounts);
         let auth = Auth::new(opts, &accounts);
         let ws_auth = Auth::websocket(opts, auth.as_ref());
         let ctx = Context::with_config(&Config {
@@ -156,6 +162,8 @@ impl Server {
                 .map(|_| Arc::new(crate::imports::service::Responses::new(random())))
                 .collect(),
             imports: setup.imports,
+            system,
+            node: system.map(|_| node(&opts.server_name)),
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });
@@ -461,6 +469,18 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
 }
 
 /// 22 random-looking characters, as `nats-server` IDs have.
+/// The hash of server name `name`: eight letters or digits from its
+/// SHA-256, as `nats-server` makes it.
+fn node(name: &str) -> [u8; 8] {
+    use sha2::Digest;
+    let sum = sha2::Sha256::digest(name.as_bytes());
+    let mut h = [0; 8];
+    for (b, s) in h.iter_mut().zip(sum) {
+        *b = crate::imports::service::base62(u64::from(s));
+    }
+    h
+}
+
 /// Numbers below what they are asked for, made from fresh random state.
 fn random() -> impl FnMut(u64) -> u64 {
     use std::hash::{BuildHasher, Hasher};

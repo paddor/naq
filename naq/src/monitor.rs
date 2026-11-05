@@ -445,6 +445,7 @@ fn varz(shared: &Shared) -> serde_json::Value {
         "out_client_bytes": t.out_bytes,
         "slow_consumers": load(&shared.events.slow_consumers),
         "stale_connections": load(&shared.events.stale),
+        "system_account": shared.system.map(|a| shared.accounts[a as usize].as_str()),
     })
 }
 

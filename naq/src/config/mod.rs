@@ -146,6 +146,9 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "accounts" => auth::accounts(o, item)?,
             "leafnodes" | "leaf" => leaf::leafnodes(o, item)?,
             "cluster" => o.cluster = Some(cluster::cluster(item)?),
+            "system_account" | "system" | "no_system_account" | "no_system" | "no_sys_acc" => {
+                auth::system(o, &key, item)?;
+            }
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }

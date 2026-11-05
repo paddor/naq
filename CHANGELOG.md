@@ -295,9 +295,8 @@ Notable changes to naq. The format follows
   `response_type`, `response_threshold`, `prefix`, `to` with `$N` and
   `{{wildcard(N)}}`, `share`. They are checked at start as `nats-server`
   checks them: an import its export does not allow, one that closes a
-  cycle, one twice, and a `to` that cannot map are an error. `latency`
-  and `allow_trace: true` are refused. `Options::accounts` holds
-  `Account`s.
+  cycle, one twice, and a `to` that cannot map are an error.
+  `allow_trace: true` is refused. `Options::accounts` holds `Account`s.
 - `naq`: stream imports. A subscription in the importer gets a shadow in
   the exporter, on the exporter's subject, as in `nats-server`: the
   exporter's messages reach it with their subject rewritten, its queue
@@ -322,6 +321,16 @@ Notable changes to naq. The format follows
   routes too. The interest of a Go hub or a naq hub or leaf bound to an
   importer gets shadows, so imported streams reach it with its subjects;
   queue groups of naq links get none.
+- `naq`: a system account (`system_account`, `no_system_account`,
+  `Options::system_account`): `$SYS` unless another is named or none is
+  wanted, as in `nats-server`; `/varz` names it.
+- `naq`: service latency (`latency`), with a system account: a sampled
+  request, by its export's share or by its trace headers (Jaeger, B3, W3C
+  trace context), gets a reply that ends in the server's hash and `T`, and
+  a sample goes to the export's subject once it is answered (200), and when
+  it had no reply (400), nobody took it (503) or no response came in time
+  (504), as `nats-server` writes it. Samples of requests answered at
+  another server carry no responder.
 - `naq`: clients may not publish to `_GR_.`, `$GR.` or `$NRG.` subjects,
   nor with `_R_.`, `$JS.ACK.`, `_GR_.` or `$GR.` replies, as in
   `nats-server`: the message is dropped with a permissions violation.

@@ -31,6 +31,9 @@ accounts {
       {service: slow, response_threshold: "1s"}
       {stream: "svc.>"}
       {service: self}
+      {service: lat, latency: "lat.results"}
+      {service: lat2, latency: {sampling: headers, subject: "lat.results"}}
+      {service: lat3, response_threshold: "1s", latency: "lat.results"}
     ]
     imports: [{service: {account: E, subject: self}, to: me}]
   }
@@ -56,6 +59,9 @@ accounts {
       {service: {account: E, subject: dual}}
       {service: {account: F, subject: dual}}
       {service: {account: E, subject: slow}}
+      {service: {account: E, subject: lat}}
+      {service: {account: E, subject: lat2}}
+      {service: {account: E, subject: lat3}}
     ]
   }
   C {
@@ -586,5 +592,158 @@ fn a_response_past_the_threshold_finds_no_request() {
         svc.flush();
         req.nothing();
         let _ = name;
+    }
+}
+
+/// The latency sample `m` carries, once its line had an empty reply.
+fn sample(m: &Msg) -> serde_json::Value {
+    assert_eq!(
+        m.reply.as_deref(),
+        Some(""),
+        "a sample's reply is empty: {m:?}"
+    );
+    serde_json::from_str(&m.payload).unwrap()
+}
+
+#[test]
+fn a_sampled_request_sends_its_latency_when_answered() {
+    for (name, t) in targets() {
+        let mut watch = t.login("e", "");
+        watch.send("SUB lat.results 1\r\n");
+        watch.flush();
+        let mut svc = t.login("e", r#","name":"svc""#);
+        svc.send("SUB lat 1\r\n");
+        svc.flush();
+        let mut req = t.login("i", "");
+        req.send("SUB inbox.9 1\r\nPUB lat inbox.9 1\r\nq\r\n");
+        req.flush();
+        let reply = svc.msg().reply.unwrap();
+        let parts: Vec<&str> = reply.split('.').collect();
+        assert_eq!(
+            (parts.len(), parts[0], parts[3].len(), parts[4]),
+            (5, "_R_", 8, "T"),
+            "{name}: {reply}"
+        );
+        svc.send(&format!("PUB {reply} 2\r\nok\r\n"));
+        svc.flush();
+        assert_eq!(req.msg().payload, "ok", "{name}");
+        let s = sample(&watch.msg());
+        assert_eq!(
+            s["type"], "io.nats.server.metric.v1.service_latency",
+            "{name}: {s}"
+        );
+        assert_eq!(s["status"], 200, "{name}: {s}");
+        assert_eq!(s["requestor"]["acc"], "I", "{name}: {s}");
+        assert_eq!(
+            (&s["responder"]["acc"], &s["responder"]["name"]),
+            (&"E".into(), &"svc".into()),
+            "{name}: {s}"
+        );
+        for k in ["id", "timestamp", "start", "service", "system", "total"] {
+            assert!(s.get(k).is_some(), "{name}: no {k} in {s}");
+        }
+        assert!(s.get("description").is_none(), "{name}: {s}");
+        assert!(
+            s["total"].as_u64().unwrap() >= s["service"].as_u64().unwrap(),
+            "{name}: {s}"
+        );
+    }
+}
+
+#[test]
+fn a_sampled_request_without_a_reply_or_a_service_says_so() {
+    for (name, t) in targets() {
+        let mut watch = t.login("e", "");
+        watch.send("SUB lat.results 1\r\n");
+        watch.flush();
+        let mut req = t.login("i", "");
+        req.send("PUB lat 1\r\nq\r\n");
+        req.flush();
+        let s = sample(&watch.msg());
+        assert_eq!(
+            (&s["status"], &s["description"]),
+            (&400.into(), &"Bad Request".into()),
+            "{name}: {s}"
+        );
+        assert_eq!(s["requestor"]["acc"], "I", "{name}: {s}");
+        assert_eq!(s["total"], 0, "{name}: {s}");
+        req.send("SUB inbox.10 1\r\nPUB lat inbox.10 1\r\nq\r\n");
+        req.flush();
+        let s = sample(&watch.msg());
+        assert_eq!(
+            (&s["status"], &s["description"]),
+            (&503.into(), &"Service Unavailable".into()),
+            "{name}: {s}"
+        );
+    }
+}
+
+#[test]
+fn a_trace_header_asks_for_a_sample() {
+    for (name, t) in targets() {
+        let mut watch = t.login("e", "");
+        watch.send("SUB lat.results 1\r\n");
+        watch.flush();
+        let mut svc = t.login("e", r#","headers":true"#);
+        svc.send("SUB lat2 1\r\n");
+        svc.flush();
+        let mut req = t.login("i", r#","headers":true"#);
+        let h = "NATS/1.0\r\nTraceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00\r\n\r\n";
+        req.send(&format!(
+            "SUB inbox.11 1\r\nHPUB lat2 inbox.11 {} {}\r\n{h}q\r\n",
+            h.len(),
+            h.len() + 1
+        ));
+        req.flush();
+        let reply = svc.msg().reply.unwrap();
+        assert_eq!(
+            reply.split('.').count(),
+            3,
+            "{name}: not sampled, not tracked: {reply}"
+        );
+        svc.send(&format!("PUB {reply} 1\r\na\r\n"));
+        svc.flush();
+        req.msg();
+        let h = h.replace("-00\r\n\r\n", "-01\r\n\r\n");
+        req.send(&format!(
+            "HPUB lat2 inbox.11 {} {}\r\n{h}q\r\n",
+            h.len(),
+            h.len() + 1
+        ));
+        req.flush();
+        let reply = svc.msg().reply.unwrap();
+        svc.send(&format!("PUB {reply} 1\r\nb\r\n"));
+        svc.flush();
+        assert_eq!(req.msg().payload, "b", "{name}");
+        let s = sample(&watch.msg());
+        assert_eq!(s["status"], 200, "{name}: {s}");
+        assert_eq!(
+            s["header"]["Traceparent"][0],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "{name}: {s}"
+        );
+    }
+}
+
+#[test]
+fn a_sampled_request_without_a_response_in_time_says_so() {
+    for (name, t) in targets() {
+        let mut watch = t.login("e", "");
+        watch.send("SUB lat.results 1\r\n");
+        watch.flush();
+        let mut svc = t.login("e", "");
+        svc.send("SUB lat3 1\r\n");
+        svc.flush();
+        let mut req = t.login("i", "");
+        req.send("SUB inbox.12 1\r\nPUB lat3 inbox.12 1\r\nq\r\n");
+        req.flush();
+        svc.msg();
+        // Within twice the threshold, as `nats-server` sweeps.
+        let s = sample(&watch.msg());
+        assert_eq!(
+            (&s["status"], &s["description"]),
+            (&504.into(), &"Service Timeout".into()),
+            "{name}: {s}"
+        );
     }
 }

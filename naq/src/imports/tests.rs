@@ -151,8 +151,8 @@ fn bad_exports_and_transforms_are_an_error() {
             "latency subject",
         ),
         (
-            "accounts { E { exports [{service: s, latency: lat}] } }",
-            "not supported",
+            "no_sys_acc: true\naccounts { E { exports [{service: s, latency: lat}] } }",
+            "latency needs a system account",
         ),
         (
             "accounts { E { exports [{stream: \"a.*\"}] }\n\
@@ -227,4 +227,30 @@ fn a_cycle_through_three_accounts_is_an_error_and_a_chain_is_not() {
             "{bad}"
         );
     }
+}
+
+#[test]
+fn latency_takes_the_system_account_the_server_makes_or_names() {
+    link_text("accounts { E { exports [{service: s, latency: lat}] } }").unwrap();
+    link_text("system_account: S\naccounts { S {}, E { exports [{service: s, latency: lat}] } }")
+        .unwrap();
+    let opts: Options = "no_sys_acc: true\naccounts { $SYS {} }".parse().unwrap();
+    let names = crate::auth::accounts(&opts);
+    assert_eq!(crate::auth::system(&opts, &names), Some(1));
+    let made: Options = "accounts { A {} }".parse().unwrap();
+    let names = crate::auth::accounts(&made);
+    assert_eq!(
+        (&*names, crate::auth::system(&made, &names)),
+        (&["$G".to_owned(), "A".into(), "$SYS".into()][..], Some(2))
+    );
+    let none: Options = "no_system_account: true".parse().unwrap();
+    assert_eq!(
+        crate::auth::system(&none, &crate::auth::accounts(&none)),
+        None
+    );
+    let bad = "system_account: S"
+        .parse::<Options>()
+        .unwrap_err()
+        .to_string();
+    assert!(bad.contains("system_account: no account"), "{bad}");
 }

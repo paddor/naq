@@ -9,9 +9,8 @@ use crate::{ExportKind, ImportKind, Options, ResponseType, ServiceExport};
 /// The imports of every account, by account id: `$G` first, then those of
 /// the options in their order.
 pub(crate) fn link(opts: &Options) -> Result<Box<[Imports]>, String> {
-    let names: Vec<&str> = std::iter::once("$G")
-        .chain(opts.accounts.iter().map(|a| a.name.as_str()))
-        .collect();
+    let all_names = crate::auth::accounts(opts);
+    let names: Vec<&str> = all_names.iter().map(String::as_str).collect();
     let all = names.iter().map(|_| Imports::default()).collect();
     check_exports(opts)?;
     let mut l = Linker { opts, names, all };
@@ -79,7 +78,9 @@ fn check_exports(opts: &Options) -> Result<(), String> {
                 if !subject::is_valid_literal(l.subject.as_bytes()) || exported {
                     return Err(bad("invalid latency subject"));
                 }
-                return Err(bad("latency samples are not supported"));
+                if crate::auth::system(opts, &crate::auth::accounts(opts)).is_none() {
+                    return Err(bad("latency needs a system account"));
+                }
             }
         }
     }

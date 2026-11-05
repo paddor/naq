@@ -252,3 +252,18 @@ fn responses(item: &Item) -> Result<Option<Responses>, Bad> {
         )),
     }
 }
+
+/// `system_account` and its aliases, a name; `no_system_account` and its
+/// aliases, a boolean.
+pub(super) fn system(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    let bad = |reason: &str| (item.line, format!("{key}: {reason}"));
+    if key.starts_with("no_") {
+        let Value::Bool(b) = item.value else {
+            return Err(bad("expected true or false"));
+        };
+        o.no_system_account = b;
+    } else {
+        o.system_account = Some(string(item).ok_or_else(|| bad("expected a string"))?);
+    }
+    Ok(())
+}

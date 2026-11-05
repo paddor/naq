@@ -5,12 +5,13 @@
 //! that the lane a message comes in on acts on once it routed it.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use naq_proto::client::Pub;
 use rustc_hash::FxHashMap;
 
 use super::info::{self, ClientInfo};
+use super::latency::{self, Outcome, Track};
 use super::{ExportId, ServiceImport};
 use crate::ResponseType;
 use crate::conn::Client;
@@ -67,6 +68,8 @@ struct Response {
     at: Instant,
     /// The export the request went through.
     export: ExportId,
+    /// Its latency sample to come, if it is sampled.
+    track: Option<Box<Track>>,
 }
 
 impl Responses {
@@ -89,19 +92,31 @@ impl Responses {
         f
     }
 
-    /// Drops the requests older than their threshold at `now`.
-    pub(crate) fn expire(&self, now: Instant) {
+    /// Drops the requests older than their threshold at `now`. Returns
+    /// those of them that are sampled.
+    pub(crate) fn expire(&self, now: Instant) -> Vec<Track> {
+        let mut sampled = Vec::new();
         if let Ok(mut p) = self.pending.lock() {
-            p.retain(|_, r| now.saturating_duration_since(r.at) < r.threshold);
+            p.retain(|_, r| {
+                let keep = now.saturating_duration_since(r.at) < r.threshold;
+                if !keep && let Some(t) = r.track.take() {
+                    sampled.push(*t);
+                }
+                keep
+            });
         }
+        sampled
     }
 
     /// Waits for responses to `r`: writes its reply, with a token from
-    /// `random`, into `out`. `None` if too many wait already.
+    /// `random`, into `out`. A sampled request's reply ends in `node`, the
+    /// server's hash, and `T`, as `nats-server` tracks it. `None` if too
+    /// many wait already.
     fn wait(
         &self,
         r: Response,
         mut random: impl FnMut(u64) -> u64,
+        node: Option<&[u8; 8]>,
         out: &mut Vec<u8>,
     ) -> Option<[u8; 6]> {
         let mut pending = self.pending.lock().ok()?;
@@ -117,15 +132,28 @@ impl Responses {
                 break t;
             }
         };
+        let tracked = r.track.is_some();
         pending.insert(token, r);
         out.extend_from_slice(&self.prefix);
         out.extend_from_slice(&token);
+        if let Some(node) = node.filter(|_| tracked) {
+            out.push(b'.');
+            out.extend_from_slice(node);
+            out.extend_from_slice(b".T");
+        }
         Some(token)
     }
 
     /// The request of reply `subject`: taken out if it gets one response.
     fn take(&self, subject: &[u8]) -> Option<([u8; 6], Response)> {
-        let token: [u8; 6] = subject.strip_prefix(&self.prefix[..])?.try_into().ok()?;
+        let rest = subject.strip_prefix(&self.prefix[..])?;
+        let (token, tail) = rest.split_at_checked(6)?;
+        // A sampled request's reply: `.<node>.T` follows.
+        let tracked = tail.len() == 11 && tail[0] == b'.' && tail.ends_with(b".T");
+        if !(tail.is_empty() || tracked) {
+            return None;
+        }
+        let token: [u8; 6] = token.try_into().ok()?;
         let mut pending = self.pending.lock().ok()?;
         let r = match pending.get(&token)?.kind {
             ResponseType::Singleton => pending.remove(&token)?,
@@ -134,16 +162,17 @@ impl Responses {
         Some((token, r))
     }
 
-    /// After a response to `token`: it waits on if `more`, else it is done.
-    fn answered(&self, token: [u8; 6], more: bool) {
-        if let Ok(mut p) = self.pending.lock() {
-            if more {
-                if let Some(r) = p.get_mut(&token) {
-                    r.at = Instant::now();
-                }
-            } else {
-                p.remove(&token);
+    /// After a response to `token`: it waits on if `more`, else it is done
+    /// and returned.
+    fn answered(&self, token: [u8; 6], more: bool) -> Option<Response> {
+        let mut p = self.pending.lock().ok()?;
+        if more {
+            if let Some(r) = p.get_mut(&token) {
+                r.at = Instant::now();
             }
+            None
+        } else {
+            p.remove(&token)
         }
     }
 
@@ -154,7 +183,7 @@ impl Responses {
     }
 }
 
-const fn base62(n: u64) -> u8 {
+pub(crate) const fn base62(n: u64) -> u8 {
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"[n as usize % 62]
 }
 
@@ -194,9 +223,21 @@ async fn sweep(shared: std::sync::Weak<crate::server::Shared>) {
             return;
         };
         let now = Instant::now();
-        for r in &s.responses {
-            r.expire(now);
+        let expired: Vec<Track> = s.responses.iter().flat_map(|r| r.expire(now)).collect();
+        if expired.is_empty() {
+            continue;
         }
+        // The samples of requests that timed out go out from lane 0.
+        let Some(lane) = crate::lane::get(s.id, 0) else {
+            return;
+        };
+        let mut out = Outs::new(&lane);
+        for t in &expired {
+            let json = latency::sample(&lane, t, Outcome::Timeout, None);
+            latency::publish(&lane, &mut out, t.account, &t.subject, &json);
+        }
+        lane.flush();
+        lane.ship_imported(&mut out).await;
     }
 }
 
@@ -368,13 +409,14 @@ impl Run<'_, '_> {
             subject: &subject,
             ..*self.m
         };
-        Imported::outs_of(&mut imported.outs, lane, owner).server(lane, slot, &p, None);
+        Imported::outs_of(&mut imported.outs, lane, owner, false).server(lane, slot, &p, None);
         imported.subject = subject;
         true
     }
 
     /// Sends the request `w` holds on into the exporter of `si`, with a
-    /// reply of this server's and `Nats-Request-Info`.
+    /// reply of this server's and `Nats-Request-Info`. A sampled request's
+    /// latency sample goes out when it is done.
     fn request(&mut self, w: Work, si: &ServiceImport) -> bool {
         // A route's request was imported where it was published.
         if self.from.source == Source::Server || w.chain.has(si.export) {
@@ -390,61 +432,64 @@ impl Run<'_, '_> {
         subject.clear();
         si.rewrite_into(src.subject, &mut subject);
         let ci = client_info(lane, src.headers, &w, si.share, self.from);
+        let track = track(lane, si, &ci, src.headers);
         let json = serde_json::to_vec(&ci).unwrap_or_default();
         let mut headers = std::mem::take(&mut imported.headers);
         headers.clear();
         info::set(src.headers, info::HEADER, &json, &mut headers);
         let src_reply = src.reply.map(<[u8]>::to_vec);
-        let responses = &lane.shared.responses[si.to as usize];
         let mut reply = Vec::new();
-        let token = match &src_reply {
+        let (token, bad) = match &src_reply {
             Some(r) if r.starts_with(b"$JS.ACK.") => {
                 reply.clone_from(r);
-                None
+                (None, None)
             }
             Some(r) => {
-                let wait = Response {
-                    to: w.account,
-                    reply: r.as_slice().into(),
-                    kind: si.service.response,
-                    threshold: si.service.threshold,
-                    at: Instant::now(),
-                    export: si.export,
-                };
-                let Some(t) = responses.wait(wait, |n| lane.below(n), &mut reply) else {
+                let waiting = waiting(si, w.account, r, track);
+                let node = lane.shared.node.as_ref();
+                let responses = &lane.shared.responses[si.to as usize];
+                let Some(t) = responses.wait(waiting, |n| lane.below(n), node, &mut reply) else {
                     imported.subject = subject;
                     imported.headers = headers;
                     return false;
                 };
-                Some(t)
+                (Some(t), None)
             }
-            None => None,
+            // Without a reply, a sampled request is a bad one.
+            None => (None, track),
         };
-        let reply = src_reply.as_ref().map(|_| &reply[..]);
         let new = New {
             subject: &subject,
-            reply,
+            reply: src_reply.as_ref().map(|_| &reply[..]),
             headers: Some(&headers),
         };
         let parts = push(imported, m, w.msg, &new);
         imported.subject = subject;
         imported.headers = headers;
         let delivered = self.route_on(parts, si.to, chain);
-        if !delivered && let Some(t) = token {
-            responses.answered(t, false);
+        if let Some(t) = bad {
+            self.sample(&t, Outcome::BadRequest, None);
+        }
+        let responses = &lane.shared.responses[si.to as usize];
+        if !delivered
+            && let Some(t) = token
+            && let Some(t) = responses.answered(t, false).and_then(|r| r.track)
+        {
+            self.sample(&t, Outcome::Unavailable, None);
         }
         delivered
     }
 
     /// Sends the response `w` holds back to the requester, by the reply it
-    /// came on.
+    /// came on. The first one sends the latency sample of a sampled
+    /// request.
     fn response(&mut self, w: Work, r: &Responses) -> bool {
         let (lane, m) = (self.lane, self.m);
         let imported = self.out.imported(lane);
         let src = message(m, &imported.arena, w.msg);
         let empty = src.headers.is_none() && src.payload.is_empty();
         let src_reply = src.reply.map(<[u8]>::to_vec);
-        let Some((token, wait)) = r.take(src.subject) else {
+        let Some((token, mut wait)) = r.take(src.subject) else {
             return false;
         };
         let Some(chain) = w
@@ -462,10 +507,12 @@ impl Run<'_, '_> {
                     to: w.account,
                     reply: rr.as_slice().into(),
                     at: Instant::now(),
+                    track: None,
                     ..wait.clone()
                 };
-                if lane.shared.responses[wait.to as usize]
-                    .wait(back, |n| lane.below(n), &mut reply)
+                let waits = &lane.shared.responses[wait.to as usize];
+                if waits
+                    .wait(back, |n| lane.below(n), None, &mut reply)
                     .is_none()
                 {
                     return false;
@@ -485,7 +532,57 @@ impl Run<'_, '_> {
         if wait.kind != ResponseType::Singleton {
             r.answered(token, delivered && !empty);
         }
+        if let Some(t) = wait.track.take() {
+            let responder = self.from.client.map(|c| details(lane, c));
+            let outcome = if delivered {
+                Outcome::Answered
+            } else {
+                Outcome::Unavailable
+            };
+            self.sample(&t, outcome, responder.as_ref());
+        }
         delivered
+    }
+
+    /// Sends the latency sample of the request `t` tracks, which came to
+    /// `outcome`.
+    fn sample(&mut self, t: &Track, outcome: Outcome, responder: Option<&ClientInfo>) {
+        let json = latency::sample(self.lane, t, outcome, responder);
+        latency::publish(self.lane, self.out, t.account, &t.subject, &json);
+    }
+}
+
+/// The latency tracking of a request through `si` by requester `ci`, with
+/// headers `headers`, if its export samples it.
+fn track(
+    lane: &Lane,
+    si: &ServiceImport,
+    ci: &ClientInfo,
+    headers: Option<&[u8]>,
+) -> Option<Box<Track>> {
+    let l = si.service.latency.as_ref()?;
+    let header = latency::sampled(l, headers, |n| lane.below(n))?.header();
+    Some(Box::new(Track {
+        requestor: ci.clone(),
+        start: SystemTime::now(),
+        at: Instant::now(),
+        header,
+        account: si.to,
+        subject: l.subject.as_bytes().into(),
+    }))
+}
+
+/// The responses to a request of account `to` through `si`, with reply
+/// `r` there, wait for, sampled as `track` says.
+fn waiting(si: &ServiceImport, to: u32, r: &[u8], track: Option<Box<Track>>) -> Response {
+    Response {
+        to,
+        reply: r.into(),
+        kind: si.service.response,
+        threshold: si.service.threshold,
+        at: Instant::now(),
+        export: si.export,
+        track,
     }
 }
 
@@ -526,20 +623,32 @@ fn client_info(
     let Some(c) = from.client else {
         return ci;
     };
-    ci.rtt = u64::try_from(c.rtt.get().as_nanos()).unwrap_or(u64::MAX);
     if share {
-        let meta = c.meta.borrow();
-        server_details(lane, &mut ci);
-        ci.start = Some(crate::monitor::rfc3339(meta.start));
-        ci.host.clone_from(&meta.ip);
-        ci.id = c.id;
-        ci.user = meta.user.clone().unwrap_or_default();
-        ci.name = meta.name.clone().unwrap_or_default();
-        ci.lang = meta.lang.clone().unwrap_or_default();
-        ci.version = meta.version.clone().unwrap_or_default();
-        ci.kind = "Client".into();
-        ci.client_type = if meta.websocket { "websocket" } else { "nats" }.into();
+        return details(lane, c);
     }
+    ci.rtt = u64::try_from(c.rtt.get().as_nanos()).unwrap_or(u64::MAX);
+    ci
+}
+
+/// All `nats-server` tells of client `c`: its account, round trip,
+/// connection, names and server.
+fn details(lane: &Lane, c: &Client) -> ClientInfo {
+    let meta = c.meta.borrow();
+    let mut ci = ClientInfo {
+        account: lane.shared.accounts[c.account.get() as usize].clone(),
+        rtt: u64::try_from(c.rtt.get().as_nanos()).unwrap_or(u64::MAX),
+        start: Some(crate::monitor::rfc3339(meta.start)),
+        host: meta.ip.clone(),
+        id: c.id,
+        user: meta.user.clone().unwrap_or_default(),
+        name: meta.name.clone().unwrap_or_default(),
+        lang: meta.lang.clone().unwrap_or_default(),
+        version: meta.version.clone().unwrap_or_default(),
+        kind: "Client".into(),
+        client_type: if meta.websocket { "websocket" } else { "nats" }.into(),
+        ..ClientInfo::default()
+    };
+    server_details(lane, &mut ci);
     ci
 }
 
@@ -617,7 +726,7 @@ impl Run<'_, '_> {
         let Imported { arena, outs, .. } = self.out.imported(lane);
         let base: &[u8] = arena;
         let p = parts.of(base);
-        let out = Imported::outs_of(outs, lane, account);
+        let out = Imported::outs_of(outs, lane, account, true);
         let index = lane.index(account).borrow();
         let Some(found) = index.matches(p.subject) else {
             return false;
@@ -645,6 +754,7 @@ mod tests {
             threshold,
             at: Instant::now(),
             export: (1, 0),
+            track: None,
         }
     }
 
@@ -666,6 +776,7 @@ mod tests {
                     k += 7;
                     k
                 },
+                None,
                 &mut reply,
             )
             .unwrap();
@@ -679,6 +790,7 @@ mod tests {
             .wait(
                 waiting(ResponseType::Stream, Duration::from_secs(9)),
                 |n| n - 1,
+                None,
                 &mut reply,
             )
             .unwrap();
@@ -701,12 +813,14 @@ mod tests {
         r.wait(
             waiting(ResponseType::Singleton, Duration::from_millis(5)),
             &mut next,
+            None,
             &mut reply,
         )
         .unwrap();
         r.wait(
             waiting(ResponseType::Singleton, Duration::from_secs(60)),
             &mut next,
+            None,
             &mut reply,
         )
         .unwrap();

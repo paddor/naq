@@ -75,6 +75,13 @@ pub struct Options {
     pub leaf_reconnect: Duration,
     /// The other naq servers of its cluster (`cluster`), if any.
     pub cluster: Option<Cluster>,
+    /// The account the server sends its own messages in, such as latency
+    /// samples (`system_account`). `None` takes an account named `$SYS`
+    /// if there is one, else makes one, unless
+    /// [`Options::no_system_account`].
+    pub system_account: Option<String>,
+    /// No system account is made (`no_system_account`).
+    pub no_system_account: bool,
 }
 
 /// A fixed mesh of naq servers (`cluster`): each lists the others, and
@@ -360,6 +367,8 @@ impl Default for Options {
             leafnodes: None,
             leaf_reconnect: Duration::from_secs(1),
             cluster: None,
+            system_account: None,
+            no_system_account: false,
             http_port: None,
             http_host: None,
             tls: None,

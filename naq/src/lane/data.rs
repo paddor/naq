@@ -144,15 +144,21 @@ pub(crate) struct Imported {
 }
 
 impl Imported {
-    /// The `Outs` of `account` among `outs`, made on first use.
-    pub(crate) fn outs_of<'o>(outs: &'o mut Vec<Outs>, lane: &Lane, account: u32) -> &'o mut Outs {
+    /// The `Outs` of `account` among `outs`, for messages that came
+    /// through a service import if `of_service`, made on first use.
+    pub(crate) fn outs_of<'o>(
+        outs: &'o mut Vec<Outs>,
+        lane: &Lane,
+        account: u32,
+        of_service: bool,
+    ) -> &'o mut Outs {
         let at = outs
             .iter()
-            .position(|o| o.account == account)
+            .position(|o| o.account == account && o.of_service == of_service)
             .unwrap_or_else(|| {
                 let mut o = Outs::new(lane);
                 o.account = account;
-                o.of_service = true;
+                o.of_service = of_service;
                 outs.push(o);
                 outs.len() - 1
             });
