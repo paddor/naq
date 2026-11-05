@@ -829,13 +829,18 @@ fn a_server_that_stops_reading_is_let_go() {
         write!(all, "SUB s.{i}.{pad} {i}\r\n").unwrap();
         all
     });
+    // Server 1's end of the stalled link, by the port the proxy dials from.
+    let stalled = proxy.upstream_ports();
     let _c = client(&servers[1], &subs);
     let port = servers[1].cluster_addr().unwrap().port();
     let deadline = Instant::now() + 4 * WAIT;
     // Up still, or let go already where the subscriptions came slowly.
     let stuck = loop {
         let now = sockets(port);
-        if let Some(&(to, ..)) = now.iter().find(|&&(_, _, unsent)| unsent >= 1 << 20) {
+        if let Some(&(to, ..)) = now
+            .iter()
+            .find(|&&(to, _, unsent)| stalled.contains(&to) && unsent >= 1 << 20)
+        {
             break to;
         }
         assert!(Instant::now() < deadline, "nothing backs up: {now:?}");

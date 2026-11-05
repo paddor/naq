@@ -73,6 +73,18 @@ impl Proxy {
         self.close();
     }
 
+    /// The ports of its connections to where it forwards, at its end.
+    pub(crate) fn upstream_ports(&self) -> Vec<u16> {
+        self.conns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| Some(c.local_addr().ok()?.port()))
+            // Those it took have its own port.
+            .filter(|&p| p != self.port)
+            .collect()
+    }
+
     /// Its state.
     pub(crate) fn state(&self) -> u8 {
         // Relaxed: a test switch, nothing else hangs on it.
