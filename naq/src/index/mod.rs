@@ -72,6 +72,15 @@ pub(crate) struct Peer {
     /// Members of a queue group at the hub; 1 for plain interest; 0 for
     /// none, to remove it.
     pub(crate) weight: u32,
+    /// For a shadow of the link's interest in the account it imports a
+    /// stream from, that import's place among those of the link's
+    /// account; [`Peer::DIRECT`] for the link's own.
+    pub(crate) shadow: u32,
+}
+
+impl Peer {
+    /// Not a shadow.
+    pub(crate) const DIRECT: u32 = u32::MAX;
 }
 
 /// Subscribers of one filter, or of one queue group on it.
@@ -140,7 +149,7 @@ impl Group {
         let at = self
             .peers
             .iter()
-            .position(|p| p.lane == peer.lane && p.link == peer.link);
+            .position(|p| p.lane == peer.lane && p.link == peer.link && p.shadow == peer.shadow);
         match (at, add) {
             (Some(at), true) => self.peers[at] = peer,
             (None, true) => self.peers.push(peer),
@@ -206,6 +215,22 @@ pub(crate) struct Interest {
 impl Interest {
     const fn is_empty(&self) -> bool {
         self.plain.is_empty() && self.queues.is_empty() && self.taps.is_empty()
+    }
+
+    /// The taps that count as plain interest: see [`Index::taps_told`].
+    pub(crate) fn taps_told(&self, to_routes: bool) -> u64 {
+        let counts = |t: &&Tap| {
+            !to_routes
+                || matches!(
+                    t,
+                    Tap::Responses(_)
+                        | Tap::Shadow {
+                            to_routes: true,
+                            ..
+                        }
+                )
+        };
+        self.taps.iter().filter(counts).count() as u64
     }
 
     /// The group for `queue`, or the plain one.
@@ -321,6 +346,22 @@ impl Index {
         self.interest(filter).taps.push(tap);
     }
 
+    /// Removes the taps of `filter` that `drop` picks.
+    pub(crate) fn untap(&mut self, filter: &[u8], drop: impl Fn(&Tap) -> bool) {
+        let keep = |i: &mut Interest| i.taps.retain(|t| !drop(t));
+        if subject::is_literal(filter) {
+            self.literal.change(filter, keep);
+        } else {
+            self.wild.change(filter, keep);
+        }
+    }
+
+    /// Whether `filter` has a tap `has` picks.
+    pub(crate) fn has_tap(&self, filter: &[u8], has: impl Fn(&Tap) -> bool) -> bool {
+        self.interest_of(filter)
+            .is_some_and(|i| i.taps.iter().any(has))
+    }
+
     /// Removes subscription `sid` of client `id`.
     pub(crate) fn remove(&mut self, filter: &[u8], queue: Option<&[u8]>, id: u64, sid: &[u8]) {
         self.change(filter, queue, |g| {
@@ -382,11 +423,7 @@ impl Index {
     /// The subscribers of the plain subscriptions of `filter`, or of its
     /// queue group `queue`, if any.
     pub(crate) fn group(&self, filter: &[u8], queue: Option<&[u8]>) -> Option<&Group> {
-        let interest = if subject::is_literal(filter) {
-            self.literal.get(filter)
-        } else {
-            self.wild.get(filter)
-        }?;
+        let interest = self.interest_of(filter)?;
         match queue {
             None => Some(&interest.plain),
             Some(q) => interest
@@ -395,6 +432,23 @@ impl Index {
                 .find(|(n, _)| **n == *q)
                 .map(|(_, g)| g),
         }
+    }
+
+    /// The interest in `filter`, if any.
+    fn interest_of(&self, filter: &[u8]) -> Option<&Interest> {
+        if subject::is_literal(filter) {
+            self.literal.get(filter)
+        } else {
+            self.wild.get(filter)
+        }
+    }
+
+    /// The taps of imports in `filter` that count as plain interest of
+    /// this server: for links, all; for routes, only those of responses,
+    /// as `nats-server` tells routes none of its import subscriptions.
+    pub(crate) fn taps_told(&self, filter: &[u8], to_routes: bool) -> u64 {
+        self.interest_of(filter)
+            .map_or(0, |i| i.taps_told(to_routes))
     }
 
     /// Client members of the plain subscriptions of `filter`, or of its
@@ -422,9 +476,15 @@ impl Index {
     /// Members of the plain subscriptions of `filter`, or of its queue
     /// group `queue`, as link `link` tells its hub of them, with the naq
     /// leafs in `leafs`: see [`Group::told`].
+    /// For plain interest, the taps of imports count too.
     pub(crate) fn count(&self, filter: &[u8], queue: Option<&[u8]>, link: u64, leafs: u64) -> u32 {
+        let taps = if queue.is_none() {
+            self.taps_told(filter, false)
+        } else {
+            0
+        };
         self.group(filter, queue).map_or(0, |g| {
-            u32::try_from(g.told(filter, link, leafs)).unwrap_or(u32::MAX)
+            u32::try_from(g.told(filter, link, leafs) + taps).unwrap_or(u32::MAX)
         })
     }
 
@@ -536,6 +596,7 @@ mod tests {
             lane: 1,
             link: 7,
             weight: 3,
+            shadow: Peer::DIRECT,
         };
         idx.peer(b"a.*", Some(b"q"), p);
         idx.peer(b"a.*", Some(b"q"), Peer { weight: 5, ..p });

@@ -1123,3 +1123,110 @@ fn a_queue_group_takes_a_member_a_route_has_for_a_leaf_only_without_another() {
     while line(&mut near) != "PONG" {}
     until_heard(&mut p, &mut far, "j");
 }
+
+/// A hub whose account I imports from E, with users `e` and `i`, that
+/// binds naq leafs to I; and its leaf.
+fn importing() -> (Server, Server) {
+    let opts: Options = "accounts {\n\
+        E { users: [{user: e, password: p}], exports: [{stream: \"s.>\"}, {service: \"svc.>\"}] }\n\
+        I { users: [{user: i, password: p}], imports: [\n\
+            {stream: {account: E, subject: \"s.>\"}, prefix: pre},\n\
+            {service: {account: E, subject: \"svc.>\"}}] }\n}\n"
+        .parse()
+        .unwrap();
+    let h = Server::start(&Options {
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            users: vec![user("leaf", "p", Some("I"))],
+            ..Leafnodes::default()
+        }),
+        accounts: opts.accounts,
+        users: opts.users,
+        ..base("hub")
+    })
+    .unwrap();
+    let port = h.leafnode_addr().unwrap().port();
+    let l = leaf_of("leaf", with_login(port, "leaf", Some("p")));
+    leafz(&h, |z| z["leafnodes"] == 1);
+    (h, l)
+}
+
+/// Waits until the hub's only link has interest in `subject`.
+fn hub_hears(h: &Server, subject: &str) {
+    leafz(h, |z| {
+        z["leafs"][0]["subscriptions_list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|s| s == subject))
+    });
+}
+
+#[test]
+fn a_leaf_of_an_importer_gets_the_streams_it_imports() {
+    let (h, l) = importing();
+    let mut sub = client(&l, "SUB pre.s.x 1\r\n");
+    hub_hears(&h, "pre.s.x");
+    let mut e = client_with(&h, r#"{"verbose":false,"user":"e","pass":"p"}"#, "");
+    let deadline = Instant::now() + WAIT;
+    sub.get_mut()
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        send(&mut e, "PUB s.x 2\r\nhi\r\n");
+        let mut got = String::new();
+        if sub.read_line(&mut got).is_ok() {
+            assert_eq!(got, "MSG pre.s.x 1 2\r\n");
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing came");
+    }
+    sub.get_mut().set_read_timeout(Some(WAIT)).unwrap();
+    assert_eq!(line(&mut sub), "hi");
+    // Gone with the leaf's interest: once `pre.s.y`, which the leaf took
+    // up after, comes through, `pre.s.x` no longer does.
+    send(&mut sub, "UNSUB 1\r\nSUB pre.s.y 2\r\n");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        send(&mut e, "PUB s.x 1\r\nx\r\nPUB s.y 1\r\ny\r\n");
+        let l = line(&mut sub);
+        line(&mut sub);
+        if l == "MSG pre.s.y 2 1" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no pre.s.y");
+    }
+    send(
+        &mut e,
+        "PUB s.x 1\r\nx\r\nPUB s.y 1\r\ny\r\nPUB s.y 1\r\nz\r\n",
+    );
+    loop {
+        let l = line(&mut sub);
+        assert_ne!(l, "MSG pre.s.x 1 1");
+        if line(&mut sub) == "z" {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_leaf_of_an_importer_hears_of_its_services_and_gets_their_responses() {
+    let (h, l) = importing();
+    hears(&l, "svc.>");
+    let mut svc = client_with(
+        &h,
+        r#"{"verbose":false,"headers":true,"user":"e","pass":"p"}"#,
+        "SUB svc.> 1\r\n",
+    );
+    let mut req = client(&l, "SUB inbox 1\r\n");
+    hub_hears(&h, "inbox");
+    send(&mut req, "PUB svc.q inbox 1\r\nq\r\n");
+    let head = line(&mut svc);
+    let parts: Vec<&str> = head.split(' ').collect();
+    assert_eq!((parts[0], parts[1]), ("HMSG", "svc.q"), "{head}");
+    assert!(parts[3].starts_with("_R_."), "{head}");
+    assert_eq!(line(&mut svc), "NATS/1.0");
+    assert_eq!(line(&mut svc), r#"Nats-Request-Info: {"acc":"I"}"#);
+    send(&mut svc, &format!("PUB {} 2\r\nok\r\n", parts[3]));
+    while line(&mut req) != "MSG inbox 1 2" {}
+    assert_eq!(line(&mut req), "ok");
+}

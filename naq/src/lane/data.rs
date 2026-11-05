@@ -361,11 +361,7 @@ impl Lane {
         at: usize,
         source: Source,
     ) {
-        if let Some(imported) = out.imported.as_deref_mut()
-            && !imported.arena.is_empty()
-        {
-            self.ship_imported(imported).await;
-        }
+        self.ship_imported(out).await;
         self.ship_servers(out).await;
         if out.lanes.iter().all(Out::is_empty) {
             buf.advance(at);
@@ -395,10 +391,13 @@ impl Lane {
         }
     }
 
-    /// Hands what imports routed over to the other lanes and servers, in
-    /// one chunk of the arena.
-    #[cold]
-    async fn ship_imported(&self, imported: &mut Imported) {
+    /// Hands what imports routed with `out` over to the other lanes and
+    /// servers, in one chunk of the arena.
+    pub(crate) async fn ship_imported(&self, out: &mut Outs) {
+        // Shadows of naq links write records only: the arena may be empty.
+        let Some(imported) = out.imported.as_deref_mut() else {
+            return;
+        };
         let chunk = imported.arena.split().freeze();
         for out in &mut imported.outs {
             self.ship_servers(out).await;
@@ -436,7 +435,7 @@ impl Lane {
             return;
         }
         for p in peers.iter().filter(|p| p.lane == self.id) {
-            self.hit_link(p.link, None);
+            self.hit_link(*p, None);
         }
     }
 

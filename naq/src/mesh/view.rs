@@ -20,7 +20,12 @@ pub(super) fn routes(
         return Vec::new();
     };
     let mut all: ByOrigin = Vec::new();
-    let clients = u32::try_from(g.weight()).unwrap_or(u32::MAX);
+    let taps = if queue.is_none() {
+        index.taps_told(filter, true)
+    } else {
+        0
+    };
+    let clients = u32::try_from(g.weight() + taps).unwrap_or(u32::MAX);
     if clients > 0 {
         all.push((None, clients));
     }
@@ -83,12 +88,18 @@ pub(super) fn leaf(
     let Some(g) = index.group(filter, queue) else {
         return Vec::new();
     };
+    let taps = if queue.is_none() {
+        index.taps_told(filter, false)
+    } else {
+        0
+    };
     if leaf.isolated {
-        return one(isolated(g, slots, leaf, filter, queue), queue);
+        return one(isolated(g, slots, leaf, filter, queue) + taps, queue);
     }
     let skips = bit(leaf.slot) | slots.of_cluster(leaf.cluster);
     let servers = g.servers.iter().filter(|&&(s, _)| skips & bit(s) == 0);
     let mut n = g.weight() + servers.map(|&(_, m)| u64::from(m.all)).sum::<u64>();
+    n += taps;
     n += g.peers.iter().map(|p| u64::from(p.weight)).sum::<u64>();
     if !leaf.cluster.is_empty() {
         for &(s, _) in g.servers.iter().filter(|&&(s, _)| slots.is_route(s)) {

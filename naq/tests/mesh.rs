@@ -915,3 +915,116 @@ fn a_server_that_asks_again_gets_a_snapshot_again() {
         assert_eq!(snapshot(&d).await, ["a"]);
     });
 }
+
+/// A cluster of 3, met, whose account I imports from E, with users `e`
+/// and `i`.
+fn importing_cluster() -> Vec<Server> {
+    let accounts: Options = "accounts {\n\
+        E { users: [{user: e, password: p}], exports: [{stream: \"s.>\"}, {service: \"svc.>\"}] }\n\
+        I { users: [{user: i, password: p}], imports: [\n\
+            {stream: {account: E, subject: \"s.>\"}, prefix: pre},\n\
+            {service: {account: E, subject: \"svc.>\"}}] }\n}\n"
+        .parse()
+        .unwrap();
+    let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
+    let servers: Vec<Server> = (0..3)
+        .map(|i| {
+            let routes = (0..3)
+                .filter(|&j| j != i)
+                .map(|j| format!("nats-route://127.0.0.1:{}", ports[j]))
+                .collect();
+            Server::start(&Options {
+                host: "127.0.0.1".into(),
+                port: 0,
+                lanes: 2,
+                http_port: Some(0),
+                server_name: format!("n{i}"),
+                cluster: Some(Cluster {
+                    name: "c".into(),
+                    host: "127.0.0.1".into(),
+                    port: ports[i],
+                    routes,
+                }),
+                accounts: accounts.accounts.clone(),
+                users: accounts.users.clone(),
+                ..Options::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    for s in &servers {
+        until(s, "/routez", |z| z["num_routes"] == 2);
+    }
+    servers
+}
+
+/// A client of `s` that logs in as `user`.
+fn login(s: &Server, user: &str, ops: &str) -> Client {
+    use std::io::BufRead;
+    let mut c = TcpStream::connect(s.addr()).unwrap();
+    c.set_read_timeout(Some(WAIT)).unwrap();
+    write!(
+        c,
+        "CONNECT {{\"verbose\":false,\"headers\":true,\"user\":\"{user}\",\"pass\":\"p\"}}\r\n{ops}PING\r\n"
+    )
+    .unwrap();
+    let mut r = std::io::BufReader::new(c);
+    let mut l = String::new();
+    while l != "PONG\r\n" {
+        l.clear();
+        r.read_line(&mut l).unwrap();
+    }
+    r
+}
+
+/// Publishes `subject` from `p` until `c` gets a message on `got`.
+fn until_got(p: &mut Client, c: &mut Client, subject: &str, got: &str) {
+    use std::io::BufRead;
+    let deadline = Instant::now() + WAIT;
+    c.get_mut()
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        send(p, &format!("PUB {subject} 4\r\nwait\r\n"));
+        let mut l = String::new();
+        if c.read_line(&mut l).is_ok() && l.starts_with(&format!("MSG {got} ")) {
+            line(c);
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing on {got}");
+    }
+    c.get_mut().set_read_timeout(Some(WAIT)).unwrap();
+}
+
+#[test]
+fn a_stream_import_reaches_an_importer_at_another_server() {
+    let servers = importing_cluster();
+    let mut sub = login(&servers[1], "i", "SUB pre.s.x 1\r\n");
+    let mut e = login(&servers[0], "e", "");
+    until_got(&mut e, &mut sub, "s.x", "pre.s.x");
+}
+
+#[test]
+fn a_request_through_an_import_is_answered_at_another_server() {
+    let servers = importing_cluster();
+    let mut svc = login(&servers[1], "e", "SUB svc.> 1\r\n");
+    let mut e = login(&servers[0], "e", "");
+    // The service's interest reaches server 0.
+    until_got(&mut e, &mut svc, "svc.wait", "svc.wait");
+    let mut req = login(
+        &servers[0],
+        "i",
+        "SUB inbox 1\r\nPUB svc.q inbox 1\r\nq\r\n",
+    );
+    let mut head = line(&mut svc);
+    while head.starts_with("MSG svc.wait") {
+        line(&mut svc);
+        head = line(&mut svc);
+    }
+    let parts: Vec<&str> = head.split(' ').collect();
+    assert_eq!((parts[0], parts[1]), ("HMSG", "svc.q"), "{head}");
+    assert!(parts[3].starts_with("_R_."), "{head}");
+    send(&mut svc, &format!("PUB {} 2\r\nok\r\n", parts[3]));
+    assert_eq!(line(&mut req), "MSG inbox 1 2");
+    assert_eq!(line(&mut req), "ok");
+}

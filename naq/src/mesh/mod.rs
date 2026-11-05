@@ -144,6 +144,22 @@ impl Mesh {
         }
     }
 
+    /// Takes in the taps of imports `lane`, lane 0, holds from its start:
+    /// the routes, naq leafs and naq hubs hear of them as of clients.
+    fn tell_taps(&self, lane: &crate::lane::Lane) {
+        for account in 0..lane.shared.accounts.len() as u32 {
+            let mut tapped = Vec::new();
+            lane.index(account).borrow().each(|filter, i| {
+                if !i.taps.is_empty() {
+                    tapped.push(filter.to_vec());
+                }
+            });
+            for filter in tapped {
+                self.changed(lane, account, &filter, None);
+            }
+        }
+    }
+
     /// Tells the others what changed of the interest in `filter` of
     /// `account`, in `queue` if given, as `lane`, lane 0, has it now: the
     /// routes, the naq leafs and the naq hubs of that account.
@@ -325,6 +341,7 @@ pub(crate) async fn run(
     // goes untold.
     let mesh = Rc::new(Mesh::new(&shared, epoch));
     *lane.mesh.borrow_mut() = Some(mesh.clone());
+    mesh.tell_taps(&lane);
     let ctx = omq_tokio::Context::current();
     let mut bound = Bound::default();
     let cluster = match &shared.opts.cluster {

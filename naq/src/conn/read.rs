@@ -504,6 +504,7 @@ fn import(
         client: Some(client),
         skip,
         source: crate::lane::Source::Client,
+        skips: 0,
     };
     crate::imports::service::run(lane, out, p, client.account.get(), from)
 }

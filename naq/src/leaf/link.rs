@@ -644,10 +644,26 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         };
         let d = super::for_clients(&p);
         let d = d.as_ref().unwrap_or(&p);
-        let mut r = Routing::new(lane, &mut self.out, &p, buf, side.id).by_link(m.queues, d);
+        let mut r = Routing::new(lane, &mut self.out, &p, buf, side.id)
+            .by_link(m.queues, d)
+            .with_imports();
         r.route(&found);
-        if let Some(s) = r.stalled {
-            self.stalled = Some(s);
+        let (tapped, skips) = (r.tapped(), r.skips());
+        if let Some(stall) = r.stalled {
+            self.stalled = Some(stall);
+        }
+        if tapped {
+            let from = crate::imports::service::From {
+                client: None,
+                skip: side.id,
+                source: Source::Hub,
+                skips,
+            };
+            let (_, stall) =
+                crate::imports::service::run(lane, &mut self.out, &p, side.account, from);
+            if stall.is_some() {
+                self.stalled = stall;
+            }
         }
     }
 

@@ -315,6 +315,13 @@ Notable changes to naq. The format follows
   a request nobody gets is answered with no responders and the importer's
   subject. Messages that came through a service import skip stream
   imports of the account. At most 262144 requests wait per account.
+- `naq`: imports across the cluster and links, as `nats-server` carries
+  them. Routes hear of shadows and of the reply subjects of service
+  imports, not of import subscriptions; links hear of all three. Requests
+  from Go hubs and naq links go through service imports, responses from
+  routes too. The interest of a Go hub or a naq hub or leaf bound to an
+  importer gets shadows, so imported streams reach it with its subjects;
+  queue groups of naq links get none.
 - `naq`: clients may not publish to `_GR_.`, `$GR.` or `$NRG.` subjects,
   nor with `_R_.`, `$JS.ACK.`, `_GR_.` or `$GR.` replies, as in
   `nats-server`: the message is dropped with a permissions violation.

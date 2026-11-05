@@ -324,7 +324,7 @@ impl Lane {
     /// lane.
     fn to_link(&self, p: Peer, name: &[u8]) -> Queued {
         if p.lane == self.id {
-            self.hit_link(p.link, Some(name));
+            self.hit_link(p, Some(name));
             Queued::Here
         } else {
             Queued::Lane(p.lane)
@@ -354,7 +354,7 @@ impl Lane {
             .flat_map(|g| &g.peers)
             .find(|p| p.lane == self.id);
         if let Some(&p) = here.filter(|_| peers) {
-            self.hit_link(p.link, Some(q.name));
+            self.hit_link(p, Some(q.name));
         }
     }
 

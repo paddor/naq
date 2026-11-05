@@ -23,6 +23,9 @@ pub(crate) struct Hits {
 #[derive(Debug, Default)]
 struct Hit {
     link: u64,
+    /// For a shadow, the import of the link's account it stands for: see
+    /// [`Peer::shadow`].
+    shadow: u32,
     /// The link's queue groups picked, separated by blanks.
     queues: Vec<u8>,
 }
@@ -49,18 +52,25 @@ impl Lane {
         }
     }
 
-    /// Notes that link `link`, on this lane, gets the message being routed:
-    /// for its plain interest, or for a member of queue group `queue`.
-    pub(crate) fn hit_link(&self, link: u64, queue: Option<&[u8]>) {
+    /// Notes that the link of `p`, on this lane, gets the message being
+    /// routed: for its plain interest, or for a member of queue group
+    /// `queue`. A shadow gets nothing of a service import.
+    pub(crate) fn hit_link(&self, p: Peer, queue: Option<&[u8]>) {
+        if p.shadow != Peer::DIRECT && self.imported.get() {
+            return;
+        }
         let used = self.hits.used.get();
         let mut all = self.hits.all.borrow_mut();
-        let at = all[..used].iter().position(|h| h.link == link);
+        let at = all[..used]
+            .iter()
+            .position(|h| h.link == p.link && h.shadow == p.shadow);
         let at = at.unwrap_or_else(|| {
             if used == all.len() {
                 all.push(Hit::default());
             }
             let h = &mut all[used];
-            h.link = link;
+            h.link = p.link;
+            h.shadow = p.shadow;
             h.queues.clear();
             self.hits.used.set(used + 1);
             used
@@ -89,8 +99,26 @@ impl Lane {
         let links = self.links.borrow();
         for h in &all[..self.hits.used.replace(0)] {
             // A link that ended since gets nothing.
-            if let Some(l) = links.iter().find(|l| l.id == h.link) {
+            let Some(l) = links.iter().find(|l| l.id == h.link) else {
+                continue;
+            };
+            if h.shadow == Peer::DIRECT {
                 l.deliver(self, m, &h.queues, stalled);
+                continue;
+            }
+            let imports = &self.shared.imports[l.account as usize].streams;
+            if let Some(im) = imports.get(h.shadow as usize) {
+                let mut subject = Vec::new();
+                im.deliver_as(m.subject, &mut subject);
+                l.deliver(
+                    self,
+                    &Pub {
+                        subject: &subject,
+                        ..*m
+                    },
+                    &h.queues,
+                    stalled,
+                );
             }
         }
     }

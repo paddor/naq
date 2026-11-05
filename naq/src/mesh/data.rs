@@ -194,6 +194,7 @@ async fn take(lane: &Lane, out: &mut Outs, chunk: Bytes, from: From) {
         From::Hub(_) => Source::Hub,
         From::Leaf(_) => Source::Leaf,
     };
+    lane.ship_imported(out).await;
     lane.ship_servers(out).await;
     lane.ship_chunk(out, chunk, source).await;
     // A subscriber past the stall mark slows the sender to its pace: its
@@ -237,13 +238,17 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
         let Some(found) = index.matches(p.subject) else {
             continue;
         };
-        let routing = Routing::new(lane, out, &p, chunk, 0);
+        let routing = Routing::new(lane, out, &p, chunk, 0).with_imports();
         let mut routing = match from {
             From::Route => routing.by_server(r.queue, skips),
             From::Hub(_) | From::Leaf(_) => routing.by_linked(r.queue, skips),
         };
         routing.route(&found);
+        let (tapped, skips) = (routing.tapped(), routing.skips());
         if let Some(s) = routing.stalled {
+            stalled = Some(s);
+        }
+        if tapped && let Some(s) = import(lane, out, &p, from, skips) {
             stalled = Some(s);
         }
     }
@@ -251,6 +256,27 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
         slots.tally(s).took_many(msgs, bytes);
     }
     stalled
+}
+
+/// Sends `p`, from `from`, through the imports it met. Returns a
+/// subscriber past the stall mark, if one. From a route, only responses
+/// go through: requests went through where they were published.
+#[cold]
+#[inline(never)]
+fn import(lane: &Lane, out: &mut Outs, p: &Pub<'_>, from: From, skips: u64) -> Option<Rc<Client>> {
+    let source = match from {
+        From::Route => Source::Server,
+        From::Hub(_) => Source::Hub,
+        From::Leaf(_) => Source::Leaf,
+    };
+    let from = crate::imports::service::From {
+        client: None,
+        skip: 0,
+        source,
+        skips,
+    };
+    let account = out.account;
+    crate::imports::service::run(lane, out, p, account, from).1
 }
 
 /// Readies `out` for batch `b` from `from`: its account and origin.

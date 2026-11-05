@@ -350,6 +350,10 @@ impl Lane {
                     .server(&subject, queue.as_deref(), server, weight);
                 // Links and servers hear of the interest of leafs.
                 self.changed(account, &subject, queue.as_deref());
+                if queue.is_none() {
+                    let add = weight.all > 0;
+                    crate::imports::shadow::server(self, account, &subject, server, add);
+                }
             }
             Control::Push { server, endpoint } => crate::mesh::push(self, server, &endpoint),
             Control::Gone { server } => crate::mesh::gone(self, server),

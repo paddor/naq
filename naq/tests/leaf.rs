@@ -1803,3 +1803,131 @@ fn a_client_of_the_leaf_that_reads_nothing_does_not_hold_up_the_link() {
     assert_eq!(lines(&mut quick, 2), ["MSG ok 1 2", "hi"]);
     assert_eq!(get(http, "/leafz")["leafnodes"], 1, "the link held");
 }
+
+/// A naq leaf whose account I imports from E, linked as `account` to
+/// `hub`: I takes E's streams under `pre` and its service `svc.>`.
+fn importing_leaf(hub: &Hub, account: &str) -> Server {
+    let opts: Options = "accounts {\n\
+        E { users: [{user: e, password: p}], exports: [{stream: \"s.>\"}, {service: \"svc.>\"}] }\n\
+        I { users: [{user: i, password: p}], imports: [\n\
+            {stream: {account: E, subject: \"s.>\"}, prefix: pre},\n\
+            {service: {account: E, subject: \"svc.>\"}}] }\n}\n"
+        .parse()
+        .unwrap();
+    Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        leaf_reconnect: Duration::from_millis(50),
+        remotes: vec![Remote {
+            urls: vec![format!("127.0.0.1:{}", hub.port())],
+            account: Some(account.into()),
+            ..Remote::default()
+        }],
+        ..opts
+    })
+    .unwrap()
+}
+
+/// A client of `server` that logs in as `user`.
+fn login(server: &Server, user: &str) -> Peer {
+    let s = TcpStream::connect(server.addr()).unwrap();
+    s.set_read_timeout(Some(WAIT)).unwrap();
+    let mut c = Peer {
+        r: BufReader::new(s.try_clone().unwrap()),
+        w: s,
+    };
+    c.line();
+    c.send(&format!(
+        "CONNECT {{\"verbose\":false,\"headers\":true,\"user\":\"{user}\",\"pass\":\"p\"}}\r\nPING\r\n"
+    ));
+    assert_eq!(c.line(), "PONG");
+    c
+}
+
+#[test]
+fn a_hub_linked_to_an_importer_hears_of_its_service_and_gets_its_streams() {
+    let hub = Hub::new();
+    let leaf = importing_leaf(&hub, "I");
+    let (mut p, first) = linked_with(&hub);
+    assert!(first.iter().any(|l| l == "LS+ svc.>"), "{first:?}");
+    // The hub's interest in an imported subject reaches the exporter.
+    p.send("LS+ pre.s.x\r\nPING\r\n");
+    assert_eq!(p.line(), "PONG");
+    let mut e = login(&leaf, "e");
+    let deadline = Instant::now() + WAIT;
+    p.w.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        e.send("PUB s.x 2\r\nhi\r\n");
+        let mut l = String::new();
+        if p.r.read_line(&mut l).is_ok() {
+            assert_eq!(l, "LMSG pre.s.x 2\r\n");
+            break;
+        }
+        assert!(Instant::now() < deadline, "nothing came");
+    }
+    p.w.set_read_timeout(Some(WAIT)).unwrap();
+    assert_eq!(p.line(), "hi");
+    // Gone with the hub's interest: once `pre.s.y`, which the hub took up
+    // after, comes through, `pre.s.x` no longer does.
+    p.send("LS- pre.s.x\r\nLS+ pre.s.y\r\n");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        e.send("PUB s.x 1\r\nx\r\nPUB s.y 1\r\ny\r\n");
+        let l = p.line();
+        p.line();
+        if l == "LMSG pre.s.y 1" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no pre.s.y");
+    }
+    e.send("PUB s.x 1\r\nx\r\nPUB s.y 1\r\ny\r\nPING\r\n");
+    assert_eq!(e.line(), "PONG");
+    let mut rest = Vec::new();
+    p.w.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut l = String::new();
+    while p.r.read_line(&mut l).is_ok_and(|n| n > 0) {
+        rest.push(l.trim_end().to_owned());
+        l.clear();
+    }
+    assert!(!rest.iter().any(|l| l == "LMSG pre.s.x 1"), "{rest:?}");
+    assert!(rest.iter().any(|l| l == "LMSG pre.s.y 1"), "{rest:?}");
+}
+
+#[test]
+fn a_request_from_the_hub_goes_through_the_import_and_back() {
+    let hub = Hub::new();
+    let leaf = importing_leaf(&hub, "I");
+    let mut p = linked(&hub);
+    let mut svc = login(&leaf, "e");
+    svc.send("SUB svc.> 1\r\nPING\r\n");
+    assert_eq!(svc.line(), "PONG");
+    p.send("LS+ inbox\r\nLMSG svc.q inbox 1\r\nq\r\n");
+    let head = svc.line();
+    let parts: Vec<&str> = head.split(' ').collect();
+    assert_eq!(
+        (parts[0], parts[1], parts[2]),
+        ("HMSG", "svc.q", "1"),
+        "{head}"
+    );
+    assert!(parts[3].starts_with("_R_."), "{head}");
+    assert_eq!(svc.line(), "NATS/1.0");
+    assert_eq!(svc.line(), r#"Nats-Request-Info: {"acc":"I"}"#);
+    assert_eq!(svc.line(), "");
+    assert_eq!(svc.line(), "q");
+    svc.send(&format!("PUB {} 2\r\nok\r\n", parts[3]));
+    assert_eq!(p.line(), "LMSG inbox 2");
+    assert_eq!(p.line(), "ok");
+}
+
+#[test]
+fn a_hub_linked_to_an_exporter_hears_of_the_replies_of_its_requests() {
+    let hub = Hub::new();
+    let _leaf = importing_leaf(&hub, "E");
+    let (_p, first) = linked_with(&hub);
+    let replies: Vec<&String> = first.iter().filter(|l| l.starts_with("LS+ _R_.")).collect();
+    assert_eq!(replies.len(), 1, "{first:?}");
+    assert!(replies[0].ends_with(".>") && replies[0].len() == "LS+ _R_.abcdef.>".len());
+}

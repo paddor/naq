@@ -24,6 +24,15 @@ pub(crate) enum Tap {
     /// The responses to requests this server sent into the account, on
     /// `_R_.<prefix>.>`.
     Responses(Arc<Responses>),
+    /// A shadow of the plain interest of a naq hub or leaf in `slot`, bound
+    /// to account `importer`, for its stream import `import`.
+    Shadow {
+        slot: u16,
+        importer: u32,
+        import: u32,
+        /// The routes hear of it: the interest is a naq leaf's.
+        to_routes: bool,
+    },
 }
 
 /// Most requests waiting for responses in one account.
@@ -200,6 +209,8 @@ pub(crate) struct From<'a> {
     pub(crate) skip: u64,
     /// Who sent it to this server.
     pub(crate) source: Source,
+    /// The slots of servers it does not go to, as bits.
+    pub(crate) skips: u64,
 }
 
 /// Offsets of a message's parts in an arena.
@@ -311,9 +322,15 @@ impl Run<'_, '_> {
                 msg,
                 chain,
             };
-            delivered |= match tap {
-                Tap::Service(si) => self.request(w, si),
-                Tap::Responses(r) => self.response(w, r),
+            delivered |= match *tap {
+                Tap::Service(ref si) => self.request(w, si),
+                Tap::Responses(ref r) => self.response(w, r),
+                Tap::Shadow {
+                    slot,
+                    importer,
+                    import,
+                    ..
+                } => self.shadow(w, slot, importer, import),
             };
         }
         delivered
@@ -328,6 +345,32 @@ impl Run<'_, '_> {
             delivered |= self.taps(&met, account, Some(parts), chain);
         }
         delivered
+    }
+
+    /// Sends the message `w` holds to the naq hub or leaf in `slot`, as
+    /// a message of `owner`, its account, with the subject its stream
+    /// import `import` gives it. Not one that came through a service
+    /// import, nor one the slot does not get.
+    fn shadow(&mut self, w: Work, slot: u16, owner: u32, import: u32) -> bool {
+        let lane = self.lane;
+        if w.msg.is_some() || self.from.skips & crate::lane::bit(slot) != 0 {
+            return false;
+        }
+        let streams = &lane.shared.imports[owner as usize].streams;
+        let Some(im) = streams.get(import as usize) else {
+            return false;
+        };
+        let imported = self.out.imported(lane);
+        let mut subject = std::mem::take(&mut imported.subject);
+        subject.clear();
+        im.deliver_as(self.m.subject, &mut subject);
+        let p = Pub {
+            subject: &subject,
+            ..*self.m
+        };
+        Imported::outs_of(&mut imported.outs, lane, owner).server(lane, slot, &p, None);
+        imported.subject = subject;
+        true
     }
 
     /// Sends the request `w` holds on into the exporter of `si`, with a

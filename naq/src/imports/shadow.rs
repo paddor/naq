@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use crate::conn::Client;
+use crate::imports::service::Tap;
 use crate::index::Entry;
 use crate::lane::Lane;
 
@@ -55,5 +56,49 @@ pub(crate) fn remove(
             .remove_shadow(subject, queue, client.id, sid);
         lane.announce(*account, subject, queue, false);
         lane.changed(*account, subject, queue);
+    }
+}
+
+/// Sets the shadows of the plain interest in `filter` of `account` of the
+/// naq hub or leaf in `slot`, on `lane`: there with `add`, else gone.
+/// Queue groups of naq links get no shadows: their messages go to the
+/// link's account only.
+pub(crate) fn server(lane: &Lane, account: u32, filter: &[u8], slot: u16, add: bool) {
+    let Some(imports) = lane.shared.imports.get(account as usize) else {
+        return;
+    };
+    if lane.slots.is_route(slot) {
+        return;
+    }
+    for (k, im) in imports.streams.iter().enumerate() {
+        let Some(subject) = im.shadow(filter) else {
+            continue;
+        };
+        // Imports are few: their count fits.
+        let import = k as u32;
+        let this = |t: &Tap| {
+            matches!(*t, Tap::Shadow { slot: s, importer: a, import: i, .. }
+                if s == slot && a == account && i == import)
+        };
+        let mut index = lane.index(im.from).borrow_mut();
+        let has = index.has_tap(&subject, this);
+        if add && !has {
+            let to_routes = !lane.slots.is_hub(slot);
+            index.tap(
+                &subject,
+                Tap::Shadow {
+                    slot,
+                    importer: account,
+                    import,
+                    to_routes,
+                },
+            );
+        } else if !add && has {
+            index.untap(&subject, this);
+        } else {
+            continue;
+        }
+        drop(index);
+        lane.changed(im.from, &subject, None);
     }
 }

@@ -89,6 +89,11 @@ impl<'a, 'p> Routing<'a, 'p> {
         self
     }
 
+    /// The slots of servers it does not go to, as bits.
+    pub(crate) const fn skips(&self) -> u64 {
+        self.skips
+    }
+
     /// Whether it met taps of imports, noted on the lane.
     pub(crate) fn tapped(&self) -> bool {
         self.taps == Taps::Met
@@ -235,7 +240,7 @@ impl<'a, 'p> Routing<'a, 'p> {
             if p.lane != self.lane.id {
                 self.out.lanes[p.lane].plain(self.buf, self.p, true);
             } else if p.link != self.skip {
-                self.lane.hit_link(p.link, None);
+                self.lane.hit_link(*p, None);
             } else {
                 continue;
             }

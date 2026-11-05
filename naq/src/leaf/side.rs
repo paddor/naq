@@ -121,19 +121,27 @@ impl LinkSide {
     }
 
     /// Sets the link's weight in `subject`, in `queue` if given, on every
-    /// lane; 0 removes it.
+    /// lane, and that of its shadows in the accounts its own imports
+    /// streams from; 0 removes them.
     fn set_peer(&self, lane: &Lane, subject: &[u8], queue: Option<&[u8]>, weight: u32) {
         let peer = Peer {
             lane: lane.id,
             link: self.id,
             weight,
+            shadow: Peer::DIRECT,
         };
-        lane.index(self.account)
-            .borrow_mut()
-            .peer(subject, queue, peer);
-        lane.announce_peer(self.account, subject, queue, peer);
-        // Other links tell their hubs.
-        lane.changed(self.account, subject, queue);
+        put_peer(lane, self.account, subject, queue, peer);
+        let streams = &lane.shared.imports[self.account as usize].streams;
+        for (k, im) in streams.iter().enumerate() {
+            if let Some(shadow) = im.shadow(subject) {
+                // Imports are few: their count fits.
+                let peer = Peer {
+                    shadow: k as u32,
+                    ..peer
+                };
+                put_peer(lane, im.from, &shadow, queue, peer);
+            }
+        }
     }
 
     /// Encodes `m` for the hub: for its plain interest, and for one member
@@ -186,7 +194,7 @@ impl LinkSide {
             if denied(filter) || !self.tells(filter) {
                 return;
             }
-            if i.plain.told(filter, self.id, leafs) > 0 {
+            if i.plain.told(filter, self.id, leafs) + i.taps_told(false) > 0 {
                 leaf::sub(&mut *out, filter, None);
                 told.insert((filter.into(), None), 1);
             }
@@ -231,6 +239,14 @@ impl LinkSide {
             leaf::sub(&mut *out, filter, queue.map(|q| (q, n)));
         }
     }
+}
+
+/// Sets `peer` in `subject` of `account`, in `queue` if given, on every
+/// lane, and tells the other links.
+fn put_peer(lane: &Lane, account: u32, subject: &[u8], queue: Option<&[u8]>, peer: Peer) {
+    lane.index(account).borrow_mut().peer(subject, queue, peer);
+    lane.announce_peer(account, subject, queue, peer);
+    lane.changed(account, subject, queue);
 }
 
 impl LinkSide {
