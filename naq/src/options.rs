@@ -33,9 +33,9 @@ pub struct Options {
     /// Longest a write to a client may take; past it, the client is closed
     /// as a slow consumer (`write_deadline`).
     pub write_deadline: Duration,
-    /// Accounts besides the global one, `$G`, by name (`accounts`). Each has
-    /// subjects of its own.
-    pub accounts: Vec<String>,
+    /// Accounts besides the global one, `$G` (`accounts`). Each has
+    /// subjects of its own, and those it imports from others.
+    pub accounts: Vec<Account>,
     /// Who may connect (`authorization { users }`, the `users` of
     /// `accounts`). With no users, no [`Options::user`] and no token, anyone
     /// may, into `$G`.
@@ -138,6 +138,131 @@ impl Default for Cluster {
             routes: Vec::new(),
         }
     }
+}
+
+/// An account besides `$G` (`accounts`): subjects of its own, those it
+/// lets others import, and those it imports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Account {
+    /// Its name.
+    pub name: String,
+    /// What other accounts may import from it (`exports`).
+    pub exports: Vec<Export>,
+    /// What it takes from other accounts (`imports`).
+    pub imports: Vec<Import>,
+}
+
+impl From<&str> for Account {
+    /// An account named `name`, without exports and imports.
+    fn from(name: &str) -> Account {
+        Account {
+            name: name.into(),
+            ..Account::default()
+        }
+    }
+}
+
+/// Subjects an account lets others import (`exports`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    /// The subjects, a filter, as the account has them (`stream` or
+    /// `service`).
+    pub subject: String,
+    /// What is exported: messages, or requests to a service.
+    pub kind: ExportKind,
+    /// The accounts that may import it (`accounts`); `None` for all.
+    pub accounts: Option<Vec<String>>,
+    /// The token of `subject`, counted from 1, that an importer must fill
+    /// with its own name (`account_token_position`). It is a `*`.
+    pub token_position: Option<usize>,
+}
+
+/// What an account exports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportKind {
+    /// The messages published to the subjects (`stream`).
+    Stream,
+    /// Requests to a service on the subjects (`service`).
+    Service(ServiceExport),
+}
+
+/// How an exported service answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceExport {
+    /// How many responses a request gets (`response_type`).
+    pub response: ResponseType,
+    /// How long a request may wait for its responses
+    /// (`response_threshold`).
+    pub threshold: Duration,
+    /// Latency samples of its requests, if any (`latency`).
+    pub latency: Option<Latency>,
+}
+
+impl Default for ServiceExport {
+    /// One response, within two minutes, as `nats-server` defaults.
+    fn default() -> ServiceExport {
+        ServiceExport {
+            response: ResponseType::Singleton,
+            threshold: Duration::from_secs(120),
+            latency: None,
+        }
+    }
+}
+
+/// How many responses a service request gets (`response_type`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResponseType {
+    /// One (`singleton`).
+    #[default]
+    Singleton,
+    /// Any number, until the threshold (`stream`).
+    Stream,
+    /// Any number, until the threshold or an empty one (`chunked`).
+    Chunked,
+}
+
+/// Latency samples of the requests to a service (`latency`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Latency {
+    /// Which requests are sampled (`sampling`).
+    pub sampling: Sampling,
+    /// Where the samples go, in the exporting account (`subject`).
+    pub subject: String,
+}
+
+/// Which requests to a service get a latency sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sampling {
+    /// This percent of them, 1 to 100.
+    Percent(u8),
+    /// Those whose headers ask for a trace (`headers`).
+    Headers,
+}
+
+/// Subjects an account takes from another (`imports`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    /// The account it imports from (`account`).
+    pub account: String,
+    /// The subjects, as that account has them (`subject`).
+    pub subject: String,
+    /// The subjects as the importer has them (`to`, or `prefix` before
+    /// `subject`); `None` for `subject`.
+    pub to: Option<String>,
+    /// What is imported: messages, or a service.
+    pub kind: ImportKind,
+}
+
+/// What an account imports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// Messages (`stream`).
+    Stream,
+    /// A service (`service`).
+    Service {
+        /// Its requests carry the details of the requester (`share`).
+        share: bool,
+    },
 }
 
 /// A user that may connect.

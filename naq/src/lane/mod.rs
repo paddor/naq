@@ -181,6 +181,8 @@ pub(crate) struct Lane {
     pub(crate) slots: Slots,
     /// This lane's ROUTER for the data of naq leafs, on a hub.
     pub(crate) leaf_router: RefCell<Option<omq_tokio::IdentitySocket>>,
+    /// Room for the subject a shadow delivers with.
+    shadow_subject: RefCell<Vec<u8>>,
 }
 
 impl Lane {
@@ -399,6 +401,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         sends: RefCell::new(vec![None; servers]),
         slots: Slots::new(servers, hubs),
         leaf_router: RefCell::default(),
+        shadow_subject: RefCell::default(),
     });
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;

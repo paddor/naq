@@ -93,6 +93,51 @@ impl Lane {
         skip: u64,
         stalled: &mut Option<Rc<Client>>,
     ) -> bool {
+        if e.shadow.is_some() {
+            return self.deliver_shadow(e, m, skip, stalled);
+        }
+        self.deliver_entry(e, m, skip, stalled)
+    }
+
+    /// [`Lane::deliver_to`] for a shadow: with the subject its importer
+    /// has. Out of line: few subscriptions are shadows.
+    #[cold]
+    #[inline(never)]
+    fn deliver_shadow(
+        &self,
+        e: &Entry,
+        m: &Pub<'_>,
+        skip: u64,
+        stalled: &mut Option<Rc<Client>>,
+    ) -> bool {
+        let Some(im) = &e.shadow else {
+            return false;
+        };
+        let mut subject = self.shadow_subject.take();
+        subject.clear();
+        im.deliver_as(m.subject, &mut subject);
+        let got = self.deliver_entry(
+            e,
+            &Pub {
+                subject: &subject,
+                ..*m
+            },
+            skip,
+            stalled,
+        );
+        self.shadow_subject.replace(subject);
+        got
+    }
+
+    /// [`Lane::deliver_to`] with `m` as it is.
+    #[inline]
+    fn deliver_entry(
+        &self,
+        e: &Entry,
+        m: &Pub<'_>,
+        skip: u64,
+        stalled: &mut Option<Rc<Client>>,
+    ) -> bool {
         let c = &e.client;
         if c.is_closed() || c.id == skip || e.is_spent() || (c.guarded.get() && !c.accepts(m)) {
             return false;

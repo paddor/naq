@@ -403,11 +403,6 @@ impl Conn {
         if !subject::is_valid_filter(s.subject) {
             return self.error("Invalid Subject");
         }
-        let sub = super::Sub {
-            subject: s.subject.into(),
-            queue: s.queue.map(Into::into),
-        };
-        self.client.subs.borrow_mut().insert(s.sid.into(), sub);
         let entry = Entry::new(self.client.clone(), s.sid);
         let account = self.client.account.get();
         self.lane
@@ -416,6 +411,14 @@ impl Conn {
             .insert(s.subject, s.queue, entry);
         self.lane.announce(account, s.subject, s.queue, true);
         self.lane.changed(account, s.subject, s.queue);
+        let shadows =
+            crate::imports::shadow::add(&self.lane, &self.client, s.sid, s.subject, s.queue);
+        let sub = super::Sub {
+            subject: s.subject.into(),
+            queue: s.queue.map(Into::into),
+            shadows,
+        };
+        self.client.subs.borrow_mut().insert(s.sid.into(), sub);
         self.unfenced = self.lane.lanes() > 1;
         self.ok();
     }

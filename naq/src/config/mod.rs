@@ -2,6 +2,7 @@
 
 mod auth;
 mod cluster;
+mod imports;
 mod leaf;
 mod parse;
 mod ws;
@@ -84,6 +85,10 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
             reason,
         })?;
     }
+    crate::imports::link(&opts).map_err(|reason| Error::Config {
+        at: whole(),
+        reason,
+    })?;
     crate::leaf::validate(&opts).map_err(|reason| Error::Config {
         at: whole(),
         reason,

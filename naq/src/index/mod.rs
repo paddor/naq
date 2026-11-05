@@ -10,10 +10,12 @@ mod trie;
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use naq_proto::subject;
 
 use crate::conn::Client;
+use crate::imports::StreamImport;
 
 /// One subscription on this lane.
 #[derive(Debug)]
@@ -25,6 +27,10 @@ pub(crate) struct Entry {
     pub(crate) delivered: Cell<u64>,
     /// Messages it may get in total; 0 for no limit.
     pub(crate) max: Cell<u64>,
+    /// For a shadow, the stream import of the client's subscription it
+    /// stands for in the exporting account: its messages are delivered
+    /// with the subject the importer has.
+    pub(crate) shadow: Option<Arc<StreamImport>>,
 }
 
 impl Entry {
@@ -34,6 +40,16 @@ impl Entry {
             sid: sid.into(),
             delivered: Cell::new(0),
             max: Cell::new(0),
+            shadow: None,
+        }
+    }
+
+    /// The shadow of subscription `sid` of `client`, for import `im`. It
+    /// has no maximum of its own.
+    pub(crate) fn shadow(client: Rc<Client>, sid: &[u8], im: Arc<StreamImport>) -> Entry {
+        Entry {
+            shadow: Some(im),
+            ..Entry::new(client, sid)
         }
     }
 
@@ -299,7 +315,22 @@ impl Index {
     /// Removes subscription `sid` of client `id`.
     pub(crate) fn remove(&mut self, filter: &[u8], queue: Option<&[u8]>, id: u64, sid: &[u8]) {
         self.change(filter, queue, |g| {
-            g.local.retain(|e| e.client.id != id || *e.sid != *sid);
+            g.local
+                .retain(|e| e.client.id != id || *e.sid != *sid || e.shadow.is_some());
+        });
+    }
+
+    /// Removes the shadows of subscription `sid` of client `id`.
+    pub(crate) fn remove_shadow(
+        &mut self,
+        filter: &[u8],
+        queue: Option<&[u8]>,
+        id: u64,
+        sid: &[u8],
+    ) {
+        self.change(filter, queue, |g| {
+            g.local
+                .retain(|e| e.client.id != id || *e.sid != *sid || e.shadow.is_none());
         });
     }
 
@@ -376,7 +407,7 @@ impl Index {
         self.group(filter, queue)?
             .local
             .iter()
-            .find(|e| e.client.id == id && *e.sid == *sid)
+            .find(|e| e.client.id == id && *e.sid == *sid && e.shadow.is_none())
     }
 
     /// Members of the plain subscriptions of `filter`, or of its queue

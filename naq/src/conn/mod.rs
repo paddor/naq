@@ -117,6 +117,7 @@ impl Client {
             .remove(&sub.subject, queue, self.id, sid);
         lane.announce(account, &sub.subject, queue, false);
         lane.changed(account, &sub.subject, queue);
+        crate::imports::shadow::remove(lane, self, sid, queue, &sub.shadows);
     }
 
     /// Whether its permissions let it get `m`. Notes requests it may reply
@@ -168,6 +169,8 @@ pub(crate) struct Meta {
 pub(crate) struct Sub {
     pub(crate) subject: Box<[u8]>,
     pub(crate) queue: Option<Box<[u8]>>,
+    /// Its shadows in the accounts its account imports streams from.
+    pub(crate) shadows: Vec<crate::imports::shadow::Shadowed>,
 }
 
 /// How far a client's handshake got.

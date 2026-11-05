@@ -21,6 +21,7 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
             "a = [1, 2k, 3MB, -4, 1.5, yes, 'q', \"e\\t\"]\nb { c: $a }\n",
             "leafnodes { reconnect: 2s, remotes: [{url: \"nats-leaf://h:7422\", creds: u.creds}, {urls: [a], seed: SUA, account: A, tls { ca_file: c.pem, timeout: 1.5, handshake_first: true }}] }\n",
             "cluster { name: c, listen: \"127.0.0.1:6222\", routes: [\"nats-route://a:6222\", b] }\n",
+            "accounts { E { exports: [{stream: \"s.>\"}, {service: \"q.*.*\", accounts: [I], response_type: stream, threshold: 1s, account_token_position: 2}] }\n  I { imports: [{stream: {account: E, subject: \"s.>\"}, prefix: p}, {service: {account: E, subject: \"q.I.*\"}, to: \"r.$1\", share: true}] } }\n",
         ],
         "leaf_wire" => &[
             "INFO {\"server_id\":\"h\",\"nonce\":\"abc\",\"info_on_connect\":true} \r\nPING\r\n",

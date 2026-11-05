@@ -33,6 +33,8 @@ pub(crate) struct Shared {
     pub(crate) lanes: Box<[lane::LaneTx]>,
     /// Account names by id, `$G` first.
     pub(crate) accounts: Box<[String]>,
+    /// The imports of each account, by id.
+    pub(crate) imports: Box<[crate::imports::Imports]>,
     /// What clients must authenticate with, if anything.
     pub(crate) auth: Option<Auth>,
     /// What WebSocket clients authenticate with, where it is not `auth`.
@@ -147,6 +149,7 @@ impl Server {
             tls: setup.tls,
             ws: door(opts, ws_addr, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
+            imports: setup.imports,
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });
@@ -214,12 +217,15 @@ struct Setup {
     ws_tls: Option<Acceptor>,
     /// For each leaf node remote.
     leaf_tls: Box<[crate::leaf::Connector]>,
+    /// The imports of each account, by id.
+    imports: Box<[crate::imports::Imports]>,
 }
 
 /// Checks `opts` and reads the TLS files they name: for the client port,
 /// the WebSocket port and the leaf node remotes.
 fn check(opts: &Options) -> Result<Setup, Error> {
     auth::validate(opts).map_err(Error::Options)?;
+    let imports = crate::imports::link(opts).map_err(Error::Options)?;
     crate::leaf::validate(opts).map_err(Error::Options)?;
     crate::mesh::validate(opts).map_err(Error::Options)?;
     if let Some(w) = &opts.websocket {
@@ -241,6 +247,7 @@ fn check(opts: &Options) -> Result<Setup, Error> {
         tls,
         ws_tls,
         leaf_tls,
+        imports,
     })
 }
 

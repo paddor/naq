@@ -290,6 +290,21 @@ Notable changes to naq. The format follows
   only the interest a link takes.
 - `naq`: `/leafz` counts the messages and bytes each naq link took and
   sent since it linked, summed over the lanes.
+- `naq`: `exports` and `imports` of `accounts` (`Account`, `Export`,
+  `Import`): streams and services, `accounts`, `account_token_position`,
+  `response_type`, `response_threshold`, `prefix`, `to` with `$N` and
+  `{{wildcard(N)}}`, `share`. They are checked at start as `nats-server`
+  checks them: an import its export does not allow, one that closes a
+  cycle, one twice, and a `to` that cannot map are an error. `latency`
+  and `allow_trace: true` are refused. `Options::accounts` holds
+  `Account`s.
+- `naq`: stream imports. A subscription in the importer gets a shadow in
+  the exporter, on the exporter's subject, as in `nats-server`: the
+  exporter's messages reach it with their subject rewritten, its queue
+  group is one with the exporter's of the same name, and `UNSUB` maximums
+  count direct deliveries only.
+- `naq-proto`: `subject::is_subset` and `subject::collide`, for filters
+  that hold or meet others.
 - `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
   `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
   per run, from the same configuration file for `nats-server` and naq

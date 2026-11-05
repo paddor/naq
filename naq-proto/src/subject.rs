@@ -84,6 +84,70 @@ pub fn matches(filter: &[u8], subject: &[u8]) -> bool {
     }
 }
 
+/// Whether every subject filter `narrow` matches, filter `wide` matches
+/// too.
+///
+/// # Examples
+///
+/// ```
+/// use naq_proto::subject::is_subset;
+///
+/// assert!(is_subset(b"orders.*.created", b"orders.>"));
+/// assert!(is_subset(b"orders.1", b"orders.*"));
+/// assert!(!is_subset(b"orders.>", b"orders.*"));
+/// ```
+pub fn is_subset(narrow: &[u8], wide: &[u8]) -> bool {
+    let mut have = tokens(narrow);
+    for w in tokens(wide) {
+        let Some(n) = have.next() else {
+            return false;
+        };
+        if w.is_empty() || n.is_empty() || n == b">" && w != b">" {
+            return false;
+        }
+        match w {
+            b">" => return true,
+            b"*" => {}
+            _ if n == b"*" || n != w => return false,
+            _ => {}
+        }
+    }
+    have.next().is_none()
+}
+
+/// Whether some subject matches both filter `a` and filter `b`.
+///
+/// # Examples
+///
+/// ```
+/// use naq_proto::subject::collide;
+///
+/// assert!(collide(b"orders.*.created", b"orders.1.>"));
+/// assert!(collide(b"orders.1", b"orders.*"));
+/// assert!(!collide(b"orders.*", b"orders.1.created"));
+/// ```
+pub fn collide(a: &[u8], b: &[u8]) -> bool {
+    if a == b {
+        return true;
+    }
+    match (is_literal(a), is_literal(b)) {
+        (true, true) => false,
+        (true, false) => is_subset(a, b),
+        (false, true) => is_subset(b, a),
+        (false, false) => {
+            let mut ta = tokens(a);
+            let mut tb = tokens(b);
+            loop {
+                match (ta.next(), tb.next()) {
+                    (None, None) | (Some(b">"), Some(_)) | (Some(_), Some(b">")) => return true,
+                    (Some(x), Some(y)) if x == b"*" || y == b"*" || x == y => {}
+                    _ => return false,
+                }
+            }
+        }
+    }
+}
+
 fn is_wildcard(t: &[u8]) -> bool {
     t == b"*" || t == b">"
 }

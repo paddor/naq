@@ -108,7 +108,7 @@ impl Pending {
 /// Account names by id: `$G` first, then those of `opts`.
 pub(crate) fn accounts(opts: &Options) -> Box<[String]> {
     std::iter::once("$G".to_owned())
-        .chain(opts.accounts.iter().cloned())
+        .chain(opts.accounts.iter().map(|a| a.name.clone()))
         .collect()
 }
 
@@ -131,7 +131,7 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
         }
         seen.push(user);
         if let Some(a) = &u.account
-            && !opts.accounts.contains(a)
+            && !opts.accounts.iter().any(|x| x.name == *a)
         {
             return Err(format!("user {user:?}: no account {a:?}"));
         }

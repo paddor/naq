@@ -38,6 +38,7 @@ mod error;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
+mod imports;
 mod index;
 mod lane;
 mod leaf;
@@ -53,7 +54,8 @@ mod ws;
 
 pub use error::Error;
 pub use options::{
-    Cluster, Cookies, Leafnodes, Login, Options, Permissions, Remote, RemoteTls, Responses, Rules,
-    Tls, User, Websocket, WebsocketAuth,
+    Account, Cluster, Cookies, Export, ExportKind, Import, ImportKind, Latency, Leafnodes, Login,
+    Options, Permissions, Remote, RemoteTls, ResponseType, Responses, Rules, Sampling,
+    ServiceExport, Tls, User, Websocket, WebsocketAuth,
 };
 pub use server::Server;

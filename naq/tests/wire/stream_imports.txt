@@ -1,0 +1,162 @@
+# A stream import delivers the exporter's messages in the importer, with
+# the subjects rewritten.
+#! accounts {
+#!   E {
+#!     users: [{user: e, password: p}]
+#!     exports: [{stream: "s.>"}, {stream: lit}, {stream: "w.*"}, {stream: "self.>"}]
+#!     imports: [{stream: {account: E, subject: "self.>"}, prefix: me}]
+#!   }
+#!   I {
+#!     users: [{user: i, password: p}]
+#!     imports: [
+#!       {stream: {account: E, subject: "s.>"}, prefix: pre}
+#!       {stream: {account: E, subject: lit}, to: "x.*"}
+#!       {stream: {account: E, subject: "w.*"}, to: "ww.$1.end"}
+#!       {stream: {account: E, subject: "s.d"}, to: "pre.s.d"}
+#!     ]
+#!   }
+#! }
+
+e> CONNECT {"verbose":false,"user":"e","pass":"p"}
+e> PING
+e< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+e< PONG
+i> CONNECT {"verbose":false,"user":"i","pass":"p"}
+i> SUB pre.s.> 1
+i> SUB pre.*.x 3
+i> SUB x.y 4
+i> SUB ww.*.end 5
+i> PING
+i< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+i< PONG
+e> PUB s.a 1
+e> a
+e> PUB s.x 1
+e> x
+e> PUB s.q.x 1
+e> q
+e> PUB lit 1
+e> l
+e> PUB w.k 1
+e> k
+e> PUB other 1
+e> o
+e> PING
+e< PONG
+i< MSG pre.s.a 1 1
+i< a
+i< MSG pre.s.x 1 1
+i< x
+i< MSG pre.s.q.x 1 1
+i< q
+i< MSG pre.s.x 3 1
+i< x
+i< MSG x.* 4 1
+i< l
+i< MSG ww.k.end 5 1
+i< k
+i> PING
+i< PONG
+
+# The reply stays as the publisher gave it.
+e> PUB s.r rep 1
+e> r
+e> PING
+e< PONG
+i< MSG pre.s.r 1 rep 1
+i< r
+i> PING
+
+# UNSUB with a maximum counts direct deliveries only.
+i> SUB pre.s.m 7
+i> UNSUB 7 1
+i> PING
+i< PONG
+i< PONG
+e> PUB s.m 1
+e> 1
+e> PUB s.m 1
+e> 2
+e> PING
+e< PONG
+i< MSG pre.s.m 1 1
+i< 1
+i< MSG pre.s.m 1 1
+i< 2
+i< MSG pre.s.m 7 1
+i< 1
+i< MSG pre.s.m 7 1
+i< 2
+i> PING
+i> PUB pre.s.m 1
+i> 3
+i> PING
+i< PONG
+i< MSG pre.s.m 1 1
+i< 3
+i< MSG pre.s.m 7 1
+i< 3
+i< PONG
+e> PUB s.m 1
+e> 4
+e> PING
+e< PONG
+i< MSG pre.s.m 1 1
+i< 4
+i> PING
+
+# Two imports that both reach a subscription deliver twice.
+i> SUB pre.s.d 8
+i> PING
+i< PONG
+i< PONG
+e> PUB s.d 1
+e> d
+e> PING
+e< PONG
+i< MSG pre.s.d 1 1
+i< d
+i< MSG pre.s.d 1 1
+i< d
+i< MSG pre.s.d 8 1
+i< d
+i< MSG pre.s.d 8 1
+i< d
+i> PING
+
+# Subscriptions through an import go when the client unsubscribes.
+i> UNSUB 1
+i> UNSUB 3
+i> UNSUB 8
+i> PING
+i< PONG
+i< PONG
+e> PUB s.a 1
+e> a
+e> PUB s.d 1
+e> d
+e> PING
+e< PONG
+i> PING
+i< PONG
+
+# An account may import its own export; a client without echo still does
+# not get its own messages.
+e> SUB me.self.> 9
+e> PUB self.x 1
+e> x
+e> PING
+e< MSG me.self.x 9 1
+e< x
+e< PONG
+f> CONNECT {"verbose":false,"user":"e","pass":"p","echo":false}
+f> SUB me.self.> 10
+f> PUB self.y 1
+f> y
+f> PING
+f< INFO {"auth_required":true,"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+f< PONG
+e< MSG me.self.y 9 1
+e< y
+e> PING
+e< PONG

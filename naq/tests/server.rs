@@ -651,3 +651,79 @@ fn the_wildcard_host_takes_ipv6_clients_too() {
         assert!(line.starts_with("INFO ") && line.contains(&want), "{line}");
     }
 }
+
+/// A server on `lanes` lanes, with users `e` in account E and `i` in I,
+/// and I importing the streams E exports, its subjects under `pre`.
+fn importing(lanes: usize) -> Server {
+    let opts: Options = "accounts {\n\
+        E { users: [{user: e, password: p}], exports: [{stream: \"s.>\"}, {stream: done}] }\n\
+        I { users: [{user: i, password: p}], imports: [\n\
+            {stream: {account: E, subject: \"s.>\"}, prefix: pre},\n\
+            {stream: {account: E, subject: done}}] }\n}\n"
+        .parse()
+        .unwrap();
+    server_with(Options { lanes, ..opts })
+}
+
+fn login(s: &Server, user: &str) -> Client {
+    Client::new(
+        s,
+        &format!(r#"{{"verbose":false,"user":"{user}","pass":"p"}}"#),
+    )
+}
+
+#[test]
+fn a_stream_import_reaches_its_importer_on_every_lane() {
+    let s = importing(3);
+    let mut subs: Vec<Client> = (0..3).map(|_| login(&s, "i")).collect();
+    for c in &mut subs {
+        c.send("SUB pre.s.* 1\r\nSUB done 2\r\nPING\r\n");
+        c.expect("PONG");
+    }
+    let mut p = login(&s, "e");
+    p.send("PUB s.a 1\r\nx\r\nPUB done 0\r\n\r\n");
+    p.flush();
+    for c in &mut subs {
+        c.expect("MSG pre.s.a 1 1");
+        c.expect("x");
+        c.expect("MSG done 2 0");
+        c.expect("");
+    }
+    // Gone with its subscription, on every lane.
+    for c in &mut subs {
+        c.send("UNSUB 1\r\nPING\r\n");
+        c.expect("PONG");
+    }
+    p.send("PUB s.b 1\r\ny\r\nPUB done 0\r\n\r\n");
+    p.flush();
+    for c in &mut subs {
+        c.expect("MSG done 2 0");
+        c.expect("");
+    }
+}
+
+#[test]
+fn an_importer_and_its_exporter_share_a_queue_group_of_one_name() {
+    let s = importing(3);
+    let mut importer = login(&s, "i");
+    importer.send("SUB pre.s.q q 1\r\nSUB done 2\r\nPING\r\n");
+    importer.expect("PONG");
+    let mut exporter = login(&s, "e");
+    exporter.send("SUB s.q q 1\r\nSUB done 2\r\nPING\r\n");
+    exporter.expect("PONG");
+    let mut publisher = login(&s, "e");
+    let n = 2000;
+    for _ in 0..n {
+        publisher.send("PUB s.q 1\r\nx\r\n");
+    }
+    publisher.send("PUB done 0\r\n\r\n");
+    publisher.flush();
+    let counts = [
+        count_until_done(&mut importer),
+        count_until_done(&mut exporter),
+    ];
+    assert_eq!(counts.iter().sum::<usize>(), n, "each message once");
+    for c in counts {
+        assert!((700..1300).contains(&c), "{counts:?}");
+    }
+}

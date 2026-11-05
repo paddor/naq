@@ -129,7 +129,7 @@ fn users_tokens_and_accounts_come_from_their_blocks() {
                       no_auth_user: a\n"
         .parse()
         .unwrap();
-    assert_eq!(o.accounts, ["A", "B"]);
+    assert_eq!(names(&o), ["A", "B"]);
     assert_eq!(o.auth_timeout, Duration::from_millis(500));
     assert_eq!(o.no_auth_user.as_deref(), Some("a"));
     let users: Vec<_> = o
@@ -151,7 +151,7 @@ fn users_tokens_and_accounts_come_from_their_blocks() {
         .unwrap();
     assert_eq!(t.token.as_deref(), Some("abc"));
     assert_eq!(t.auth_timeout, Duration::from_secs(3));
-    assert_eq!(t.accounts, ["X", "Y"]);
+    assert_eq!(names(&t), ["X", "Y"]);
 }
 
 #[test]
@@ -229,8 +229,8 @@ fn auth_that_contradicts_itself_is_an_error() {
         ),
         ("accounts [A, A]\n", "accounts: \"A\" twice"),
         (
-            "accounts { A { exports: [] } }\n",
-            "accounts: A: exports: not supported",
+            "accounts { A { mappings: {} } }\n",
+            "accounts: A: mappings: not supported",
         ),
         ("accounts [1]\n", "accounts: expected names"),
         ("accounts: 1\n", "accounts: expected a map or a list"),
@@ -987,4 +987,158 @@ fn the_cluster_block_names_the_other_servers() {
     ] {
         config_error(text, reason);
     }
+}
+
+/// The names of the accounts of `o`.
+fn names(o: &Options) -> Vec<&str> {
+    o.accounts.iter().map(|a| a.name.as_str()).collect()
+}
+
+#[test]
+fn exports_and_imports_come_from_their_accounts() {
+    let o: Options = "accounts {\n\
+        E { exports [{stream: \"s.>\"},\n\
+                     {service: \"svc.*\", accounts: [I], response_type: chunked, threshold: \"5s\"},\n\
+                     {service: \"req.*\", account_token_position: 2}] }\n\
+        I { imports [{stream: {account: E, subject: \"s.>\"}, prefix: pre},\n\
+                     {service: {account: E, subject: \"svc.*\"}, to: \"loc.*\", share: true},\n\
+                     {service: {account: E, subject: \"req.I\"}}] }\n}\n"
+        .parse()
+        .unwrap();
+    let e = &o.accounts[0];
+    assert_eq!(e.exports.len(), 3);
+    assert_eq!(e.exports[0].kind, naq::ExportKind::Stream);
+    let naq::ExportKind::Service(s) = &e.exports[1].kind else {
+        panic!("{:?}", e.exports[1])
+    };
+    assert_eq!(
+        e.exports[1].accounts.as_deref(),
+        Some(&["I".to_owned()][..])
+    );
+    assert_eq!(
+        (s.response, s.threshold),
+        (naq::ResponseType::Chunked, Duration::from_secs(5))
+    );
+    assert_eq!(e.exports[2].token_position, Some(2));
+    let i = &o.accounts[1].imports;
+    assert_eq!((i[0].account.as_str(), i[0].subject.as_str()), ("E", "s.>"));
+    assert_eq!(i[0].to.as_deref(), Some("pre.s.>"));
+    assert_eq!(i[0].kind, naq::ImportKind::Stream);
+    assert_eq!(i[1].to.as_deref(), Some("loc.*"));
+    assert_eq!(i[1].kind, naq::ImportKind::Service { share: true });
+    assert_eq!(
+        (i[2].to.as_deref(), i[2].kind),
+        (None, naq::ImportKind::Service { share: false })
+    );
+}
+
+#[test]
+fn exports_naq_cannot_use_are_an_error() {
+    for (text, reason) in [
+        (
+            "accounts { A { exports: {stream: a} } }\n",
+            "exports: expected a list",
+        ),
+        (
+            "accounts { A { exports: [a] } }\n",
+            "exports: expected a map",
+        ),
+        (
+            "accounts { A { exports: [{stream: a, service: b}] } }\n",
+            "exports: both a stream and a service",
+        ),
+        (
+            "accounts { A { exports: [{accounts: [B]}] } }\n",
+            "exports: expected a stream or a service",
+        ),
+        (
+            "accounts { A { exports: [{stream: a, response_type: stream}] } }\n",
+            "exports: a response directive on a stream",
+        ),
+        (
+            "accounts { A { exports: [{stream: a, latency: l}] } }\n",
+            "exports: a latency directive on a stream",
+        ),
+        (
+            "accounts { A { exports: [{service: a, response_type: many}] } }\n",
+            "exports: response_type: unknown response type",
+        ),
+        (
+            "accounts { A { exports: [{service: a, latency: {sampling: 101, subject: l}}] } }\n",
+            "exports: latency: bad sampling, should be 1-100% or headers",
+        ),
+        (
+            "accounts { A { exports: [{service: a, latency: {sampling: 50}}] } }\n",
+            "exports: latency: a subject is required",
+        ),
+        (
+            "accounts { A { exports: [{service: a, allow_trace: true}] } }\n",
+            "exports: allow_trace: not supported",
+        ),
+        (
+            "accounts { A { exports: [{service: a, weight: 1}] } }\n",
+            "exports: weight: not supported",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn imports_naq_cannot_use_are_an_error() {
+    for (text, reason) in [
+        (
+            "accounts { A { imports: [{stream: {account: B}}] } }\n",
+            "imports: stream: expected an account and a subject",
+        ),
+        (
+            "accounts { A { imports: [{stream: {account: B, subject: a}, prefix: p, to: q}] } }\n",
+            "imports: a stream import cannot have both a prefix and a to",
+        ),
+        (
+            "accounts { A { imports: [{stream: {account: B, subject: a}, prefix: \"p.*\"}] } }\n",
+            "imports: a stream import prefix cannot have wildcards",
+        ),
+        (
+            "accounts { A { imports: [{service: {account: B, subject: a}, prefix: p}] } }\n",
+            "imports: a prefix on a service",
+        ),
+        (
+            "accounts { A { imports: [{stream: {account: B, subject: a}, share: true}] } }\n",
+            "imports: share on a stream",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn imports_their_exports_do_not_allow_are_an_error() {
+    let text = "accounts { E { exports [{stream: \"a.*\"}] }\n\
+                I { imports [{stream: {account: E, subject: \"a.>\"}}] } }\n";
+    match text.parse::<Options>() {
+        Err(Error::Config { at, reason }) => {
+            assert_eq!(at, "config");
+            assert_eq!(
+                reason,
+                "account \"I\": stream import \"a.>\": not authorized"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let mut opts = Options::default();
+    opts.accounts.push("I".into());
+    opts.accounts[0].imports.push(naq::Import {
+        account: "E".into(),
+        subject: "a".into(),
+        to: None,
+        kind: naq::ImportKind::Stream,
+    });
+    assert!(matches!(naq::Server::start(&opts), Err(Error::Options(_))));
 }

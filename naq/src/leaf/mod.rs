@@ -101,7 +101,7 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
         }
         if let Some(a) = r.account.as_deref()
             && a != "$G"
-            && !opts.accounts.iter().any(|x| x == a)
+            && !opts.accounts.iter().any(|x| x.name == *a)
         {
             return Err(format!("leafnode remote: no account {a:?}"));
         }
@@ -140,7 +140,7 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
 /// Why `l`, the port of naq leafs of `opts`, cannot run as given: its
 /// accounts exist, and its users are distinct and have no permissions.
 fn leafnodes(opts: &crate::Options, l: &crate::Leafnodes) -> Result<(), String> {
-    let exists = |a: &str| a == "$G" || opts.accounts.iter().any(|x| x == a);
+    let exists = |a: &str| a == "$G" || opts.accounts.iter().any(|x| x.name == a);
     if let Some(a) = l.account.as_deref()
         && !exists(a)
     {

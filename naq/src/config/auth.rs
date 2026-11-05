@@ -37,33 +37,25 @@ pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
     Ok(())
 }
 
-/// `accounts { NAME { users } }`, or `accounts [NAME]`.
+/// `accounts { NAME { users, exports, imports } }`, or `accounts [NAME]`.
 pub(super) fn accounts(o: &mut Options, item: &Item) -> Result<(), Bad> {
-    let mut add = |name: &str, line: u32| {
-        if name == "$G" {
-            return Err((line, format!("accounts: {name:?} is a reserved account")));
-        }
-        if o.accounts.iter().any(|a| a == name) {
-            return Err((line, format!("accounts: {name:?} twice")));
-        }
-        o.accounts.push(name.to_owned());
-        Ok(())
-    };
     match &item.value {
         Value::Array(names) => {
             for n in names {
                 let name = string(n).ok_or_else(|| (n.line, "accounts: expected names".into()))?;
-                add(&name, n.line)?;
+                add(o, crate::Account::from(name.as_str()), n.line)?;
             }
             Ok(())
         }
         Value::Map(entries) => {
             let mut found = Vec::new();
             for (name, v) in entries {
-                add(name, v.line)?;
+                let mut account = crate::Account::from(name.as_str());
                 for (key, field) in map(v, "accounts")? {
                     match key.to_ascii_lowercase().as_str() {
                         "users" => found.extend(users(field, Some(name))?),
+                        "exports" => account.exports = super::imports::exports(field)?,
+                        "imports" => account.imports = super::imports::imports(field)?,
                         k => {
                             return Err((
                                 field.line,
@@ -72,12 +64,26 @@ pub(super) fn accounts(o: &mut Options, item: &Item) -> Result<(), Bad> {
                         }
                     }
                 }
+                add(o, account, v.line)?;
             }
             o.users.extend(found);
             Ok(())
         }
         _ => Err((item.line, "accounts: expected a map or a list".into())),
     }
+}
+
+/// Adds `account`, unless it is reserved or there already.
+fn add(o: &mut Options, account: crate::Account, line: u32) -> Result<(), Bad> {
+    let name = &account.name;
+    if name == "$G" {
+        return Err((line, format!("accounts: {name:?} is a reserved account")));
+    }
+    if o.accounts.iter().any(|a| a.name == *name) {
+        return Err((line, format!("accounts: {name:?} twice")));
+    }
+    o.accounts.push(account);
+    Ok(())
 }
 
 /// A `users` list: each user a map of `user` and `password`, or of `nkey`.

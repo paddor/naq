@@ -34,6 +34,7 @@
 //! `NAQ_GO=<path to nats-server>` also replays every script against Go.
 //! With `NAQ_BLESS=1`, Go's replies are written into the scripts. A
 //! transcript that differs is written to `CARGO_TARGET_TMPDIR/wire/`.
+//! `NAQ_WIRE=<text>` replays only the scripts whose names hold it.
 
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
@@ -119,11 +120,16 @@ fn config(script: &str) -> String {
 }
 
 fn scripts() -> Vec<PathBuf> {
+    let only = std::env::var("NAQ_WIRE").ok();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wire");
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "txt"))
+        .filter(|p| {
+            only.as_ref()
+                .is_none_or(|o| p.to_string_lossy().contains(o.as_str()))
+        })
         .collect();
     paths.sort();
     assert!(!paths.is_empty(), "no scripts");
