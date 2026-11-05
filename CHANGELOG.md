@@ -5,6 +5,8 @@ Notable changes to naq. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-05
+
 ### Added
 
 - `naq`: a server skeleton on zzq IO lanes, and the `naq` binary (`-a`,

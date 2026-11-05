@@ -2,26 +2,58 @@
 
 A Core NATS server in Rust, on the [zzq](https://github.com/paddor/zzq)
 engine: shared-nothing IO lanes, no locks on the message path, batched
-wakes and writes.
+wakes and writes. NATS clients connect to it as to `nats-server`, and it
+reads `nats-server` configuration files. Its tests run their scenarios
+against `nats-server` v2.15.2 too, wherever both can, and expect the same
+replies.
 
-The server runs core publish and subscribe: wildcards, queue groups,
-`UNSUB` maximums, accounts with stream and service imports between them,
-users with passwords, tokens, NKeys or TLS certificates, auth callout,
-operator mode with JWTs, permissions, over TCP, TLS and WebSocket. It
-links to `nats-server` hubs as a leaf node, over TCP, TLS or WebSocket,
-with credentials, failover across a hub cluster and the hub's
-permissions. Servers of one cluster mesh over OMQ: they share their
-clients' interest, carry messages one hop and tell clients of each other
-for failover. naq leaf nodes link to naq hubs over OMQ too, by Go's leaf
-rules, clusters on either side, with credentials, permissions and
-failover across a hub cluster. It reads `nats-server` configuration
-files (`naq -c FILE`), the keys it serves so far, and serves `/healthz`,
-`/varz`, `/connz`, `/routez` and `/leafz` (`naq -m PORT`).
+## What it does
+
+- Core publish and subscribe: wildcards, queue groups, `UNSUB` maximums,
+  headers, no responders. Clients over TCP, TLS (TLS first too) and
+  WebSocket.
+- Accounts with stream and service imports between them, and a system
+  account.
+- Users with passwords, tokens, NKeys or TLS certificates, permissions,
+  connection types, and auth callout.
+- Operator mode: JWTs of operators, accounts and users, with memory, full
+  and cache resolvers. Account updates reach the clients already
+  connected.
+- A leaf node of `nats-server` hubs, over TCP, TLS or WebSocket, with
+  credentials and failover across a hub cluster.
+- Clusters of naq servers, meshed over OMQ, and naq leaf nodes of naq
+  hubs.
+- Monitoring: `/healthz`, `/varz`, `/connz`, `/routez` and `/leafz`.
+
+A configuration key it does not serve is an error, not ignored.
+
+## Not yet
+
+- JetStream. A naq leaf reaches the JetStream of its `nats-server` hub.
+- Routes to `nats-server`, gateways, and `nats-server` leaf nodes on a naq
+  hub.
+- Config reload, lame duck mode, signals, Prometheus metrics, and most
+  `$SYS` requests and events.
+
+## Usage
+
+```sh
+cargo install naq
+naq -c nats.conf
+naq -p 4222 -m 8222
+```
+
+Or embed a `Server`:
+
+```rust
+let options: naq::Options = "port: 4222\n".parse()?;
+let server = naq::Server::start(&options)?;
+```
 
 | Crate | Role |
 | --- | --- |
 | `naq-proto` | Sans-I/O `no_std` codec for the NATS client and leaf node protocols |
-| `naq` | The server |
+| `naq` | The server, as a library and the `naq` binary |
 | `naq-bench` | Load generators and benchmarks (not published) |
 
 ## License
