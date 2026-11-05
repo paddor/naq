@@ -3,6 +3,8 @@ name = "naq-proto"
 description = "Sans-I/O codec for the NATS client and leaf node protocols"
 keywords = ["nats", "protocol", "codec", "no_std"]
 categories = ["network-programming", "no-std", "parser-implementations"]
+# Tests stay out of the published crate.
+exclude = ["tests/"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
