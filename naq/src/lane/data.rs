@@ -87,6 +87,8 @@ pub(crate) struct Origin {
     /// The publisher's account.
     pub(crate) account: u32,
     pub(crate) source: Source,
+    /// They came through a service import: shadows do not get them.
+    pub(crate) imported: bool,
 }
 
 /// Who sent a message to this server.
@@ -120,6 +122,42 @@ pub(crate) struct Outs {
     /// The leaf cluster the publishes come from, with `from_leaf`.
     origin: Vec<u8>,
     from_leaf: bool,
+    /// Its publishes came through a service import.
+    of_service: bool,
+    /// What imports routed in other accounts, if any did yet.
+    imported: Option<Box<Imported>>,
+}
+
+/// Messages imports routed in other accounts: in a buffer of their own,
+/// with the forwards and records of each account.
+#[derive(Debug, Default)]
+pub(crate) struct Imported {
+    /// Their subjects, replies, headers and payloads.
+    pub(crate) arena: BytesMut,
+    /// The publishes for other lanes and servers, an `Outs` per account.
+    pub(crate) outs: Vec<Outs>,
+    /// Room to build subjects and headers in.
+    pub(crate) subject: Vec<u8>,
+    pub(crate) headers: Vec<u8>,
+    /// Room for parts of a message in the arena, copied out of it.
+    pub(crate) kept: Vec<u8>,
+}
+
+impl Imported {
+    /// The `Outs` of `account` among `outs`, made on first use.
+    pub(crate) fn outs_of<'o>(outs: &'o mut Vec<Outs>, lane: &Lane, account: u32) -> &'o mut Outs {
+        let at = outs
+            .iter()
+            .position(|o| o.account == account)
+            .unwrap_or_else(|| {
+                let mut o = Outs::new(lane);
+                o.account = account;
+                o.of_service = true;
+                outs.push(o);
+                outs.len() - 1
+            });
+        &mut outs[at]
+    }
 }
 
 impl Outs {
@@ -133,7 +171,15 @@ impl Outs {
             account: 0,
             origin: Vec::new(),
             from_leaf: false,
+            of_service: false,
+            imported: None,
         }
+    }
+
+    /// Room for what imports route in other accounts.
+    pub(crate) fn imported(&mut self, lane: &Lane) -> &mut Imported {
+        let _ = lane;
+        self.imported.get_or_insert_with(Box::default)
     }
 
     /// The publishes come from a leaf of cluster `origin`, if one: the
@@ -271,6 +317,7 @@ pub(super) async fn run(lane: Rc<Lane>, rx: Receiver<Batch>) {
     while rx.recv_all(&mut batches).await {
         let mut stalled = None;
         for b in batches.drain(..) {
+            lane.imported.set(b.from.imported);
             let msgs = &b.out.msgs;
             for (k, f) in msgs.iter().enumerate() {
                 lane.deliver_fwd(&b, f, &mut stalled);
@@ -281,6 +328,7 @@ pub(super) async fn run(lane: Rc<Lane>, rx: Receiver<Batch>) {
                 }
             }
         }
+        lane.imported.set(false);
         lane.flush();
         lane.expire();
         // A subscriber past the stall mark slows its publishers: they wait
@@ -313,6 +361,11 @@ impl Lane {
         at: usize,
         source: Source,
     ) {
+        if let Some(imported) = out.imported.as_deref_mut()
+            && !imported.arena.is_empty()
+        {
+            self.ship_imported(imported).await;
+        }
         self.ship_servers(out).await;
         if out.lanes.iter().all(Out::is_empty) {
             buf.advance(at);
@@ -328,6 +381,7 @@ impl Lane {
         let from = Origin {
             account: out.account,
             source,
+            imported: out.of_service,
         };
         for (to, out) in out.lanes.iter_mut().enumerate() {
             if !out.is_empty() {
@@ -337,6 +391,19 @@ impl Lane {
                     from,
                 };
                 self.ship(to, batch).await;
+            }
+        }
+    }
+
+    /// Hands what imports routed over to the other lanes and servers, in
+    /// one chunk of the arena.
+    #[cold]
+    async fn ship_imported(&self, imported: &mut Imported) {
+        let chunk = imported.arena.split().freeze();
+        for out in &mut imported.outs {
+            self.ship_servers(out).await;
+            if !out.lanes.iter().all(Out::is_empty) {
+                self.ship_chunk(out, chunk.clone(), Source::Client).await;
             }
         }
     }

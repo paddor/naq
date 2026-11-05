@@ -1,7 +1,9 @@
 //! Subjects shared between accounts: exports, and the imports of them,
 //! linked and checked as `nats-server` checks them.
 
+mod info;
 mod link;
+pub(crate) mod service;
 pub(crate) mod shadow;
 mod transform;
 
@@ -126,13 +128,30 @@ pub(crate) struct ServiceImport {
     pub(crate) share: bool,
     /// How the service answers, from its export.
     pub(crate) service: ServiceExport,
+    /// The export it imports.
+    pub(crate) export: ExportId,
+}
+
+/// An export: the account's id and the export's place among its exports.
+pub(crate) type ExportId = (u32, u32);
+
+impl ServiceImport {
+    /// Writes the subject a request on `subject` in the importer has in
+    /// the exporter into `out`.
+    pub(crate) fn rewrite_into(&self, subject: &[u8], out: &mut Vec<u8>) {
+        match &self.rewrite {
+            Rewrite::Same => out.extend_from_slice(subject),
+            Rewrite::Fixed(to) => out.extend_from_slice(to),
+            Rewrite::Map(tr) => tr.apply(subject, out),
+        }
+    }
 }
 
 /// The imports of one account.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Imports {
     pub(crate) streams: Vec<std::sync::Arc<StreamImport>>,
-    pub(crate) services: Vec<ServiceImport>,
+    pub(crate) services: Vec<std::sync::Arc<ServiceImport>>,
 }
 
 #[cfg(test)]

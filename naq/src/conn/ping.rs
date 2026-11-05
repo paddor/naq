@@ -36,6 +36,8 @@ pub(super) struct Pinger {
     last_in: Instant,
     /// When a `PING` last went out.
     sent_at: Option<Instant>,
+    /// When the client connected.
+    start: Instant,
 }
 
 impl Pinger {
@@ -47,14 +49,22 @@ impl Pinger {
             out: 0,
             last_in: now,
             sent_at: None,
+            start: now,
         }
     }
 
     /// After a `CONNECT` at `now`: the next `PING` comes early, delayed by
     /// `jitter` so that clients that connect together do not get theirs
-    /// together.
-    pub(super) fn connected(&mut self, now: Instant, interval: Duration, jitter: Duration) {
+    /// together. Returns the round trip as far as it is known: the time
+    /// from the connection to its `CONNECT`, as `nats-server` takes it.
+    pub(super) fn connected(
+        &mut self,
+        now: Instant,
+        interval: Duration,
+        jitter: Duration,
+    ) -> Duration {
         self.next = now + interval.min(FIRST) + jitter;
+        now - self.start
     }
 
     /// The client sent messages, subscriptions or a `PING`.
@@ -62,9 +72,11 @@ impl Pinger {
         self.last_in = now;
     }
 
-    /// The client answered a `PING`.
-    pub(super) const fn pong(&mut self) {
-        self.out = 0;
+    /// The client answered a `PING` at `now`. Returns the round trip, if
+    /// a `PING` was out.
+    pub(super) fn pong(&mut self, now: Instant) -> Option<Duration> {
+        let out = std::mem::take(&mut self.out);
+        self.sent_at.filter(|_| out > 0).map(|t| now - t)
     }
 
     /// The timer fired at `now`.
@@ -104,12 +116,29 @@ mod tests {
         let t0 = Instant::now();
         let mut p = Pinger::new(t0, 2 * MIN);
         assert_eq!(p.next, t0 + 2 * MIN);
-        p.connected(t0, 2 * MIN, Duration::from_millis(100));
-        assert_eq!(p.next, t0 + FIRST + Duration::from_millis(100));
+        let rtt = p.connected(
+            t0 + Duration::from_millis(3),
+            2 * MIN,
+            Duration::from_millis(100),
+        );
+        assert_eq!(
+            rtt,
+            Duration::from_millis(3),
+            "from the connection to its CONNECT"
+        );
+        assert_eq!(
+            p.next,
+            t0 + Duration::from_millis(3) + FIRST + Duration::from_millis(100)
+        );
         // The first always goes out, busy or not: it measures the round trip.
         p.active(p.next);
-        assert_eq!(p.tick(p.next, 2 * MIN, 2), Tick::Ping);
-        p.pong();
+        let sent = p.next;
+        assert_eq!(p.tick(sent, 2 * MIN, 2), Tick::Ping);
+        assert_eq!(
+            p.pong(sent + Duration::from_millis(2)),
+            Some(Duration::from_millis(2))
+        );
+        assert_eq!(p.pong(sent + Duration::from_millis(5)), None, "no PING out");
         // Busy within the interval: nothing.
         let t = p.next;
         p.active(t - Duration::from_secs(1));
@@ -125,7 +154,7 @@ mod tests {
         assert_eq!(p.tick(p.next, MIN, 2), Tick::Ping);
         assert_eq!(p.tick(p.next, MIN, 2), Tick::Ping);
         assert_eq!(p.tick(p.next, MIN, 2), Tick::Stale);
-        p.pong();
+        p.pong(p.next);
         assert_eq!(p.tick(p.next, MIN, 2), Tick::Ping);
     }
 

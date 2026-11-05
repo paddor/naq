@@ -16,6 +16,7 @@ use naq_proto::subject;
 
 use crate::conn::Client;
 use crate::imports::StreamImport;
+use crate::imports::service::Tap;
 
 /// One subscription on this lane.
 #[derive(Debug)]
@@ -197,11 +198,14 @@ pub(crate) struct Interest {
     pub(crate) plain: Group,
     /// Queue groups by name: each gets every message once.
     pub(crate) queues: Vec<(Box<[u8]>, Group)>,
+    /// What imports do with messages on the filter: the same on every
+    /// lane, acted on by the lane a message comes in on.
+    pub(crate) taps: Vec<Tap>,
 }
 
 impl Interest {
     const fn is_empty(&self) -> bool {
-        self.plain.is_empty() && self.queues.is_empty()
+        self.plain.is_empty() && self.queues.is_empty() && self.taps.is_empty()
     }
 
     /// The group for `queue`, or the plain one.
@@ -310,6 +314,11 @@ impl Index {
     /// Adds subscription `entry` to `filter`, in `queue` if given.
     pub(crate) fn insert(&mut self, filter: &[u8], queue: Option<&[u8]>, entry: Entry) {
         self.interest(filter).group(queue).local.push(entry);
+    }
+
+    /// Adds `tap` to `filter`.
+    pub(crate) fn tap(&mut self, filter: &[u8], tap: Tap) {
+        self.interest(filter).taps.push(tap);
     }
 
     /// Removes subscription `sid` of client `id`.

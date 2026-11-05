@@ -45,7 +45,7 @@ pub(crate) fn link(opts: &Options) -> Result<Box<[Imports]>, String> {
                     l.names[dup.to as usize]
                 ));
             }
-            l.all[i + 1].services.push(s);
+            l.all[i + 1].services.push(std::sync::Arc::new(s));
         }
     }
     Ok(l.all.into())
@@ -87,21 +87,22 @@ fn check_exports(opts: &Options) -> Result<(), String> {
 }
 
 /// The export of account `exporter` that an import of `subject`, of the
-/// kind `service` says, is of: the one of that subject, else the first
-/// that holds it.
+/// kind `service` says, is of, and its place among the account's exports:
+/// the one of that subject, else the first that holds it.
 fn export_of<'o>(
     opts: &'o Options,
     exporter: &str,
     subject: &str,
     service: bool,
-) -> Option<&'o crate::Export> {
+) -> Option<(u32, &'o crate::Export)> {
     let a = opts.accounts.iter().find(|a| a.name == exporter)?;
-    let kind = |e: &&crate::Export| matches!(e.kind, ExportKind::Service(_)) == service;
-    let mut of_kind = a.exports.iter().filter(kind);
-    of_kind
-        .clone()
-        .find(|e| e.subject == subject)
-        .or_else(|| of_kind.find(|e| subject::is_subset(subject.as_bytes(), e.subject.as_bytes())))
+    let of_kind =
+        |(_, e): &(usize, &crate::Export)| matches!(e.kind, ExportKind::Service(_)) == service;
+    let mut all = a.exports.iter().enumerate().filter(of_kind);
+    all.clone()
+        .find(|(_, e)| e.subject == subject)
+        .or_else(|| all.find(|(_, e)| subject::is_subset(subject.as_bytes(), e.subject.as_bytes())))
+        .map(|(i, e)| (i as u32, e))
 }
 
 /// Whether account `importer` may import `subject` by export `e`.
@@ -142,7 +143,7 @@ impl Linker<'_> {
             return Err("invalid subject".into());
         }
         let authorized = export_of(opts, &im.account, &im.subject, false)
-            .is_some_and(|e| allows(e, importer, &im.subject));
+            .is_some_and(|(_, e)| allows(e, importer, &im.subject));
         if !authorized {
             return Err("not authorized".into());
         }
@@ -244,10 +245,11 @@ impl Linker<'_> {
         {
             return Err("invalid subject".into());
         }
-        let export = export_of(opts, &im.account, remote, true);
-        if !export.is_some_and(|e| allows(e, importer, remote)) {
+        let Some((at, export)) =
+            export_of(opts, &im.account, remote, true).filter(|(_, e)| allows(e, importer, remote))
+        else {
             return Err("not authorized".into());
-        }
+        };
         let me = id(names, importer)?;
         let wild = !subject::is_literal(remote.as_bytes());
         let checked = if wild {
@@ -278,9 +280,9 @@ impl Linker<'_> {
                 .ok_or_else(|| format!("cannot map {local:?} to {remote:?}"))?;
             (transform::untokenize(&local), Rewrite::Map(tr))
         };
-        let service = match export.map(|e| &e.kind) {
-            Some(ExportKind::Service(s)) => s.clone(),
-            _ => ServiceExport::default(),
+        let service = match &export.kind {
+            ExportKind::Service(s) => s.clone(),
+            ExportKind::Stream => ServiceExport::default(),
         };
         Ok(ServiceImport {
             to,
@@ -289,6 +291,7 @@ impl Linker<'_> {
             rewrite,
             share,
             service,
+            export: (to, at),
         })
     }
 }

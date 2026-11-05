@@ -39,6 +39,19 @@ pub(crate) struct Routing<'a, 'p> {
     pub(crate) stalled: Option<Rc<Client>>,
     /// Some subscription got it, here, on another lane or at a hub.
     pub(crate) delivered: bool,
+    /// Whether it goes through imports, and met taps.
+    taps: Taps,
+}
+
+/// Whether a message goes through the imports it meets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Taps {
+    /// It does not.
+    Off,
+    /// It does; it met none yet.
+    On,
+    /// It met taps, noted on the lane.
+    Met,
 }
 
 impl<'a, 'p> Routing<'a, 'p> {
@@ -65,7 +78,20 @@ impl<'a, 'p> Routing<'a, 'p> {
             sent: 0,
             stalled: None,
             delivered: false,
+            taps: Taps::Off,
         }
+    }
+
+    /// It goes through the imports it meets: their taps are noted on the
+    /// lane, for [`crate::imports::service::run`].
+    pub(crate) const fn with_imports(mut self) -> Self {
+        self.taps = Taps::On;
+        self
+    }
+
+    /// Whether it met taps of imports, noted on the lane.
+    pub(crate) fn tapped(&self) -> bool {
+        self.taps == Taps::Met
     }
 
     /// The message came from a link, listing `queues`, separated by blanks:
@@ -168,6 +194,19 @@ impl<'a, 'p> Routing<'a, 'p> {
         }
         if !i.plain.servers.is_empty() {
             self.send_servers(&i.plain.servers);
+        }
+        if !i.taps.is_empty() {
+            self.tap(&i.taps);
+        }
+    }
+
+    /// Notes `taps` on the lane, if the message goes through imports.
+    #[cold]
+    #[inline(never)]
+    fn tap(&mut self, taps: &[crate::imports::service::Tap]) {
+        if self.taps != Taps::Off {
+            self.lane.note_taps(taps);
+            self.taps = Taps::Met;
         }
     }
 

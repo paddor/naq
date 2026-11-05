@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-pub(crate) use data::{Batch, Outs, Source};
+pub(crate) use data::{Batch, Imported, Outs, Source};
 pub(crate) use publish::Routing;
 pub(crate) use route::{Queue, Queued};
 #[cfg(test)]
@@ -183,6 +183,11 @@ pub(crate) struct Lane {
     pub(crate) leaf_router: RefCell<Option<omq_tokio::IdentitySocket>>,
     /// Room for the subject a shadow delivers with.
     shadow_subject: RefCell<Vec<u8>>,
+    /// The taps the message being routed met.
+    taps: RefCell<Vec<crate::imports::service::Tap>>,
+    /// The message being delivered came through a service import: shadows
+    /// do not get it.
+    pub(crate) imported: Cell<bool>,
 }
 
 impl Lane {
@@ -190,6 +195,16 @@ impl Lane {
     #[inline]
     pub(crate) fn index(&self, account: u32) -> &RefCell<Index> {
         &self.indexes[account as usize]
+    }
+
+    /// Notes the taps of interest the message being routed met.
+    pub(crate) fn note_taps(&self, taps: &[crate::imports::service::Tap]) {
+        self.taps.borrow_mut().extend_from_slice(taps);
+    }
+
+    /// The taps noted since the last call.
+    pub(crate) fn take_taps(&self) -> std::vec::IntoIter<crate::imports::service::Tap> {
+        std::mem::take(&mut *self.taps.borrow_mut()).into_iter()
     }
 
     /// Number of other servers of the cluster.
@@ -402,7 +417,10 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         slots: Slots::new(servers, hubs),
         leaf_router: RefCell::default(),
         shadow_subject: RefCell::default(),
+        taps: RefCell::default(),
+        imported: Cell::new(false),
     });
+    crate::imports::service::install(&lane);
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;
     let l = lane.clone();

@@ -1,0 +1,54 @@
+# Clients may not publish to subjects gateways and Raft reserve, nor with
+# replies service imports, JetStream acks and gateways reserve. The
+# message is dropped; the connection stays.
+
+a> CONNECT {"verbose":true}
+a> SUB > 1
+a> PUB x _R_.abc.def 1
+a> 1
+a> PUB x _R_. 1
+a> 2
+a> PUB x $JS.ACK.s.c 1
+a> 3
+a> PUB x $JS.ACK. 1
+a> 4
+a> PUB x _GR_.a.b 1
+a> 5
+a> PUB x $GR.a 1
+a> 6
+a> PUB _GR_.a 1
+a> 7
+a> PUB $GR.a 1
+a> 8
+a> PUB $NRG.a 1
+a> 9
+a> PUB _R_.abc 2
+a> 10
+a> PUB x _R 2
+a> 11
+a> PUB _GR_. 2
+a> 12
+a> PING
+a< INFO {"client_ip":"127.0.0.1","headers":true,"max_payload":1048576,"proto":1}
+a< +OK
+a< +OK
+a< -ERR 'Permissions Violation for Publish with Reply of "_R_.abc.def"'
+a< -ERR 'Permissions Violation for Publish with Reply of "_R_."'
+a< -ERR 'Permissions Violation for Publish with Reply of "$JS.ACK.s.c"'
+a< +OK
+a< MSG x 1 $JS.ACK. 1
+a< 4
+a< -ERR 'Permissions Violation for Publish with Reply of "_GR_.a.b"'
+a< -ERR 'Permissions Violation for Publish with Reply of "$GR.a"'
+a< -ERR 'Permissions Violation for Publish to "_GR_.a"'
+a< -ERR 'Permissions Violation for Publish to "$GR.a"'
+a< -ERR 'Permissions Violation for Publish to "$NRG.a"'
+a< +OK
+a< MSG _R_.abc 1 2
+a< 10
+a< +OK
+a< MSG x 1 _R 2
+a< 11
+a< -ERR 'Invalid Publish Subject'
+a< +OK
+a< PONG

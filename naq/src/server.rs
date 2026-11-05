@@ -35,6 +35,9 @@ pub(crate) struct Shared {
     pub(crate) accounts: Box<[String]>,
     /// The imports of each account, by id.
     pub(crate) imports: Box<[crate::imports::Imports]>,
+    /// The requests this server sent into each account through service
+    /// imports, by id.
+    pub(crate) responses: Box<[Arc<crate::imports::service::Responses>]>,
     /// What clients must authenticate with, if anything.
     pub(crate) auth: Option<Auth>,
     /// What WebSocket clients authenticate with, where it is not `auth`.
@@ -149,6 +152,9 @@ impl Server {
             tls: setup.tls,
             ws: door(opts, ws_addr, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
+            responses: (0..setup.imports.len())
+                .map(|_| Arc::new(crate::imports::service::Responses::new(random())))
+                .collect(),
             imports: setup.imports,
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
@@ -455,6 +461,19 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
 }
 
 /// 22 random-looking characters, as `nats-server` IDs have.
+/// Numbers below what they are asked for, made from fresh random state.
+fn random() -> impl FnMut(u64) -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let state = std::collections::hash_map::RandomState::new();
+    let mut n = 0u64;
+    move |below| {
+        let mut h = state.build_hasher();
+        h.write_u64(n);
+        n += 1;
+        h.finish() % below
+    }
+}
+
 fn server_id() -> String {
     use std::hash::{BuildHasher, Hasher};
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";

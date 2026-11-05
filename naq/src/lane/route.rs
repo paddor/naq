@@ -110,7 +110,7 @@ impl Lane {
         skip: u64,
         stalled: &mut Option<Rc<Client>>,
     ) -> bool {
-        let Some(im) = &e.shadow else {
+        let Some(im) = e.shadow.as_ref().filter(|_| !self.imported.get()) else {
             return false;
         };
         let mut subject = self.shadow_subject.take();

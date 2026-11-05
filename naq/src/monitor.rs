@@ -557,7 +557,7 @@ async fn leafz(shared: &Shared, subs: bool) -> serde_json::Value {
 }
 
 /// `t` as RFC 3339 in UTC, with nanoseconds, as Go writes times.
-fn rfc3339(t: SystemTime) -> String {
+pub(crate) fn rfc3339(t: SystemTime) -> String {
     let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs();
     let (days, rest) = (secs / 86_400, secs % 86_400);

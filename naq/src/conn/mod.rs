@@ -52,6 +52,8 @@ pub(crate) struct Client {
     pub(crate) guarded: Cell<bool>,
     /// Messages it sent and got.
     pub(crate) tally: Tally,
+    /// The round trip to it, as last measured.
+    pub(crate) rtt: Cell<Duration>,
     /// Who it is, for monitoring.
     pub(crate) meta: RefCell<Meta>,
     closed: Cell<bool>,
@@ -77,10 +79,13 @@ impl Client {
             held: RefCell::default(),
             guarded: Cell::new(false),
             tally: Tally::default(),
+            rtt: Cell::new(Duration::ZERO),
             meta: RefCell::new(Meta {
                 ip: String::new(),
                 port: 0,
                 start: std::time::SystemTime::now(),
+                websocket: false,
+                user: None,
                 name: None,
                 lang: None,
                 version: None,
@@ -158,6 +163,10 @@ pub(crate) struct Meta {
     pub(crate) ip: String,
     pub(crate) port: u16,
     pub(crate) start: std::time::SystemTime,
+    /// It came over WebSocket.
+    pub(crate) websocket: bool,
+    /// Who it logged in as, if anyone: a user name or an NKey.
+    pub(crate) user: Option<String>,
     /// From its `CONNECT`.
     pub(crate) name: Option<String>,
     pub(crate) lang: Option<String>,

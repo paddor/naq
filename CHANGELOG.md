@@ -305,6 +305,19 @@ Notable changes to naq. The format follows
   count direct deliveries only.
 - `naq-proto`: `subject::is_subset` and `subject::collide`, for filters
   that hold or meet others.
+- `naq`: service imports. A request to an imported service goes on into
+  the exporting account with a reply of the server's (`_R_.` and two
+  tokens) and a `Nats-Request-Info` header: the requester's account and
+  round trip, with `share` its details too, as `nats-server` sends it.
+  Responses go back by that reply: one for a `singleton` service, any
+  number for `stream` and `chunked` ones until an empty one, all until the
+  response threshold. Imports chain, each naming the service on the way;
+  a request nobody gets is answered with no responders and the importer's
+  subject. Messages that came through a service import skip stream
+  imports of the account. At most 262144 requests wait per account.
+- `naq`: clients may not publish to `_GR_.`, `$GR.` or `$NRG.` subjects,
+  nor with `_R_.`, `$JS.ACK.`, `_GR_.` or `$GR.` replies, as in
+  `nats-server`: the message is dropped with a permissions violation.
 - `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
   `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
   per run, from the same configuration file for `nats-server` and naq

@@ -180,7 +180,7 @@ impl Conn {
                 let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
                 self.lane.tally.took(size);
                 self.client.tally.took(size);
-                if self.client.guarded.get() && !self.may_publish(p.subject) {
+                if (self.client.guarded.get() || reserved(&p)) && !self.may_send(&p) {
                     return Ok(Step::Next);
                 }
                 self.ok();
@@ -203,7 +203,11 @@ impl Conn {
                 self.busy = true;
                 self.pong();
             }
-            ClientOp::Pong => self.ping.pong(),
+            ClientOp::Pong => {
+                if let Some(rtt) = self.ping.pong(Instant::now()) {
+                    self.client.rtt.set(rtt);
+                }
+            }
             ClientOp::Connect(json) => return self.connect(json),
             _ => return Err(Close::Parse(ParseError::UnknownOp)),
         }
@@ -221,12 +225,20 @@ impl Conn {
             return;
         };
         let skip = if self.opts.echo { 0 } else { self.client.id };
-        let mut r = Routing::new(&self.lane, &mut self.out, p, buf, skip);
+        let mut r = Routing::new(&self.lane, &mut self.out, p, buf, skip).with_imports();
         r.route(&found);
+        let (mut delivered, tapped) = (r.delivered, r.tapped());
         if let Some(s) = r.stalled {
             self.stalled = Some(s);
         }
-        if !r.delivered {
+        if tapped {
+            let (got, stalled) = import(&self.lane, &mut self.out, &self.client, skip, p);
+            delivered |= got;
+            if stalled.is_some() {
+                self.stalled = stalled;
+            }
+        }
+        if !delivered {
             self.nobody_got(&index, p);
         }
     }
@@ -262,6 +274,8 @@ impl Conn {
         {
             let mut meta = self.client.meta.borrow_mut();
             (meta.name, meta.lang, meta.version) = names;
+            meta.websocket = self.via.ws;
+            meta.user = creds.user.clone().or_else(|| creds.nkey.clone());
         }
         self.client.headers.set(self.opts.headers);
         if let Some(auth) = self.lane.shared.auth_for(self.via.ws) {
@@ -321,6 +335,37 @@ impl Conn {
         self.client.account.set(grant.account);
     }
 
+    /// Whether it may send `p`, as `nats-server` checks a client's
+    /// publish: not to a subject a gateway reserves, as its permissions
+    /// say, not to `$NRG.`, and not with a reply imports and JetStream
+    /// reserve. If not, it is told.
+    #[cold]
+    #[inline(never)]
+    fn may_send(&self, p: &Pub<'_>) -> bool {
+        let subject = p.subject;
+        if subject.starts_with(b"_GR_.") && subject.len() > 5
+            || subject.starts_with(b"$GR.") && subject.len() > 4
+        {
+            self.error(&publish_violation(subject));
+            return false;
+        }
+        if self.client.guarded.get() && !self.may_publish(subject) {
+            return false;
+        }
+        if subject.starts_with(b"$NRG.") {
+            self.error(&publish_violation(subject));
+            return false;
+        }
+        if let Some(reply) = p.reply.filter(|r| is_reserved_reply(r)) {
+            self.error(&format!(
+                "Permissions Violation for Publish with Reply of {}",
+                quoted(reply)
+            ));
+            return false;
+        }
+        true
+    }
+
     /// Whether its permissions let it publish to `subject`; if not, it is
     /// told.
     #[cold]
@@ -330,10 +375,7 @@ impl Conn {
         if held.is_none_or(|h| h.may_publish(subject)) {
             return true;
         }
-        self.error(&format!(
-            "Permissions Violation for Publish to {}",
-            quoted(subject)
-        ));
+        self.error(&publish_violation(subject));
         false
     }
 
@@ -368,7 +410,8 @@ impl Conn {
         }
         let interval = self.ping.interval;
         let jitter = super::ping::jitter(interval, |n| self.lane.below(n));
-        self.ping.connected(Instant::now(), interval, jitter);
+        let rtt = self.ping.connected(Instant::now(), interval, jitter);
+        self.client.rtt.set(rtt);
         if !(0..=1).contains(&self.opts.protocol) {
             return Err(Close::Refused(super::BAD_PROTOCOL));
         }
@@ -443,6 +486,49 @@ impl Conn {
         }
         self.client.unsubscribe(&self.lane, u.sid);
     }
+}
+
+/// Sends `p`, published by `client` on `lane`, through the imports it met,
+/// to all but client `skip`, with `out` for what goes on. Returns whether
+/// they got it to anyone, and a subscriber past the stall mark.
+#[cold]
+#[inline(never)]
+fn import(
+    lane: &crate::lane::Lane,
+    out: &mut crate::lane::Outs,
+    client: &Client,
+    skip: u64,
+    p: &Pub<'_>,
+) -> (bool, Option<Rc<Client>>) {
+    let from = crate::imports::service::From {
+        client: Some(client),
+        skip,
+        source: crate::lane::Source::Client,
+    };
+    crate::imports::service::run(lane, out, p, client.account.get(), from)
+}
+
+/// Whether a client publish may hit a reserved subject or reply: they
+/// all start with `_` or `$`.
+#[inline]
+fn reserved(p: &Pub<'_>) -> bool {
+    let odd = |s: &[u8]| matches!(s.first(), Some(b'_' | b'$'));
+    odd(p.subject) || p.reply.is_some_and(odd)
+}
+
+/// Whether `reply` is one service imports, JetStream acks or gateways
+/// reserve, as `nats-server` keeps them from clients.
+fn is_reserved_reply(reply: &[u8]) -> bool {
+    let past = |prefix: &[u8]| reply.len() > prefix.len() && reply.starts_with(prefix);
+    reply.len() > 3 && reply.starts_with(b"_R_.")
+        || past(b"$JS.ACK.")
+        || past(b"_GR_.")
+        || past(b"$GR.")
+}
+
+/// The error for a publish to `subject` that is not allowed.
+fn publish_violation(subject: &[u8]) -> String {
+    format!("Permissions Violation for Publish to {}", quoted(subject))
 }
 
 /// Tells `client` that no one got its request on `subject`: a status 503
