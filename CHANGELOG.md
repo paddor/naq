@@ -262,6 +262,11 @@ Notable changes to naq. The format follows
   nearer. Only the leaf dials: its data goes over DEALERs to a ROUTER on
   every lane of the hub. Up to 64 routes, hubs and leafs. A leaf gone
   takes its interest; `/leafz` shows naq links.
+- `naq`: a naq leaf remote takes several `naq://` URLs, tried in turn and
+  shuffled unless `no_randomize`. A URL that refuses the connection, or
+  whose hub says nothing for 3 s, gives way to the next. A hub tells its
+  leafs where its cluster's servers take leafs, and those URLs come first
+  after a link, as in `nats-server`; `peer::Hello` has `leaf_urls`.
 - `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
   `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
   per run, from the same configuration file for `nats-server` and naq

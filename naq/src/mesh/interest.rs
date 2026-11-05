@@ -195,6 +195,7 @@ mod tests {
             cluster: b"c",
             data: b"",
             client_urls: b"",
+            leaf_urls: b"",
         })
     }
 

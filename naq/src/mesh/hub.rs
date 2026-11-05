@@ -3,6 +3,7 @@
 //! cluster's, and tells of its own.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,32 +53,60 @@ pub(crate) struct Leaf {
 pub(super) struct Me {
     /// The account every leaf binds.
     account: u32,
-    hello: Bytes,
+    epoch: u64,
+    /// The data endpoints of its lanes, separated by blanks.
+    data: String,
+    /// Where naq leafs dial it, as bound.
+    url: String,
 }
 
 impl Me {
-    /// The hub `Hello` of `shared`'s server of start `epoch`, whose lanes
-    /// take the data of leafs at `data`.
-    pub(super) fn new(shared: &Shared, data: &[String], epoch: u64) -> Me {
-        let account = super::leafnodes_account(shared);
+    /// What `shared`'s server of start `epoch` tells its leafs, whose lanes
+    /// take the data of leafs at `data`, and which leafs dial at
+    /// `leafnodes`.
+    pub(super) fn new(
+        shared: &Shared,
+        data: &[String],
+        epoch: u64,
+        leafnodes: Option<SocketAddr>,
+    ) -> Me {
+        Me {
+            account: super::leafnodes_account(shared),
+            epoch,
+            data: data.join(" "),
+            url: leafnodes.map(|a| a.to_string()).unwrap_or_default(),
+        }
+    }
+
+    /// The hub `Hello` of `shared`'s server, naming where leafs dial it and
+    /// the servers of `mesh` that are up.
+    fn hello(&self, shared: &Shared, mesh: &Mesh) -> Bytes {
         let cluster = shared.opts.cluster.as_ref().map_or("", |c| &c.name);
-        let data = data.join(" ");
+        let mut urls = self.url.clone();
+        for u in mesh
+            .peers
+            .borrow()
+            .iter()
+            .filter(|p| p.up)
+            .flat_map(|p| &p.leaf_urls)
+        {
+            urls.push(' ');
+            urls.push_str(u);
+        }
         let mut hello = Vec::new();
         Control::Hello(Hello {
             role: Role::Hub,
-            account: shared.accounts[account as usize].as_bytes(),
-            epoch,
+            account: shared.accounts[self.account as usize].as_bytes(),
+            epoch: self.epoch,
             server_id: shared.server_id.as_bytes(),
             name: shared.opts.server_name.as_bytes(),
             cluster: cluster.as_bytes(),
-            data: data.as_bytes(),
+            data: self.data.as_bytes(),
             client_urls: b"",
+            leaf_urls: urls.as_bytes(),
         })
         .encode(&mut hello);
-        Me {
-            account,
-            hello: hello.into(),
-        }
+        hello.into()
     }
 }
 
@@ -216,7 +245,7 @@ impl Hub {
             .find(|l| l.id == who)
         {
             l.heard.take(&Control::Hello(*h), &mut |_| {});
-            l.other.greet(Some(self.me.hello.clone()));
+            l.other.greet(Some(self.me.hello(&self.shared, &self.mesh)));
             return;
         }
         let first = self.lane.slots.first_leaf();
@@ -253,7 +282,7 @@ impl Hub {
             Sink::Router(self.ids.clone(), who.clone()),
             told.clone(),
         ));
-        other.greet(Some(self.me.hello.clone()));
+        other.greet(Some(self.me.hello(&self.shared, &self.mesh)));
         tokio::task::spawn_local(tell::send(other.clone(), || {}));
         let mut heard = Heard::default();
         heard.take(&Control::Hello(*h), &mut |_| {});

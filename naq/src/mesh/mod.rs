@@ -200,6 +200,8 @@ pub(crate) struct Peer {
     pub(crate) heard: Heard,
     /// Where its clients connect.
     pub(crate) client_urls: Vec<String>,
+    /// Where naq leafs dial it, if they may.
+    pub(crate) leaf_urls: Vec<String>,
 }
 
 /// Options of every socket of the mesh: heartbeats find a peer gone, and
@@ -340,7 +342,7 @@ pub(crate) async fn run(
     let _ = ready.send(Ok(bound));
     if let Some((host, r, events)) = leafs {
         let data = bind_data(shared.id, &lanes, &host, Data::Leafs).await;
-        let me = hub::Me::new(&shared, &data, epoch);
+        let me = hub::Me::new(&shared, &data, epoch, bound.leafnodes);
         tokio::task::spawn_local(hub::serve(lane.clone(), mesh.clone(), (r, events), me));
     }
     for at in 0..mesh.hubs.borrow().len() {
@@ -348,7 +350,7 @@ pub(crate) async fn run(
     }
     if let Some((c, r)) = cluster {
         let data = bind_data(shared.id, &lanes, &c.host, Data::Routes).await;
-        let me = control::Me::new(&shared, &c, &data, epoch);
+        let me = control::Me::new(&shared, &c, &data, epoch, bound.leafnodes);
         control::serve(&shared, &mesh, me, &c, r).await;
     }
 }

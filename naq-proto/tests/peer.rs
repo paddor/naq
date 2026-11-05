@@ -20,6 +20,7 @@ fn controls() -> Vec<Control<'static>> {
         cluster: b"c",
         data: b"tcp://127.0.0.1:1 tcp://127.0.0.1:2",
         client_urls: b"127.0.0.1:4222",
+        leaf_urls: b"127.0.0.1:7422",
     };
     vec![
         Control::Hello(hello),

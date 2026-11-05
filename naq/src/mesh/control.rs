@@ -1,6 +1,7 @@
 //! Control between the servers of the mesh: who they are, and their
 //! interest.
 
+use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -26,10 +27,18 @@ pub(super) struct Me {
 
 impl Me {
     /// The `Hello` of `shared`'s server of start `epoch` in cluster `c`,
-    /// with the data endpoints of its lanes.
-    pub(super) fn new(shared: &Shared, c: &Cluster, data: &[String], epoch: u64) -> Me {
+    /// with the data endpoints of its lanes, and the port naq leafs dial,
+    /// if any.
+    pub(super) fn new(
+        shared: &Shared,
+        c: &Cluster,
+        data: &[String],
+        epoch: u64,
+        leafnodes: Option<SocketAddr>,
+    ) -> Me {
         let data = data.join(" ");
         let urls = shared.addr.to_string();
+        let leaf_urls = leafnodes.map(|a| a.to_string()).unwrap_or_default();
         let mut hello = Vec::new();
         Control::Hello(Hello {
             role: Role::Route,
@@ -40,6 +49,7 @@ impl Me {
             cluster: c.name.as_bytes(),
             data: data.as_bytes(),
             client_urls: urls.as_bytes(),
+            leaf_urls: leaf_urls.as_bytes(),
         })
         .encode(&mut hello);
         Me {
@@ -184,6 +194,9 @@ fn met(shared: &Shared, mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
     p.client_urls = peer::words(h.client_urls)
         .map(|u| reachable_url(&text(u), &p.host))
         .collect();
+    p.leaf_urls = peer::words(h.leaf_urls)
+        .map(|u| reachable_url(&text(u), &p.host))
+        .collect();
     drop(peers);
     connect_urls(shared, mesh);
     true
@@ -208,7 +221,7 @@ fn connect_urls(shared: &Shared, mesh: &Mesh) {
 
 /// Client URL `url`, `host:port`, of a server dialed at `host`: on that
 /// host, where it listens on every address.
-fn reachable_url(url: &str, host: &str) -> String {
+pub(super) fn reachable_url(url: &str, host: &str) -> String {
     match url.rsplit_once(':') {
         Some(("0.0.0.0" | "[::]", port)) if host.contains(':') => format!("[{host}]:{port}"),
         Some(("0.0.0.0" | "[::]", port)) => format!("{host}:{port}"),

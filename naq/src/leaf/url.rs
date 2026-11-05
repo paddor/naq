@@ -65,9 +65,10 @@ impl HubUrl {
 /// `nats-server` orders them. Found ones take the scheme of the configured
 /// ones and the credentials of the first configured URL with some.
 pub(crate) fn rebuild(found: &[String], configured: &[HubUrl]) -> Vec<HubUrl> {
-    let scheme = match configured.first().map(|u| u.ws.is_some()) {
-        Some(true) if configured.iter().any(|u| u.wss) => "wss",
-        Some(true) => "ws",
+    let scheme = match configured.first().map(|u| (u.ws.is_some(), u.naq)) {
+        Some((true, _)) if configured.iter().any(|u| u.wss) => "wss",
+        Some((true, _)) => "ws",
+        Some((_, true)) => "naq",
         _ => "nats-leaf",
     };
     let creds = configured.iter().find(|u| u.user.is_some());
@@ -188,6 +189,9 @@ mod tests {
         let urls = rebuild(&["h4:4".to_owned()], &ws);
         assert_eq!((urls[0].ws.as_deref(), urls[0].wss), (Some(""), true));
         assert_eq!(rebuild(&[], &ws), ws);
+        let naq = [HubUrl::parse("naq://h1:1").unwrap()];
+        let urls = rebuild(&["h5:5".to_owned()], &naq);
+        assert!(urls[0].naq && urls[1].naq);
     }
 
     #[test]

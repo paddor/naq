@@ -906,6 +906,7 @@ fn a_server_that_asks_again_gets_a_snapshot_again() {
             cluster: b"c",
             data: b"",
             client_urls: b"",
+            leaf_urls: b"",
         });
         d.send(encode(hello)).await.unwrap();
         assert_eq!(snapshot(&d).await, ["a"]);

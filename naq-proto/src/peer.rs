@@ -147,6 +147,9 @@ pub struct Hello<'a> {
     pub data: &'a [u8],
     /// The URLs its clients connect to, separated by blanks.
     pub client_urls: &'a [u8],
+    /// The URLs naq leafs dial, separated by blanks: on a route, the
+    /// sender's; from a hub, those of the servers of its cluster.
+    pub leaf_urls: &'a [u8],
 }
 
 /// Interest of a server in `subject` of `account`: of plain subscriptions,
@@ -192,6 +195,7 @@ impl Control<'_> {
                     h.cluster,
                     h.data,
                     h.client_urls,
+                    h.leaf_urls,
                 ] {
                     short(out, s);
                 }
@@ -273,6 +277,7 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
                 cluster: r.short()?,
                 data: r.short()?,
                 client_urls: r.short()?,
+                leaf_urls: r.short()?,
             })
         }
         SNAPSHOT_START => Control::SnapshotStart {

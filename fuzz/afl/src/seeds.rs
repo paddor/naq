@@ -83,6 +83,7 @@ fn peer_frames() -> Vec<Vec<u8>> {
             cluster: b"c",
             data: b"tcp://127.0.0.1:1",
             client_urls: b"127.0.0.1:4222",
+            leaf_urls: b"",
         }),
         Control::SnapshotStart { epoch: 1, seq: 0 },
         Control::Entry(i),

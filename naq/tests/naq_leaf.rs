@@ -520,3 +520,77 @@ fn a_leaf_closes_every_channel_of_a_hub_link_gone() {
         until_heard(&mut p, &mut sub, "s");
     }
 }
+
+/// Waits until `f` holds of `s`'s `/leafz?subs=1`, for up to `wait`.
+fn leafz_within(s: &Server, wait: Duration, f: impl Fn(&serde_json::Value) -> bool) {
+    let deadline = Instant::now() + wait;
+    while !f(&get(s, "/leafz?subs=1")) {
+        assert!(Instant::now() < deadline, "/leafz: {}", get(s, "/leafz"));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_leaf_dials_the_next_url_of_its_remote_where_one_fails() {
+    let h = hub("hub");
+    // Refuses the connection.
+    let refused = free_port();
+    // Takes it, and says nothing.
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let l = Server::start(&Options {
+        remotes: vec![Remote {
+            urls: vec![
+                format!("naq://127.0.0.1:{refused}"),
+                format!("naq://127.0.0.1:{}", silent.local_addr().unwrap().port()),
+                format!("naq://127.0.0.1:{}", h.leafnode_addr().unwrap().port()),
+            ],
+            no_randomize: true,
+            ..Remote::default()
+        }],
+        ..base("leaf")
+    })
+    .unwrap();
+    // Past the wait for the silent one's `Hello`.
+    leafz_within(&h, 3 * WAIT, |z| z["leafnodes"] == 1);
+    leafz(&l, |z| z["leafnodes"] == 1);
+    // Shuffled, the URLs still all get their turn.
+    let shuffled = Server::start(&Options {
+        remotes: vec![Remote {
+            urls: vec![
+                format!("naq://127.0.0.1:{refused}"),
+                format!("naq://127.0.0.1:{}", h.leafnode_addr().unwrap().port()),
+            ],
+            ..Remote::default()
+        }],
+        ..base("shuffled")
+    })
+    .unwrap();
+    leafz(&shuffled, |z| z["leafnodes"] == 1);
+}
+
+#[test]
+fn a_leaf_dials_the_servers_its_hub_s_cluster_told_of_once_its_hub_is_gone() {
+    let mut hubs = pair("h", |i| Options {
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            account: None,
+        }),
+        ..base(&format!("h{i}"))
+    });
+    let deadline = Instant::now() + WAIT;
+    while hubs.iter().any(|h| get(h, "/routez")["num_routes"] != 1) {
+        assert!(Instant::now() < deadline, "routes down");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Only the first hub is configured.
+    let l = leaf("leaf", hubs[0].leafnode_addr().unwrap().port());
+    let mut sub = client(&l, "SUB s 1\r\n");
+    hears(&hubs[0], "s");
+    let other = hubs.pop().unwrap();
+    drop(hubs);
+    leafz_within(&other, 3 * WAIT, |z| z["leafnodes"] == 1);
+    hears(&other, "s");
+    let mut p = client(&other, "");
+    until_heard(&mut p, &mut sub, "s");
+}

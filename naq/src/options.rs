@@ -354,8 +354,10 @@ pub struct Remote {
     /// The hub's URLs, tried in turn (`url`, `urls`): `nats-leaf://` or
     /// `nats://` with `user:password@` or a token as `token@` if it takes
     /// them, or a bare `host:port`. The port defaults to 7422. A naq hub
-    /// is dialed over OMQ at one `naq://host:port`, with none of the
-    /// other options but `account`.
+    /// is dialed over OMQ at `naq://host:port` URLs, all of them naq ones,
+    /// with none of the other options but `account` and `no_randomize`.
+    /// A hub tells of the URLs of its cluster's servers, which come first
+    /// once it did.
     pub urls: Vec<String>,
     /// The local account the link binds (`account`); `None` for `$G`.
     pub account: Option<String>,

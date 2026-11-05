@@ -608,6 +608,10 @@ fn the_port_of_a_hub_comes_from_the_leafnodes_block() {
         .unwrap();
     assert_eq!(o.leafnodes, None);
     assert_eq!(o.remotes[0].urls, ["naq://h:1"]);
+    let o: Options = "leafnodes { remotes: [{urls: [\"naq://h:1\", \"naq://i:2\"]}] }"
+        .parse()
+        .unwrap();
+    assert_eq!(o.remotes[0].urls, ["naq://h:1", "naq://i:2"]);
 }
 
 #[test]
@@ -623,12 +627,12 @@ fn naq_leafs_and_hubs_that_cannot_work_are_an_error() {
             "leafnodes: no account \"B\"",
         ),
         (
-            "leafnodes { remotes: [{urls: [\"naq://h\", \"naq://i\"]}] }",
-            "leafnode remote: one naq url, alone",
+            "leafnodes { remotes: [{urls: [\"naq://h\", h]}] }",
+            "leafnode remote: naq and other urls mixed",
         ),
         (
-            "leafnodes { remotes: [{urls: [\"naq://h\", h]}] }",
-            "leafnode remote: one naq url, alone",
+            "leafnodes { remotes: [{urls: [h, \"naq://h\"]}] }",
+            "leafnode remote: naq and other urls mixed",
         ),
         (
             "leafnodes { remotes: [{url: \"naq://h\", deny_imports: a}] }",

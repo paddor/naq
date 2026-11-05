@@ -165,6 +165,7 @@ mod tests {
             cluster: b"",
             data: b"",
             client_urls: b"",
+            leaf_urls: b"",
         };
         for c in [
             Control::Hello(hello),

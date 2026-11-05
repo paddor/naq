@@ -2,21 +2,28 @@
 //! each, with a routing identity of its own for every connection, and data
 //! channels to every lane of the hub.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use naq_proto::peer::{self, Control, Hello, Role};
 use omq_tokio::{MonitorEvent, MonitorStream, Socket, SocketType};
 
-use super::control::reachable;
+use super::control::{reachable, reachable_url};
 use super::interest::{Change, Heard};
 use super::tell::{self, BEAT, Item, Other, Sink};
 use super::told::Told;
 use super::{Mesh, endpoint, resync, socket_options};
 use crate::lane::Control as LaneControl;
-use crate::leaf::HubUrl;
+use crate::leaf::{HubUrl, url};
 use crate::server::Shared;
+
+/// How long a hub has to say `Hello` on a new connection, before the next
+/// URL is tried.
+const GREET: Duration = Duration::from_secs(3);
 
 /// A naq hub dialed as a leaf.
 #[derive(Debug)]
@@ -66,33 +73,70 @@ impl Hub {
     }
 }
 
-/// Dials hub `at` of `mesh` again and again, with a new routing identity
-/// for every connection, and serves each until it is gone.
+/// Dials hub `at` of `mesh` again and again, at each of its URLs in turn,
+/// with a new routing identity for every connection, and serves each until
+/// it is gone. Once a hub said where the leafs of its cluster dial, those
+/// URLs come first, as `nats-server` orders them.
 pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
-    let (remote, to) = {
-        let hubs = mesh.hubs.borrow();
-        (hubs[at].remote, endpoint(&hubs[at].host, hubs[at].port))
+    let Some(lane) = crate::lane::get(shared.id, 0) else {
+        return;
     };
+    let remote = mesh.hubs.borrow()[at].remote;
+    let r = &shared.opts.remotes[remote];
+    // Valid: the options were checked.
+    let configured: Vec<HubUrl> = r
+        .urls
+        .iter()
+        .filter_map(|u| HubUrl::parse(u).ok())
+        .collect();
+    let mut urls: VecDeque<HubUrl> = configured.iter().cloned().collect();
+    if !r.no_randomize {
+        for i in (1..urls.len()).rev() {
+            let j = lane.below(i as u64 + 1) as usize;
+            urls.swap(i, j);
+        }
+    }
     let ctx = omq_tokio::Context::current();
+    let interval = shared.opts.leaf_reconnect;
     let mut n = 0u64;
     loop {
+        let Some(url) = urls.pop_front() else {
+            return;
+        };
+        urls.push_back(url.clone());
         n += 1;
         let id = format!("{}/{remote}/{n}", shared.server_id);
         let s = ctx.socket(SocketType::Dealer, socket_options(id.clone().into()));
         let events = s.monitor();
-        if s.connect(to.clone()).await.is_ok() {
+        let mut found = None;
+        if s.connect(endpoint(&url.host, url.port)).await.is_ok() {
+            {
+                let mut hubs = mesh.hubs.borrow_mut();
+                hubs[at].host.clone_from(&url.host);
+                hubs[at].port = url.port;
+            }
             let link = Link {
                 shared: &shared,
                 mesh: &mesh,
                 at,
                 id: id.into(),
                 s: &s,
+                found: RefCell::new(None),
             };
             link.serve(events).await;
             link.down();
+            found = link.found.take();
         }
         let _ = s.close().await;
-        tokio::time::sleep(shared.opts.leaf_reconnect).await;
+        let wait = match found {
+            Some(found) => {
+                urls = url::rebuild(&found, &configured).into();
+                interval
+            }
+            // Some jitter, so leafs do not dial a hub in step.
+            None => interval + interval.mul_f64(lane.below(1000) as f64 / 1000.0),
+        };
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -105,13 +149,18 @@ struct Link<'a> {
     /// The connection's routing identity.
     id: Bytes,
     s: &'a Socket,
+    /// Where the leafs of the hub's cluster dial, once it said.
+    found: RefCell<Option<Vec<String>>>,
 }
 
 impl Link<'_> {
     /// Says `Hello` once the connection is up, links the hub once it says
     /// its own, tells it of interest and takes its own, until the
-    /// connection is gone.
+    /// connection is gone, or until it fails or the hub says nothing in
+    /// time.
     async fn serve(&self, mut events: MonitorStream) {
+        let greet = tokio::time::sleep(GREET);
+        tokio::pin!(greet);
         let told = self.mesh.hubs.borrow()[self.at].told.clone();
         let other = Rc::new(Other::new(Sink::Dealer(self.s.clone()), told.clone()));
         let _stop = Stop(other.clone());
@@ -119,17 +168,23 @@ impl Link<'_> {
         let mut beat = tokio::time::interval(BEAT);
         loop {
             // Cancel-safe: a dropped receive takes no message or event, a
-            // dropped `notified` keeps its permit, and the interval keeps
-            // its deadline.
+            // dropped `notified` keeps its permit, and the interval and the
+            // sleep keep their deadlines.
             tokio::select! {
                 ev = events.recv() => match ev {
                     Ok(MonitorEvent::HandshakeSucceeded { .. })
                     | Err(omq_tokio::MonitorRecvError::Lagged(_)) => {
                         let _ = self.s.send(omq_tokio::Message::single(self.hello())).await;
                     }
-                    Ok(MonitorEvent::Disconnected { .. }) | Err(_) => return,
+                    Ok(
+                        MonitorEvent::Disconnected { .. }
+                        | MonitorEvent::ConnectDelayed { .. }
+                        | MonitorEvent::HandshakeFailed { .. },
+                    )
+                    | Err(_) => return,
                     Ok(_) => {}
                 },
+                () = &mut greet, if !self.is_up() => return,
                 msg = self.s.recv() => {
                     let Ok(msg) = msg else { return };
                     let Ok(bytes) = msg.into_bytes() else { continue };
@@ -173,6 +228,7 @@ impl Link<'_> {
             cluster: cluster.as_bytes(),
             data: b"",
             client_urls: b"",
+            leaf_urls: b"",
         })
         .encode(&mut out);
         out.into()
@@ -215,6 +271,10 @@ impl Link<'_> {
         let endpoints: Vec<String> = peer::words(h.data)
             .map(|e| reachable(&text(e), &host))
             .collect();
+        let found = peer::words(h.leaf_urls)
+            .map(|u| reachable_url(&text(u), &host))
+            .collect();
+        *self.found.borrow_mut() = Some(found);
         for tx in &*self.shared.lanes {
             tx.control(LaneControl::Link {
                 slot,

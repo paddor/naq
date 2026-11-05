@@ -5,7 +5,7 @@ mod creds;
 mod link;
 mod side;
 mod tls;
-mod url;
+pub(crate) mod url;
 
 pub(crate) use side::{Facts, LinkSide};
 pub(crate) use tls::Connector;
@@ -138,11 +138,11 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
     Ok(())
 }
 
-/// Why remote `r` of a naq hub at `urls` cannot run as given: it has one
-/// URL, and none of what a Go hub takes.
+/// Why remote `r` of a naq hub at `urls` cannot run as given: its URLs are
+/// all naq ones, and it has none of what a Go hub takes.
 fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
-    if urls.len() != 1 {
-        return Err("leafnode remote: one naq url, alone".into());
+    if !urls.iter().all(|u| u.naq) {
+        return Err("leafnode remote: naq and other urls mixed".into());
     }
     let more = r.credentials.is_some()
         || r.nkey.is_some()
@@ -150,7 +150,7 @@ fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
         || !r.deny_imports.is_empty()
         || !r.deny_exports.is_empty()
         || r.request_isolation
-        || urls[0].user.is_some();
+        || urls.iter().any(|u| u.user.is_some());
     if more {
         return Err("leafnode remote: naq url with options it takes no part of".into());
     }
