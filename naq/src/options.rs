@@ -99,11 +99,65 @@ pub struct Options {
 }
 
 /// Where the JWTs of accounts come from (`resolver`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Resolver {
     /// Those of [`Options::resolver_preload`] only (`MEMORY`).
     Memory,
+    /// All of them, kept in a directory and shared with the other servers
+    /// of the cluster (`type: full`).
+    Full(Directory),
+    /// Those in use, fetched from servers of the cluster with a full
+    /// resolver and kept in a directory a while (`type: cache`).
+    Cache(Directory),
+}
+
+/// The directory of a full or cache resolver, and how it keeps account
+/// JWTs: one file `<account key>.jwt` each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Directory {
+    /// Where the files are (`dir`); made if missing.
+    pub dir: std::path::PathBuf,
+    /// Whether a full resolver deletes accounts when asked, and how
+    /// (`allow_delete`, `hard_delete`). A cache removes them.
+    pub delete: Delete,
+    /// The most JWTs kept (`limit`): `None` for no limit in a full
+    /// resolver, 1000 in a cache, which then drops the least used.
+    pub limit: Option<usize>,
+    /// How often a full resolver compares its JWTs with those of the
+    /// other servers (`interval`).
+    pub interval: Duration,
+    /// How long a cache keeps a JWT since it was last used (`ttl`); `None`
+    /// keeps it until it expires or is dropped.
+    pub ttl: Option<Duration>,
+    /// How long a fetch from the other servers waits (`timeout`).
+    pub timeout: Duration,
+}
+
+impl Directory {
+    /// A directory resolver in `dir`, with the defaults of `nats-server`.
+    pub fn new(dir: impl Into<std::path::PathBuf>) -> Directory {
+        Directory {
+            dir: dir.into(),
+            delete: Delete::No,
+            limit: None,
+            interval: Duration::from_secs(60),
+            ttl: None,
+            timeout: Duration::from_millis(1900),
+        }
+    }
+}
+
+/// Whether a full resolver deletes accounts when asked, and how.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Delete {
+    /// It refuses (the default).
+    #[default]
+    No,
+    /// It renames the file to `<account key>.jwt.deleted` (`allow_delete`).
+    Rename,
+    /// It removes the file (`allow_delete` and `hard_delete`).
+    Remove,
 }
 
 /// A fixed mesh of naq servers (`cluster`): each lists the others, and

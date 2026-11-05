@@ -3,6 +3,7 @@
 //! their issuer's key over the header and the claims.
 
 pub(crate) mod claims;
+pub(crate) mod store;
 pub(crate) mod template;
 pub(crate) mod trust;
 pub(crate) mod validate;
@@ -122,6 +123,27 @@ struct Header {
 /// Decodes `token` as claims of `T`, signed by its issuer, which must be a
 /// key that may issue them. Time is not checked.
 pub(crate) fn decode<T: Body>(token: &str) -> Result<Claims<T>, Invalid> {
+    let claims = decoded::<T>(token, Some(T::TYPE))?;
+    if !claims.iss.starts_with(T::ISSUERS) {
+        return Err(Invalid::Issuer(T::TYPE));
+    }
+    Ok(claims)
+}
+
+/// Decodes `token` as claims of any kind, with a body of `T`, signed by
+/// its issuer, as nats-io/jwt decodes generic claims.
+pub(crate) fn decode_generic<T: DeserializeOwned + Default>(
+    token: &str,
+) -> Result<Claims<T>, Invalid> {
+    decoded(token, None)
+}
+
+/// Decodes `token` as claims of kind `kind`, or any, signed by its
+/// issuer.
+fn decoded<T: DeserializeOwned + Default>(
+    token: &str,
+    kind: Option<&'static str>,
+) -> Result<Claims<T>, Invalid> {
     let token = token.trim();
     if token.len() > MAX_SIZE {
         return Err(Invalid::TooLarge);
@@ -136,16 +158,16 @@ pub(crate) fn decode<T: Body>(token: &str) -> Result<Claims<T>, Invalid> {
         return Err(Invalid::Header);
     }
     let data = base64(payload)?;
-    let kind: Kind = serde_json::from_slice(&data).map_err(|e| Invalid::Claims(e.to_string()))?;
-    if kind.v1_type.is_some() {
+    let found: Kind = serde_json::from_slice(&data).map_err(|e| Invalid::Claims(e.to_string()))?;
+    if found.v1_type.is_some() {
         return Err(Invalid::Version(1));
     }
-    match kind.nats.version {
-        0 | 3.. => return Err(Invalid::Version(kind.nats.version)),
+    match found.nats.version {
+        0 | 3.. => return Err(Invalid::Version(found.nats.version)),
         _ => {}
     }
-    if kind.nats.kind != T::TYPE {
-        return Err(Invalid::Kind(T::TYPE));
+    if let Some(k) = kind.filter(|&k| k != found.nats.kind) {
+        return Err(Invalid::Kind(k));
     }
     let claims: Claims<T> =
         serde_json::from_slice(&data).map_err(|e| Invalid::Claims(e.to_string()))?;
@@ -153,9 +175,6 @@ pub(crate) fn decode<T: Body>(token: &str) -> Result<Claims<T>, Invalid> {
     let key = nkeys::KeyPair::from_public_key(&claims.iss).map_err(|_| Invalid::Signature)?;
     key.verify(signed.as_bytes(), &base64(sig)?)
         .map_err(|_| Invalid::Signature)?;
-    if !claims.iss.starts_with(T::ISSUERS) {
-        return Err(Invalid::Issuer(T::TYPE));
-    }
     Ok(claims)
 }
 

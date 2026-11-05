@@ -215,8 +215,48 @@ pub(crate) fn install(lane: &Lane) {
                 .tap(&r.filter(), Tap::Responses(r.clone()));
         }
     }
-    if lane.id == 0 && answers.contains(&true) {
+    if lane.id == 0 && (answers.contains(&true) || shared.accounts.growing()) {
         tokio::task::spawn_local(sweep(Arc::downgrade(shared)));
+    }
+}
+
+/// Puts the taps of the imports of `account`, an account added while the
+/// server runs, into the indexes of `lane`, unless they are there: those
+/// of its service imports, and the response taps of it and its
+/// exporters. Lane 0 tells the other servers.
+pub(crate) fn install_account(lane: &Lane, account: u32) {
+    let shared = &lane.shared;
+    let Some(a) = shared.accounts.get(account) else {
+        return;
+    };
+    let mut added: Vec<(u32, Vec<u8>)> = Vec::new();
+    for si in &a.imports().services {
+        let mut index = lane.index(account).borrow_mut();
+        if !index.has_tap(
+            &si.from,
+            |t| matches!(t, Tap::Service(x) if Arc::ptr_eq(x, si)),
+        ) {
+            index.tap(&si.from, Tap::Service(si.clone()));
+            added.push((account, si.from.to_vec()));
+        }
+        drop(index);
+        for to in [account, si.to] {
+            let Some(r) = shared.accounts.get(to).map(|x| &x.responses) else {
+                continue;
+            };
+            let filter = r.filter();
+            let mut index = lane.index(to).borrow_mut();
+            if !index.has_tap(
+                &filter,
+                |t| matches!(t, Tap::Responses(x) if Arc::ptr_eq(x, r)),
+            ) {
+                index.tap(&filter, Tap::Responses(r.clone()));
+                added.push((to, filter));
+            }
+        }
+    }
+    for (account, filter) in added {
+        lane.changed(account, &filter, None);
     }
 }
 

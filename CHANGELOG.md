@@ -378,6 +378,20 @@ Notable changes to naq. The format follows
   bearer users the account refuses and users of a signing key it dropped
   or changed go. Clients go when their account expires. Imports and
   exports of an account stay as they were at start.
+- `naq`: full and cache resolvers (`resolver { type: full|cache, dir }`;
+  `Resolver::Full`, `Resolver::Cache`, `Directory`, `Delete`), as
+  `nats-server` keeps them: one `<key>.jwt` file per account, with
+  `allow_delete`, `hard_delete`, `limit`, `interval`, `ttl` and `timeout`.
+  A client of an account the server lacks waits while the account is
+  fetched, from the directory or else from the other servers of the
+  cluster over `$SYS.REQ.ACCOUNT.<id>.CLAIMS.LOOKUP`, with the accounts
+  it imports from; its imports then link and work. The system account
+  answers `$SYS.REQ.CLAIMS.UPDATE`, the two update subjects, `LOOKUP`,
+  `PACK`, `LIST` and `DELETE` as `nats-server` does; a full resolver asks
+  the others for the JWTs it lacks every `interval`, a cache keeps those
+  in use up to its limit, and expired JWTs go. A deleted account's
+  clients go. Accounts may be added while the server runs, also for the
+  interest of other servers in an account this one lacks.
 - `naq`: the server ID is the server's NKey, and `INFO` tells its curve
   key (`xkey`), as in `nats-server`. With TLS, clients have the TLS
   timeout and a second to log in, unless `authorization { timeout }` says

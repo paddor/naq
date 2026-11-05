@@ -1260,10 +1260,6 @@ fn operator_mode_that_cannot_run_is_an_error() {
             "resolver: URL resolvers are not supported",
         ),
         (
-            "resolver: { type: full, dir: x }\n",
-            "resolver: directory resolvers are not supported",
-        ),
-        (
             "operator: nothere.jwt\n",
             "operator: cannot read \"nothere.jwt\": No such file or directory (os error 2)",
         ),
@@ -1291,7 +1287,11 @@ fn operator_keys_naq_cannot_use_are_an_error() {
             "resolver_preload: { A: [1] }\n".to_owned(),
             "resolver_preload: expected a JWT",
         ),
-        ("resolver: 1\n".to_owned(), "resolver: should be MEMORY"),
+        (
+            "resolver: 1\n".to_owned(),
+            "resolver: error parsing account resolver, should be MEM or  URL(\"url\") or a map \
+             containing dir and type state=[FULL|CACHE])",
+        ),
         (
             "operator: 1\n".to_owned(),
             "operator: expected JWTs or files",
@@ -1310,6 +1310,130 @@ fn operator_keys_naq_cannot_use_are_an_error() {
                 nkeys::KeyPair::new_operator().public_key()
             ),
             "conflicting options for 'TrustedKeys' and 'TrustedOperators'",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+/// An operator JWT, a system account key, a directory and its path as a
+/// config string, and the config lines of the first two.
+fn resolver_setup() -> (String, String, PathBuf, String, String) {
+    let op = operator_jwt();
+    let sys = nkeys::KeyPair::new_account().public_key();
+    let d = dir("resolver");
+    let path = format!("{:?}", d.join("jwt").display().to_string());
+    let head = format!("operator: {op}\nsystem_account: {sys}\n");
+    (op, sys, d, path, head)
+}
+
+#[test]
+fn directory_resolvers_come_from_their_maps() {
+    let (op, _, d, path, head) = resolver_setup();
+    let full = format!(
+        "{head}resolver {{ type: full, dir: {path}, allow_delete: true, hard_delete: true, \
+         limit: 5, interval: \"2m\", timeout: \"1s\" }}\n"
+    );
+    let o: Options = full.parse().unwrap();
+    let mut want = naq::Directory::new(d.join("jwt"));
+    want.delete = naq::Delete::Remove;
+    want.limit = Some(5);
+    want.interval = std::time::Duration::from_secs(120);
+    want.timeout = std::time::Duration::from_secs(1);
+    assert_eq!(o.resolver, Some(naq::Resolver::Full(want)));
+    let cache = format!("{head}resolver {{ type: CACHE, dir: {path}, ttl: \"1m\", limit: 0 }}\n");
+    let o: Options = cache.parse().unwrap();
+    let mut want = naq::Directory::new(d.join("jwt"));
+    want.delete = naq::Delete::Remove;
+    want.ttl = Some(std::time::Duration::from_secs(60));
+    assert_eq!(o.resolver, Some(naq::Resolver::Cache(want)));
+    let mem: Options = format!("operator: {op}\nresolver {{ type: mem }}\n")
+        .parse()
+        .unwrap();
+    assert_eq!(mem.resolver, Some(naq::Resolver::Memory));
+}
+
+#[test]
+fn directory_resolver_maps_that_do_not_hold_are_an_error() {
+    let (_, _, d, path, head) = resolver_setup();
+    let file = d.join("file");
+    std::fs::write(&file, "x").unwrap();
+    let at_file = format!("{:?}", file.display().to_string());
+    for (body, reason) in [
+        (
+            "type: full".to_owned(),
+            "dir has no value and needs to point to a directory",
+        ),
+        (
+            format!("type: full, dir: {at_file}"),
+            "dir needs to point to an accessible directory",
+        ),
+        (
+            format!("type: cache, dir: {path}, allow_delete: true"),
+            "CACHE does not accept allow_delete",
+        ),
+        (
+            format!("type: cache, dir: {path}, interval: \"1m\""),
+            "CACHE does not accept sync",
+        ),
+        (
+            format!("type: cache, dir: {path}, hard_delete: false"),
+            "CACHE does not accept hard_delete",
+        ),
+        (
+            format!("type: full, dir: {path}, ttl: \"1m\""),
+            "FULL does not accept ttl",
+        ),
+        (
+            format!("type: full, dir: {path}, hard_delete: true"),
+            "hard_delete has no effect without delete",
+        ),
+        (
+            format!("type: full, dir: {path}, timeout: \"0s\""),
+            "Fetch timeout 0s is too smal",
+        ),
+        (
+            format!("type: full, dir: {path}, limit: x"),
+            "limit: expected a number",
+        ),
+        (
+            format!("type: full, dir: {path}, allow_delete: 1"),
+            "allow_delete: expected true or false",
+        ),
+        (
+            format!("type: other, dir: {path}"),
+            "error parsing account resolver, should be MEM or  URL(\"url\") or a map \
+             containing dir and type state=[FULL|CACHE])",
+        ),
+    ] {
+        let text = format!("{head}resolver {{ {body} }}\n");
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => {
+                assert_eq!(r, format!("resolver: {reason}"), "{body}");
+            }
+            other => panic!("{body}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn directory_resolvers_need_an_operator_and_a_system_account() {
+    let (op, sys, _, path, _) = resolver_setup();
+    let key = nkeys::KeyPair::new_operator().public_key();
+    for (text, reason) in [
+        (
+            format!("operator: {op}\nresolver {{ type: full, dir: {path} }}\n"),
+            "using nats based account resolver - the system account needs to be specified in \
+             configuration or the operator jwt",
+        ),
+        (
+            format!(
+                "trusted_keys: [{key}]\nsystem_account: {sys}\nresolver {{ type: full, dir: {path} }}\n"
+            ),
+            "Could not start resolver: no operator key found",
         ),
     ] {
         match text.parse::<Options>() {

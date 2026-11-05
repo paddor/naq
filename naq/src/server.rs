@@ -36,6 +36,8 @@ pub(crate) struct Shared {
     pub(crate) accounts: Arc<crate::accounts::Accounts>,
     /// The system account, if there is one.
     pub(crate) system: Option<u32>,
+    /// The directory resolver, if there is one.
+    pub(crate) resolver: Option<crate::resolver::Dir>,
     /// The hash of the server's name that replies tracked for latency end
     /// in, with a system account, as `nats-server` makes it.
     pub(crate) node: Option<[u8; 8]>,
@@ -177,9 +179,10 @@ impl Server {
             accounts: Arc::new(crate::accounts::Accounts::new(
                 &accounts,
                 setup.imports,
-                false,
-                || crate::imports::service::Responses::new(random()),
+                setup.resolver.is_some(),
+                responses,
             )),
+            resolver: setup.resolver,
             ws_auth: Auth::websocket(opts, auth.as_ref()),
             auth,
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
@@ -255,6 +258,8 @@ struct Setup {
     leaf_tls: Box<[crate::leaf::Connector]>,
     /// The imports of each account, by id.
     imports: Box<[crate::imports::Imports]>,
+    /// The directory resolver, if there is one.
+    resolver: Option<crate::resolver::Dir>,
 }
 
 /// Checks `opts` and reads the TLS files they name: for the client port,
@@ -284,6 +289,7 @@ fn check(opts: &Options) -> Result<Setup, Error> {
         ws_tls,
         leaf_tls,
         imports,
+        resolver: crate::resolver::Dir::open(opts).map_err(Error::Options)?,
     })
 }
 
@@ -521,7 +527,7 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
 
 /// The hash of server name `name`: eight letters or digits from its
 /// SHA-256, as `nats-server` makes it.
-fn node(name: &str) -> [u8; 8] {
+pub(crate) fn node(name: &str) -> [u8; 8] {
     use sha2::Digest;
     let sum = sha2::Sha256::digest(name.as_bytes());
     let mut h = [0; 8];
@@ -529,6 +535,11 @@ fn node(name: &str) -> [u8; 8] {
         *b = crate::imports::service::base62(u64::from(s));
     }
     h
+}
+
+/// A response map with a fresh reply prefix, for a new account.
+pub(crate) fn responses() -> crate::imports::service::Responses {
+    crate::imports::service::Responses::new(random())
 }
 
 /// Numbers below what they are asked for, made from fresh random state.

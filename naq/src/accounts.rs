@@ -46,6 +46,8 @@ pub(crate) struct Accounts {
     ids: RwLock<FxHashMap<Box<str>, u32>>,
     /// Accounts added so far.
     len: AtomicU32,
+    /// More may be added than those it started with.
+    growing: bool,
 }
 
 /// One account and what the server keeps of it.
@@ -107,11 +109,16 @@ impl Accounts {
                 .collect(),
             ids: RwLock::default(),
             len: AtomicU32::new(0),
+            growing,
         };
         let mut imports = imports.into_iter();
         for name in names {
             let id = all.add(name, &mut random);
-            if let (Some(id), Some(i)) = (id, imports.next()) {
+            // None are set yet: an account of no imports may get them
+            // once its JWT comes.
+            if let (Some(id), Some(i)) = (id, imports.next())
+                && !i.is_empty()
+            {
                 all.get(id).map(|a| a.set_imports(i));
             }
         }
@@ -156,6 +163,11 @@ impl Accounts {
     /// The id of account `name`, if there is one: by its name in bytes.
     pub(crate) fn id_of(&self, name: &[u8]) -> Option<u32> {
         self.id(std::str::from_utf8(name).ok()?)
+    }
+
+    /// Whether accounts may be added past those of the options.
+    pub(crate) const fn growing(&self) -> bool {
+        self.growing
     }
 
     /// Chunks there is room for.

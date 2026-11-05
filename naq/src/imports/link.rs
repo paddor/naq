@@ -28,6 +28,24 @@ pub(crate) fn link(opts: &Options) -> Result<Box<[Imports]>, String> {
     Ok(l.all.into())
 }
 
+/// The imports of every account of `defs`, by id, all from JWTs: as
+/// `link` links them, leaving out what does not hold. Latency samples
+/// need a `system` account.
+pub(crate) fn relink(mut defs: Vec<Def>, system: bool) -> Vec<Imports> {
+    // Lenient: nothing is an error.
+    let _ = check_exports(&mut defs, system);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    let all = names.iter().map(|_| Imports::default()).collect();
+    let mut l = Linker {
+        defs: &defs,
+        names,
+        all,
+    };
+    let _ = l.streams();
+    let _ = l.services();
+    l.all
+}
+
 /// Checks the exports of every account on their own: those of a config
 /// that do not hold are an error, those of a JWT are left out. Latency
 /// samples need a `system` account.

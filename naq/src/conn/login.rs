@@ -52,7 +52,13 @@ pub(super) enum Later {
     Verify(Pending, Option<Call>),
     /// A callout to make.
     Call(Call),
+    /// An account to fetch, of this key, then the login again with what
+    /// the client gave.
+    Fetch(String, Box<(Creds, Names)>),
 }
+
+/// The names a client gives in its `CONNECT`.
+type Names = super::handshake::Names;
 
 impl Conn {
     /// Applies a `CONNECT`.
@@ -63,12 +69,25 @@ impl Conn {
             creds.fill(cookies);
         }
         self.client.headers.set(self.opts.headers);
+        self.login(creds, names, false)
+    }
+
+    /// Logs the client in with `creds` and `names`: once more if
+    /// `fetched`, the account its JWT named fetched since.
+    fn login(&mut self, mut creds: Creds, names: Names, fetched: bool) -> Result<Step, Close> {
         let shared = self.lane.shared.clone();
         let auth = shared.auth_for(self.via.ws);
         let check = auth.map(|auth| {
             let nonce = self.nonce.as_deref().unwrap_or_default();
             auth.check(&mut creds, nonce.as_bytes(), self.origin())
         });
+        if let Some(Check::Fetch(key)) = check {
+            if fetched || shared.resolver.is_none() {
+                return Err(Close::Auth);
+            }
+            let later = Later::Fetch(key, Box::new((creds, names)));
+            return Ok(Step::Login(Box::new(later)));
+        }
         let hook = shared
             .callouts
             .as_ref()
@@ -105,7 +124,7 @@ impl Conn {
                 return self.connected().map(|()| Step::Next);
             }
             (None, _) => return self.connected().map(|()| Step::Next),
-            (Some(Check::Fail), _) => return Err(Close::Auth),
+            (Some(Check::Fail | Check::Fetch(_)), _) => return Err(Close::Auth),
         };
         Ok(Step::Login(Box::new(later)))
     }
@@ -194,6 +213,28 @@ impl Conn {
     pub(super) async fn later(&mut self, l: Later) -> Result<(), Close> {
         match l {
             Later::Call(c) => self.callout(c).await,
+            Later::Fetch(key, given) => {
+                let (creds, names) = *given;
+                let lane = self.lane.clone();
+                let fetch = crate::resolver::fetch(&lane, &key);
+                tokio::pin!(fetch);
+                let fetched = loop {
+                    tokio::select! {
+                        biased;
+                        // Not logged in yet: a change of its account is
+                        // nothing to it.
+                        () = self.client.stop.notified() => if self.client.is_closed() {
+                            return Err(Close::Kicked);
+                        },
+                        id = &mut fetch => break id,
+                    }
+                };
+                fetched.ok_or(Close::Auth)?;
+                match self.login(creds, names, true)? {
+                    Step::Login(l) => Box::pin(self.later(*l)).await,
+                    _ => Ok(()),
+                }
+            }
             Later::Verify(p, call) => {
                 let grant = p.grant.clone();
                 let holds = tokio::task::spawn_blocking(move || p.holds()).await;
@@ -300,6 +341,10 @@ impl Conn {
         let account = u.account_expires.map(|t| (t, true));
         self.bounds.deadline = deadline(u.subs, 0, [user, account].into_iter().flatten().min());
         self.bounds.kept.clone_from(&u.kept);
+        if shared.resolver.is_some() {
+            // The taps of an account added since this lane was told.
+            crate::imports::service::install_account(&self.lane, u.account);
+        }
         self.client.meta.borrow_mut().user = Some(u.key.clone());
         Ok(())
     }

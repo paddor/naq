@@ -156,7 +156,16 @@ fn server_interest(
     i: usize,
     (account, subject, queue, all, of_leafs): Change<'_>,
 ) {
-    let Some(account) = shared.accounts.id_of(account) else {
+    // As `nats-server` with a resolver that fetches: an account it lacks
+    // is added without claims, for a client to fetch them.
+    let added = || {
+        let name = std::str::from_utf8(account).ok()?;
+        let resolves = shared.accounts.growing() && crate::jwt::is_key(name, 'A');
+        resolves
+            .then(|| shared.accounts.add(name, crate::server::responses))
+            .flatten()
+    };
+    let Some(account) = shared.accounts.id_of(account).or_else(added) else {
         return;
     };
     // Routes are few: their count fits.

@@ -17,6 +17,7 @@ fn trust_of(a: claims::Account) -> (Trust, String) {
     let t = Trust {
         signers: vec!["OP".into()],
         strict: false,
+        operator: "OP".into(),
         accounts: std::sync::RwLock::new(accounts),
     };
     (t, key)

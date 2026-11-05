@@ -67,6 +67,8 @@ pub(crate) enum Control {
     Fence(oneshot::Sender<()>),
     /// The claims of `account` changed: its clients check themselves again.
     Refresh { account: u32 },
+    /// Account `account` was added with imports: their taps go in.
+    Imports { account: u32 },
     /// Answered with the lane's clients, for monitoring.
     Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
     /// The server in slot `server` has `weight` members in `subject` of
@@ -368,6 +370,7 @@ impl Lane {
             Control::Fence(done) => {
                 let _ = done.send(());
             }
+            Control::Imports { account } => crate::imports::service::install_account(self, account),
             Control::Refresh { account } => {
                 for c in self.clients.borrow().values() {
                     if c.account.get() == account {
@@ -477,6 +480,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         c.install(&lane);
     }
     crate::sys::install(&lane);
+    crate::resolver::sync::start(&lane);
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;
     let l = lane.clone();

@@ -39,7 +39,7 @@ pub(super) fn update(lane: &Lane, out: &mut Outs, m: &Pub<'_>) -> bool {
 /// The account update subject `subject` names: token 3 of
 /// `$SYS.REQ.ACCOUNT.<id>.CLAIMS.UPDATE`, or 2 of
 /// `$SYS.ACCOUNT.<id>.CLAIMS.UPDATE`.
-fn account_of(subject: &[u8]) -> Option<String> {
+pub(super) fn account_of(subject: &[u8]) -> Option<String> {
     let tokens: Vec<&[u8]> = subject.split(|&b| b == b'.').collect();
     let id = match tokens.len() {
         6 => tokens[3],

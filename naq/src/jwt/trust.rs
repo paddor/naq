@@ -12,7 +12,7 @@ use super::claims::{self, NO_LIMIT};
 use super::{Claims, decode, now};
 use crate::auth::Origin;
 use crate::perms::Perms;
-use crate::{ConnectionType, Options};
+use crate::{ConnectionType, Options, Resolver};
 
 /// The operators a server trusts, and the accounts they signed.
 #[derive(Debug)]
@@ -22,6 +22,9 @@ pub(crate) struct Trust {
     /// Accounts must be signed by an operator's signing key, and users by
     /// an account's signing key.
     strict: bool,
+    /// The key of the first operator, if any: the one `nats-server` checks
+    /// strict signing against.
+    operator: String,
     /// The accounts of JWTs, by public key. Updates replace them.
     accounts: RwLock<FxHashMap<String, Arc<JwtAccount>>>,
 }
@@ -135,6 +138,18 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
             return Err("system_account in config and operator JWT must be identical".into());
         }
     }
+    if matches!(opts.resolver, Some(Resolver::Full(_) | Resolver::Cache(_))) {
+        if opts.operators.is_empty() {
+            return Err("Could not start resolver: no operator key found".into());
+        }
+        if opts.system_account.is_none() && system_account(opts).is_none() {
+            return Err(
+                "using nats based account resolver - the system account needs to be \
+                        specified in configuration or the operator jwt"
+                    .into(),
+            );
+        }
+    }
     for (key, jwt) in &opts.resolver_preload {
         if !super::is_key(key, 'A') {
             return Err(format!(
@@ -172,12 +187,16 @@ impl Trust {
         }
         let mut signers = opts.trusted_keys.clone();
         let mut strict = false;
+        let mut operator = String::new();
         for c in opts
             .operators
             .iter()
             .filter_map(|op| decode::<claims::Operator>(op).ok())
         {
             strict |= c.nats.strict_signing_key_usage;
+            if operator.is_empty() {
+                operator.clone_from(&c.sub);
+            }
             if !c.nats.strict_signing_key_usage {
                 signers.push(c.sub.clone());
             }
@@ -186,6 +205,7 @@ impl Trust {
         let t = Trust {
             signers,
             strict,
+            operator,
             accounts: RwLock::default(),
         };
         let system = opts.system_account.clone().or_else(|| system_account(opts));
@@ -568,6 +588,7 @@ fn clock(t: &str) -> Option<u64> {
     (h < 24 && m < 60 && s < 60 && parts.next().is_none()).then_some(h * 3600 + m * 60 + s)
 }
 
+pub(crate) mod dir;
 pub(crate) mod live;
 
 #[cfg(test)]

@@ -56,7 +56,7 @@ pub(crate) fn of(opts: &Options, names: &[String]) -> Vec<Def> {
 }
 
 /// The account `name` of JWT body `a`.
-fn of_jwt(name: &str, a: &claims::Account) -> Def {
+pub(crate) fn of_jwt(name: &str, a: &claims::Account) -> Def {
     let mut d = Def {
         name: name.to_owned(),
         signing_keys: a.signing_keys.0.keys().cloned().collect(),

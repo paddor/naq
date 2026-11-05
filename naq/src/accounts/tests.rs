@@ -23,6 +23,7 @@ fn accounts_keep_their_ids_by_name() {
 fn accounts_are_added_only_where_there_is_room() {
     let fixed = Accounts::of(&["$G"]);
     assert_eq!(fixed.room(), 1);
+    assert!(!fixed.growing());
     let added: Vec<Option<u32>> = (1..=CHUNK)
         .map(|n| fixed.add(&format!("A{n}"), prefix))
         .collect();
@@ -30,7 +31,7 @@ fn accounts_are_added_only_where_there_is_room() {
     assert_eq!(added[CHUNK - 2], Some(255));
     assert_eq!(added[CHUNK - 1], None, "the one chunk is full");
     let growing = Accounts::new(&["$G".to_owned()], [], true, prefix);
-    assert!(growing.room() > 1);
+    assert!(growing.room() > 1 && growing.growing());
     for n in 1..=CHUNK {
         growing.add(&format!("A{n}"), prefix);
     }

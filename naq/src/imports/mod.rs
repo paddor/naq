@@ -1,10 +1,10 @@
 //! Subjects shared between accounts: exports, and the imports of them,
 //! linked and checked as `nats-server` checks them.
 
-mod defs;
+pub(crate) mod defs;
 mod info;
 pub(crate) mod latency;
-mod link;
+pub(crate) mod link;
 pub(crate) mod service;
 pub(crate) mod shadow;
 mod transform;
@@ -154,6 +154,13 @@ impl ServiceImport {
 pub(crate) struct Imports {
     pub(crate) streams: Vec<std::sync::Arc<StreamImport>>,
     pub(crate) services: Vec<std::sync::Arc<ServiceImport>>,
+}
+
+impl Imports {
+    /// Whether there are none.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.streams.is_empty() && self.services.is_empty()
+    }
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ mod mesh;
 mod monitor;
 mod options;
 mod perms;
+mod resolver;
 mod server;
 mod stats;
 mod sys;
@@ -58,8 +59,9 @@ mod ws;
 
 pub use error::Error;
 pub use options::{
-    Account, AuthCallout, Cluster, ConnectionType, Cookies, Export, ExportKind, Import, ImportKind,
-    Latency, Leafnodes, Login, Options, Permissions, Remote, RemoteTls, Resolver, ResponseType,
-    Responses, Rules, Sampling, ServiceExport, Tls, User, Websocket, WebsocketAuth,
+    Account, AuthCallout, Cluster, ConnectionType, Cookies, Delete, Directory, Export, ExportKind,
+    Import, ImportKind, Latency, Leafnodes, Login, Options, Permissions, Remote, RemoteTls,
+    Resolver, ResponseType, Responses, Rules, Sampling, ServiceExport, Tls, User, Websocket,
+    WebsocketAuth,
 };
 pub use server::Server;

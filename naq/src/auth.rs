@@ -156,6 +156,9 @@ pub(crate) enum Check {
     Bcrypt(Pending),
     /// A user JWT holds: its user.
     User(Box<crate::jwt::trust::User>),
+    /// A user JWT of an account the server does not have: it may hold
+    /// once a resolver fetched the account of this key.
+    Fetch(String),
 }
 
 /// A bcrypt comparison still to make: slow by design, so not on a lane.
@@ -190,15 +193,23 @@ impl Pending {
 pub(crate) const SYSTEM: &str = "$SYS";
 
 /// Account names by id: `$G` first, then those of `opts`, then those of
-/// the JWTs preloaded, by public key, then `$SYS` if the server makes it.
+/// the JWTs preloaded, by public key, then `$SYS` if the server makes it,
+/// or the system account a directory resolver is to find.
 pub(crate) fn accounts(opts: &Options) -> Box<[String]> {
-    let made = system_name(opts).is_none()
+    let named = system_name(opts);
+    let made = named.is_none()
         && !opts.no_system_account
         && !opts.accounts.iter().any(|a| a.name == SYSTEM);
+    let in_dir = matches!(
+        opts.resolver,
+        Some(crate::Resolver::Full(_) | crate::Resolver::Cache(_))
+    );
+    let found = named.filter(|n| in_dir && !opts.resolver_preload.iter().any(|(k, _)| k == n));
     std::iter::once("$G".to_owned())
         .chain(opts.accounts.iter().map(|a| a.name.clone()))
         .chain(opts.resolver_preload.iter().map(|(key, _)| key.clone()))
         .chain(made.then(|| SYSTEM.to_owned()))
+        .chain(found)
         .collect()
 }
 
@@ -525,11 +536,13 @@ impl Auth {
     /// certificate names becomes its user, as in `nats-server`.
     pub(crate) fn check(&self, c: &mut Creds, nonce: &[u8], origin: Origin<'_>) -> Check {
         if let Some(t) = &self.trust {
-            let user = c
-                .jwt
-                .as_deref()
-                .and_then(|jwt| t.login(jwt, c.sig.as_deref(), nonce, origin));
-            return user.map_or(Check::Fail, |u| Check::User(Box::new(u)));
+            let Some(jwt) = c.jwt.as_deref() else {
+                return Check::Fail;
+            };
+            return match t.login(jwt, c.sig.as_deref(), nonce, origin) {
+                Some(u) => Check::User(Box::new(u)),
+                None => t.missing(jwt).map_or(Check::Fail, Check::Fetch),
+            };
         }
         let free = self.no_auth_user.as_ref().filter(|_| c.is_blank());
         // NKeys first, where there are any, as `nats-server` takes them.

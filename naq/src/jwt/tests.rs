@@ -6,7 +6,11 @@ use super::claims::{Account, Activation, Kind, Operator, User};
 use super::*;
 
 /// `payload` as a JWT signed by `kp` under header `header`.
-fn mint_with(kp: &KeyPair, header: &serde_json::Value, payload: &serde_json::Value) -> String {
+pub(super) fn mint_with(
+    kp: &KeyPair,
+    header: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> String {
     let h = BASE64URL_NOPAD.encode(header.to_string().as_bytes());
     let p = BASE64URL_NOPAD.encode(payload.to_string().as_bytes());
     let sig = kp.sign(format!("{h}.{p}").as_bytes()).unwrap();
