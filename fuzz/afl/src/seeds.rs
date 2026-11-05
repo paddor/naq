@@ -65,7 +65,7 @@ fn websocket() -> Vec<Vec<u8>> {
 
 /// Peer control messages of every kind, and a batch.
 fn peer_frames() -> Vec<Vec<u8>> {
-    use naq_proto::peer::{self, Control, Hello, Interest, Record, Role};
+    use naq_proto::peer::{self, Connect, Control, Hello, Interest, Record, Role};
     let i = Interest {
         account: b"$G",
         subject: b"a.*",
@@ -84,6 +84,7 @@ fn peer_frames() -> Vec<Vec<u8>> {
             data: b"tcp://127.0.0.1:1",
             client_urls: b"127.0.0.1:4222",
             leaf_urls: b"",
+            nonce: b"",
         }),
         Control::SnapshotStart { epoch: 1, seq: 0 },
         Control::Entry(i),
@@ -96,6 +97,11 @@ fn peer_frames() -> Vec<Vec<u8>> {
         Control::Beat { epoch: 1, seq: 1 },
         Control::Resync,
         Control::Error(b"Loop detected"),
+        Control::Connect(Connect {
+            nkey: b"UABC",
+            sig: b"c2ln",
+            ..Connect::default()
+        }),
     ];
     let mut all: Vec<Vec<u8>> = controls
         .iter()

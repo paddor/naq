@@ -1,6 +1,8 @@
-//! naq leafs that dial this server as their hub, over OMQ. Each gets a
-//! slot and a sender of its own, hears of all interest but its own and its
-//! cluster's, and tells of its own.
+//! naq leafs that dial this server as their hub, over OMQ. Each that logs
+//! in gets a slot and a sender of its own, hears of all interest but its
+//! own and its cluster's, and tells of its own.
+
+mod login;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -10,6 +12,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use naq_proto::peer::{self, Control, Hello, Role};
+
+use login::{Greeted, Logins, Outcome};
 use omq_tokio::{IdentitySocket, Message, MonitorEvent, MonitorStream, Socket};
 use tokio::time::Instant;
 
@@ -80,8 +84,8 @@ impl Me {
     }
 
     /// The hub `Hello` of `shared`'s server, naming where leafs dial it and
-    /// the servers of `mesh` that are up.
-    fn hello(&self, shared: &Shared, mesh: &Mesh) -> Bytes {
+    /// the servers of `mesh` that are up, with `nonce` for a leaf to sign.
+    fn hello(&self, shared: &Shared, mesh: &Mesh, nonce: &str) -> Bytes {
         let cluster = shared.opts.cluster.as_ref().map_or("", |c| &c.name);
         let mut urls = self.url.clone();
         for u in mesh
@@ -105,6 +109,7 @@ impl Me {
             data: self.data.as_bytes(),
             client_urls: b"",
             leaf_urls: urls.as_bytes(),
+            nonce: nonce.as_bytes(),
         })
         .encode(&mut hello);
         hello.into()
@@ -125,6 +130,7 @@ pub(super) async fn serve(
         return;
     };
     let mut hub = Guard(Hub {
+        logins: Logins::new(&lane.shared, me.account),
         shared: lane.shared.clone(),
         lane,
         mesh,
@@ -134,9 +140,9 @@ pub(super) async fn serve(
     });
     let mut beat = tokio::time::interval(BEAT);
     loop {
-        // Cancel-safe: a dropped receive takes no message or event, a
-        // dropped `notified` keeps its permit, and the interval keeps its
-        // deadline.
+        // Cancel-safe: a dropped receive takes no message, event or
+        // outcome, a dropped `notified` keeps its permit, and the interval
+        // keeps its deadline.
         tokio::select! {
             ev = events.recv() => match ev {
                 Ok(MonitorEvent::Disconnected { peer, .. }) => {
@@ -158,6 +164,7 @@ pub(super) async fn serve(
                     l.other.tell(false);
                 }
             }
+            o = hub.0.logins.next() => hub.0.outcome(o),
             _ = beat.tick() => hub.0.beat(),
         }
     }
@@ -191,6 +198,7 @@ struct Hub {
     me: Me,
     /// Identities of leafs gone, newest last.
     dead: VecDeque<Bytes>,
+    logins: Logins,
 }
 
 impl Hub {
@@ -199,11 +207,19 @@ impl Hub {
         let Ok(c) = peer::decode(msg) else {
             return;
         };
-        if let Control::Hello(h) = &c {
-            if h.role == Role::Leaf && !self.dead.contains(&who) {
-                self.hello(who, h);
+        match &c {
+            Control::Hello(h) => {
+                if h.role == Role::Leaf && !self.dead.contains(&who) {
+                    self.hello(who, h);
+                }
+                return;
             }
-            return;
+            Control::Connect(cn) => {
+                let o = self.logins.connect(&who, cn);
+                self.outcome(o);
+                return;
+            }
+            _ => {}
         }
         let mut leafs = self.mesh.leafs.borrow_mut();
         let Some(l) = leafs.iter_mut().find(|l| l.id == who) else {
@@ -247,31 +263,38 @@ impl Hub {
         }
     }
 
-    /// Links the leaf of routing identity `who`, which said `Hello` `h`:
-    /// in place of an older link of the same remote, and once.
+    /// Greets the leaf of routing identity `who`, which said `Hello` `h`,
+    /// with a nonce to log in with. One linked starts over.
     fn hello(&mut self, who: Bytes, h: &Hello<'_>) {
-        let remote = remote_of(&who);
+        self.unlink(&who);
+        let nonce = self.logins.greet(who.clone(), h);
+        let hello = self.me.hello(&self.shared, &self.mesh, &nonce);
+        self.send(who, hello);
+    }
+
+    /// Acts on what came of a login.
+    fn outcome(&mut self, o: Outcome) {
+        match o {
+            Outcome::Pass(g, account) => self.admit(g, account),
+            Outcome::Fail(who) => self.send(who, error("Authorization Violation")),
+            Outcome::Later | Outcome::Unknown => {}
+        }
+    }
+
+    /// Links leaf `g`, which logged in to `account`: in place of an older
+    /// link of the same remote, in a free slot.
+    fn admit(&mut self, g: Greeted, account: u32) {
+        let remote = remote_of(&g.who);
         let older: Vec<Bytes> = self
             .mesh
             .leafs
             .borrow()
             .iter()
-            .filter(|l| l.id != who && remote_of(&l.id) == remote)
+            .filter(|l| remote_of(&l.id) == remote)
             .map(|l| l.id.clone())
             .collect();
         for id in older {
             self.unlink(&id);
-        }
-        if let Some(l) = self
-            .mesh
-            .leafs
-            .borrow_mut()
-            .iter_mut()
-            .find(|l| l.id == who)
-        {
-            l.heard.take(&Control::Hello(*h), &mut |_| {});
-            l.other.greet(Some(self.me.hello(&self.shared, &self.mesh)));
-            return;
         }
         let first = self.lane.slots.first_leaf();
         let slot = {
@@ -281,18 +304,25 @@ impl Hub {
         let Some(slot) = slot else {
             return;
         };
-        self.link(slot, who, h);
+        self.link(slot, g, account);
     }
 
-    /// Puts the leaf of routing identity `who`, which said `h`, in slot
-    /// `slot`, and starts telling it.
-    fn link(&self, slot: u16, who: Bytes, h: &Hello<'_>) {
-        let account = self.me.account;
+    /// Sends `m` to the leaf of routing identity `who`, linked or not.
+    fn send(&self, who: Bytes, m: Bytes) {
+        let ids = self.ids.clone();
+        tokio::task::spawn_local(async move {
+            let _ = ids.send_to(&who, Message::single(m)).await;
+        });
+    }
+
+    /// Puts leaf `g`, bound to `account`, in slot `slot`, and starts telling
+    /// it.
+    fn link(&self, slot: u16, g: Greeted, account: u32) {
         for tx in &*self.shared.lanes {
             tx.control(LaneControl::Link {
                 slot,
-                id: who.to_vec().into(),
-                cluster: h.cluster.into(),
+                id: g.who.to_vec().into(),
+                cluster: g.cluster.to_vec().into(),
                 account,
             });
         }
@@ -301,23 +331,20 @@ impl Hub {
             self.shared.accounts.clone(),
             self.mesh.leaf_wake.clone(),
         ));
-        let cluster: Rc<[u8]> = h.cluster.into();
-        self.fill(&told, slot, &cluster);
+        self.fill(&told, slot, &g.cluster, account);
         let other = Rc::new(Other::new(
-            Sink::Router(self.ids.clone(), who.clone()),
+            Sink::Router(self.ids.clone(), g.who.clone()),
             told.clone(),
         ));
-        other.greet(Some(self.me.hello(&self.shared, &self.mesh)));
+        other.greet(None);
         tokio::task::spawn_local(tell::send(other.clone(), || {}));
-        let mut heard = Heard::default();
-        heard.take(&Control::Hello(*h), &mut |_| {});
         self.mesh.leafs.borrow_mut().push(Leaf {
             slot,
-            id: who,
-            name: String::from_utf8_lossy(h.name).into_owned(),
-            cluster,
+            id: g.who,
+            name: g.name,
+            cluster: g.cluster,
             account,
-            heard,
+            heard: Heard::of(g.epoch),
             told,
             other,
             link: self.shared.next_client(),
@@ -326,9 +353,9 @@ impl Hub {
     }
 
     /// Fills `told` with what the leaf in slot `slot`, of cluster
-    /// `cluster`, hears of now. Its snapshot carries it: no delta goes.
-    fn fill(&self, told: &Told, slot: u16, cluster: &[u8]) {
-        let account = self.me.account;
+    /// `cluster`, bound to `account`, hears of now. Its snapshot carries
+    /// it: no delta goes.
+    fn fill(&self, told: &Told, slot: u16, cluster: &[u8], account: u32) {
         let index = self.lane.index(account).borrow();
         let routes = self.mesh.peers.borrow();
         let leaf = ForLeaf {
@@ -391,9 +418,13 @@ impl Hub {
         true
     }
 
-    /// Beats to every leaf; lets those go that fell silent.
-    fn beat(&self) {
+    /// Beats to every leaf; lets those go that fell silent, and those that
+    /// did not log in in time.
+    fn beat(&mut self) {
         let now = Instant::now();
+        for who in self.logins.expire(now) {
+            self.send(who, error("Authentication Timeout"));
+        }
         let silent: Vec<Bytes> = self
             .mesh
             .leafs

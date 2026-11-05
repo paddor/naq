@@ -50,6 +50,7 @@ impl Me {
             data: data.as_bytes(),
             client_urls: urls.as_bytes(),
             leaf_urls: leaf_urls.as_bytes(),
+            nonce: b"",
         })
         .encode(&mut hello);
         Me {

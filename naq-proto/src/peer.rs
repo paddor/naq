@@ -45,6 +45,7 @@ const DELTA: u8 = 5;
 const BEAT: u8 = 6;
 const RESYNC: u8 = 7;
 const ERROR: u8 = 8;
+const CONNECT: u8 = 9;
 const BATCH: u8 = 16;
 
 const REPLY: u8 = 1;
@@ -116,6 +117,8 @@ pub enum Control<'a> {
     /// The link cannot go on, and the sender lets it go: why, as
     /// `nats-server` words its `-ERR`.
     Error(&'a [u8]),
+    /// A leaf's credentials, after its hub's [`Hello`].
+    Connect(Connect<'a>),
 }
 
 /// What the sender of a [`Hello`] is to the receiver.
@@ -154,6 +157,24 @@ pub struct Hello<'a> {
     /// The URLs naq leafs dial, separated by blanks: on a route, the
     /// sender's; from a hub, those of the servers of its cluster.
     pub leaf_urls: &'a [u8],
+    /// From a hub, what its leaf signs with an NKey; else empty.
+    pub nonce: &'a [u8],
+}
+
+/// What a leaf proves who it is with, as the `CONNECT` of a Go leaf does:
+/// each field empty if not given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Connect<'a> {
+    /// User name.
+    pub user: &'a [u8],
+    /// Its password.
+    pub pass: &'a [u8],
+    /// A token, in place of a user.
+    pub token: &'a [u8],
+    /// A public user NKey, in place of a user.
+    pub nkey: &'a [u8],
+    /// The hub's nonce, signed with the NKey's seed, in base64.
+    pub sig: &'a [u8],
 }
 
 /// Interest of a server in `subject` of `account`: of plain subscriptions,
@@ -183,27 +204,7 @@ impl Control<'_> {
     /// Appends the encoded message.
     pub fn encode(&self, out: &mut impl BufMut) {
         match self {
-            Control::Hello(h) => {
-                out.put_u8(HELLO);
-                out.put_u8(VERSION);
-                out.put_u8(match h.role {
-                    Role::Route => 0,
-                    Role::Leaf => 1,
-                    Role::Hub => 2,
-                });
-                out.put_u64_le(h.epoch);
-                for s in [
-                    h.account,
-                    h.server_id,
-                    h.name,
-                    h.cluster,
-                    h.data,
-                    h.client_urls,
-                    h.leaf_urls,
-                ] {
-                    short(out, s);
-                }
-            }
+            Control::Hello(h) => h.encode(out),
             Control::SnapshotStart { epoch, seq } => {
                 out.put_u8(SNAPSHOT_START);
                 out.put_u64_le(*epoch);
@@ -237,6 +238,37 @@ impl Control<'_> {
                 out.put_u8(ERROR);
                 short(out, why);
             }
+            Control::Connect(c) => {
+                out.put_u8(CONNECT);
+                for s in [c.user, c.pass, c.token, c.nkey, c.sig] {
+                    short(out, s);
+                }
+            }
+        }
+    }
+}
+
+impl Hello<'_> {
+    fn encode(&self, out: &mut impl BufMut) {
+        out.put_u8(HELLO);
+        out.put_u8(VERSION);
+        out.put_u8(match self.role {
+            Role::Route => 0,
+            Role::Leaf => 1,
+            Role::Hub => 2,
+        });
+        out.put_u64_le(self.epoch);
+        for s in [
+            self.account,
+            self.server_id,
+            self.name,
+            self.cluster,
+            self.data,
+            self.client_urls,
+            self.leaf_urls,
+            self.nonce,
+        ] {
+            short(out, s);
         }
     }
 }
@@ -286,6 +318,7 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
                 data: r.short()?,
                 client_urls: r.short()?,
                 leaf_urls: r.short()?,
+                nonce: r.short()?,
             })
         }
         SNAPSHOT_START => Control::SnapshotStart {
@@ -305,6 +338,13 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
         },
         RESYNC => Control::Resync,
         ERROR => Control::Error(r.short()?),
+        CONNECT => Control::Connect(Connect {
+            user: r.short()?,
+            pass: r.short()?,
+            token: r.short()?,
+            nkey: r.short()?,
+            sig: r.short()?,
+        }),
         k => return Err(Error::Kind(k)),
     };
     r.done()?;

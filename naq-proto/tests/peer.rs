@@ -1,7 +1,16 @@
 //! The peer wire: every message decodes to what was encoded, and broken
 //! input is an error, never a panic.
 
-use naq_proto::peer::{self, Batch, Control, Error, Hello, Interest, Record, Role};
+use naq_proto::peer::{self, Batch, Connect, Control, Error, Hello, Interest, Record, Role};
+
+/// A leaf's credentials.
+const CONNECT: Connect<'static> = Connect {
+    user: b"u",
+    pass: b"p",
+    token: b"",
+    nkey: b"",
+    sig: b"",
+};
 
 fn controls() -> Vec<Control<'static>> {
     let i = Interest {
@@ -21,6 +30,7 @@ fn controls() -> Vec<Control<'static>> {
         data: b"tcp://127.0.0.1:1 tcp://127.0.0.1:2",
         client_urls: b"127.0.0.1:4222",
         leaf_urls: b"127.0.0.1:7422",
+        nonce: b"",
     };
     vec![
         Control::Hello(hello),
@@ -58,6 +68,7 @@ fn controls() -> Vec<Control<'static>> {
         Control::Beat { epoch: 7, seq: 42 },
         Control::Resync,
         Control::Error(b"Loop detected"),
+        Control::Connect(CONNECT),
     ]
 }
 

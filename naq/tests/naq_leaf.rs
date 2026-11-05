@@ -50,6 +50,7 @@ fn hub(name: &str) -> Server {
             host: "127.0.0.1".into(),
             port: 0,
             account: None,
+            ..Leafnodes::default()
         }),
         ..base(name)
     })
@@ -202,6 +203,7 @@ fn links_that_loop_are_let_go_and_wait() {
                 host: "127.0.0.1".into(),
                 port: ports[i],
                 account: None,
+                ..Leafnodes::default()
             }),
             remotes: vec![naq_remote(hub)],
             ..base(name)
@@ -333,6 +335,7 @@ fn a_leaf_links_again_to_a_hub_that_starts_again() {
                 host: "127.0.0.1".into(),
                 port,
                 account: None,
+                ..Leafnodes::default()
             }),
             ..base(name)
         })
@@ -358,6 +361,7 @@ fn a_leaf_binds_the_account_the_hub_gives() {
             host: "127.0.0.1".into(),
             port: 0,
             account: Some("H".into()),
+            ..Leafnodes::default()
         }),
         users: vec![naq::User {
             login: naq::Login::Password {
@@ -372,9 +376,14 @@ fn a_leaf_binds_the_account_the_hub_gives() {
     .unwrap();
     let spoke = Server::start(&Options {
         accounts: vec!["L".into()],
+        // Without users of its own for leafs, the hub's clients' stand in.
         remotes: vec![Remote {
+            urls: vec![format!(
+                "naq://u:p@127.0.0.1:{}",
+                hub.leafnode_addr().unwrap().port()
+            )],
             account: Some("L".into()),
-            ..naq_remote(hub.leafnode_addr().unwrap().port())
+            ..Remote::default()
         }],
         users: vec![naq::User {
             login: naq::Login::Password {
@@ -437,6 +446,7 @@ fn a_hub_cluster_keeps_the_interest_and_messages_of_a_leaf_cluster_from_itself()
             host: "127.0.0.1".into(),
             port: 0,
             account: None,
+            ..Leafnodes::default()
         }),
         lanes: 1,
         ..base(&format!("h{i}"))
@@ -487,6 +497,7 @@ fn a_hub_cluster_carries_a_leaf_s_messages_to_its_other_servers_and_leafs() {
             host: "127.0.0.1".into(),
             port: 0,
             account: None,
+            ..Leafnodes::default()
         }),
         ..base(&format!("h{i}"))
     });
@@ -533,6 +544,7 @@ fn a_leaf_closes_every_channel_of_a_hub_link_gone() {
             host: host.clone(),
             port: 0,
             account: None,
+            ..Leafnodes::default()
         }),
         ..base("hub")
     })
@@ -629,6 +641,7 @@ fn a_leaf_dials_the_servers_its_hub_s_cluster_told_of_once_its_hub_is_gone() {
             host: "127.0.0.1".into(),
             port: 0,
             account: None,
+            ..Leafnodes::default()
         }),
         ..base(&format!("h{i}"))
     });
@@ -647,4 +660,268 @@ fn a_leaf_dials_the_servers_its_hub_s_cluster_told_of_once_its_hub_is_gone() {
     hears(&other, "s");
     let mut p = client(&other, "");
     until_heard(&mut p, &mut sub, "s");
+}
+
+/// A hub that takes naq leafs, which log in as `users`, beside the accounts
+/// `A` and `B`, with `more`.
+fn hub_with(users: Vec<naq::User>, more: Options) -> Server {
+    Server::start(&Options {
+        accounts: vec!["A".into(), "B".into()],
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            users,
+            ..Leafnodes::default()
+        }),
+        ..more
+    })
+    .unwrap()
+}
+
+/// User `name` of `password`, into `account` or `$G`.
+fn user(name: &str, password: &str, account: Option<&str>) -> naq::User {
+    naq::User {
+        login: naq::Login::Password {
+            user: name.into(),
+            password: password.into(),
+        },
+        account: account.map(Into::into),
+        permissions: None,
+    }
+}
+
+/// A leaf named `name` of `remote`.
+fn leaf_of(name: &str, remote: Remote) -> Server {
+    Server::start(&Options {
+        remotes: vec![remote],
+        ..base(name)
+    })
+    .unwrap()
+}
+
+/// A remote of the hub at `port` that logs in as `user` with `pass`, or
+/// with the token `user` without one.
+fn with_login(port: u16, user: &str, pass: Option<&str>) -> Remote {
+    let login = pass.map_or(user.to_owned(), |p| format!("{user}:{p}"));
+    Remote {
+        urls: vec![format!("naq://{login}@127.0.0.1:{port}")],
+        ..Remote::default()
+    }
+}
+
+/// Asserts that `s` has `n` leaf links for a while.
+fn stays_linked(s: &Server, n: u64) {
+    let until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < until {
+        assert_eq!(get(s, "/leafz")["leafnodes"], n, "{}", get(s, "/leafz"));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn naq_leafs_log_in_as_the_users_of_the_leafnodes_block() {
+    let key = nkeys::KeyPair::new_user();
+    let hub = hub_with(
+        vec![
+            user("one", "pw", Some("A")),
+            user("hashed", &bcrypt::hash("pw", 4).unwrap(), None),
+            naq::User {
+                login: naq::Login::Nkey(key.public_key()),
+                account: Some("B".into()),
+                permissions: None,
+            },
+        ],
+        base("hub"),
+    );
+    let port = hub.leafnode_addr().unwrap().port();
+    let _one = leaf_of("one", with_login(port, "one", Some("pw")));
+    leafz(&hub, |z| {
+        z["leafnodes"] == 1 && z["leafs"][0]["account"] == "A"
+    });
+    let _hashed = leaf_of("hashed", with_login(port, "hashed", Some("pw")));
+    leafz(&hub, |z| z["leafnodes"] == 2);
+    let _keyed = leaf_of(
+        "keyed",
+        Remote {
+            nkey: Some(key.seed().unwrap()),
+            ..naq_remote(port)
+        },
+    );
+    let z = leafz(&hub, |z| z["leafnodes"] == 3);
+    let mut accounts: Vec<&str> = (0..3)
+        .map(|i| z["leafs"][i]["account"].as_str().unwrap())
+        .collect();
+    accounts.sort_unstable();
+    assert_eq!(accounts, ["$G", "A", "B"]);
+    for (name, remote) in [
+        ("wrong", with_login(port, "one", Some("nope"))),
+        ("nobody", naq_remote(port)),
+        (
+            "unknown key",
+            Remote {
+                nkey: Some(nkeys::KeyPair::new_user().seed().unwrap()),
+                ..naq_remote(port)
+            },
+        ),
+    ] {
+        let refused = leaf_of(name, remote);
+        stays_linked(&hub, 3);
+        stays_linked(&refused, 0);
+    }
+}
+
+#[test]
+fn naq_leafs_log_in_as_clients_without_users_of_their_own() {
+    let hub = hub_with(
+        Vec::new(),
+        Options {
+            token: Some("s3cret".into()),
+            ..base("hub")
+        },
+    );
+    let port = hub.leafnode_addr().unwrap().port();
+    let _with = leaf_of("with", with_login(port, "s3cret", None));
+    leafz(&hub, |z| z["leafnodes"] == 1);
+    let without = leaf_of("without", naq_remote(port));
+    stays_linked(&without, 0);
+    // Permissions do not hold on naq leaf links yet: such a user is
+    // refused.
+    let hub = hub_with(
+        Vec::new(),
+        Options {
+            users: vec![naq::User {
+                login: naq::Login::Password {
+                    user: "u".into(),
+                    password: "p".into(),
+                },
+                account: None,
+                permissions: Some(naq::Permissions::default()),
+            }],
+            ..base("strict")
+        },
+    );
+    let port = hub.leafnode_addr().unwrap().port();
+    let limited = leaf_of("limited", with_login(port, "u", Some("p")));
+    stays_linked(&hub, 0);
+    stays_linked(&limited, 0);
+}
+
+/// A naq leaf of a hub, driven message by message over OMQ.
+struct RawLeaf(omq_tokio::blocking::Socket);
+
+impl RawLeaf {
+    /// A leaf of routing identity `id`, on `ctx`, of the hub `hub`, that
+    /// said `Hello`.
+    fn new(ctx: &omq_tokio::Context, hub: &Server, id: &str) -> RawLeaf {
+        let leaf = RawLeaf::dial(ctx, hub, id);
+        leaf.hello();
+        leaf
+    }
+
+    /// A leaf of routing identity `id`, on `ctx`, of the hub `hub`.
+    fn dial(ctx: &omq_tokio::Context, hub: &Server, id: &str) -> RawLeaf {
+        let s = ctx.blocking_socket(
+            omq_tokio::SocketType::Dealer,
+            omq_tokio::Options {
+                identity: id.as_bytes().to_vec().into(),
+                ..omq_tokio::Options::default()
+            },
+        );
+        let at = hub.leafnode_addr().unwrap();
+        s.connect(format!("tcp://{at}").as_str()).unwrap();
+        RawLeaf(s)
+    }
+
+    /// Says `Hello`.
+    fn hello(&self) {
+        use naq_proto::peer::{Control, Hello, Role};
+        self.send(Control::Hello(Hello {
+            role: Role::Leaf,
+            account: b"$G",
+            epoch: 1,
+            server_id: b"RAW",
+            name: b"raw",
+            cluster: b"",
+            data: b"",
+            client_urls: b"",
+            leaf_urls: b"",
+            nonce: b"",
+        }));
+    }
+
+    fn send(&self, c: naq_proto::peer::Control<'_>) {
+        let mut out = Vec::new();
+        c.encode(&mut out);
+        self.0.send(omq_tokio::Message::single(out)).unwrap();
+    }
+
+    /// The next message of the hub.
+    fn next(&self) -> Vec<u8> {
+        self.0
+            .recv_timeout(WAIT)
+            .unwrap()
+            .into_bytes()
+            .unwrap()
+            .to_vec()
+    }
+}
+
+#[test]
+fn a_naq_leaf_that_does_not_log_in_is_told_why() {
+    use naq_proto::peer::{self, Connect, Control, Role};
+    let hub = hub_with(vec![user("u", "p", None)], base("hub"));
+    let ctx = omq_tokio::Context::new();
+    let wrong = RawLeaf::new(&ctx, &hub, "RAW/0/1");
+    let got = wrong.next();
+    let Ok(Control::Hello(h)) = peer::decode(&got) else {
+        panic!("{got:?}")
+    };
+    assert_eq!((h.role, h.nonce.len()), (Role::Hub, 15), "a nonce to sign");
+    wrong.send(Control::Connect(Connect {
+        user: b"u",
+        pass: b"x",
+        ..Connect::default()
+    }));
+    let got = wrong.next();
+    assert_eq!(
+        peer::decode(&got),
+        Ok(Control::Error(b"Authorization Violation"))
+    );
+    // A `Connect` before the hub's `Hello` counts for nothing.
+    let late = RawLeaf::dial(&ctx, &hub, "RAW/0/2");
+    late.send(Control::Connect(Connect::default()));
+    late.hello();
+    assert!(matches!(peer::decode(&late.next()), Ok(Control::Hello(_))));
+    let got = late.next();
+    assert_eq!(
+        peer::decode(&got),
+        Ok(Control::Error(b"Authentication Timeout"))
+    );
+}
+
+#[test]
+fn users_of_naq_leafs_that_cannot_work_are_refused() {
+    let with = |u: naq::User| {
+        Server::start(&Options {
+            leafnodes: Some(Leafnodes {
+                users: vec![u],
+                ..Leafnodes::default()
+            }),
+            ..base("hub")
+        })
+        .err()
+        .map(|e| e.to_string())
+    };
+    let limited = naq::User {
+        permissions: Some(naq::Permissions::default()),
+        ..user("u", "p", None)
+    };
+    let e = with(limited).unwrap();
+    assert!(e.contains("users of leafs have no permissions"), "{e}");
+    let e = with(naq::User {
+        login: naq::Login::Nkey("Ux".into()),
+        ..user("u", "p", None)
+    })
+    .unwrap();
+    assert!(e.contains("is not a public user NKey"), "{e}");
 }

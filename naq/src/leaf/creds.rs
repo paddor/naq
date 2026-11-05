@@ -9,13 +9,13 @@ use crate::Remote;
 
 /// The keys of a `CONNECT` that prove the leaf's identity.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct Proof {
+pub(crate) struct Proof {
     /// The user JWT of a credentials file.
-    pub(super) jwt: Option<String>,
+    pub(crate) jwt: Option<String>,
     /// The public key of a seed given alone.
-    pub(super) nkey: Option<String>,
+    pub(crate) nkey: Option<String>,
     /// The nonce signed, in URL-safe base64.
-    pub(super) sig: Option<String>,
+    pub(crate) sig: Option<String>,
 }
 
 /// Signs `nonce` as remote `r` says: with the seed of its credentials
@@ -25,7 +25,7 @@ pub(super) struct Proof {
 ///
 /// A credentials file that cannot be read or holds no JWT and seed, or a
 /// seed that is not one.
-pub(super) fn prove(r: &Remote, nonce: &str) -> Result<Proof, String> {
+pub(crate) fn prove(r: &Remote, nonce: &str) -> Result<Proof, String> {
     if let Some(path) = &r.credentials {
         // A small file, read at each dial as `nats-server` does.
         let text = std::fs::read_to_string(path)

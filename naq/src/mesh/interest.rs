@@ -32,6 +32,14 @@ pub(crate) struct Heard {
 pub(crate) type Change<'a> = (&'a [u8], &'a [u8], Option<&'a [u8]>, u32);
 
 impl Heard {
+    /// The interest of a server of start `epoch`, none heard yet.
+    pub(super) fn of(epoch: u64) -> Heard {
+        Heard {
+            epoch,
+            ..Heard::default()
+        }
+    }
+
     /// Takes control message `c` of the other server, and calls `apply`
     /// with each change of its interest. Returns whether this lost track of
     /// it and must ask for a snapshot.
@@ -196,6 +204,7 @@ mod tests {
             data: b"",
             client_urls: b"",
             leaf_urls: b"",
+            nonce: b"",
         })
     }
 

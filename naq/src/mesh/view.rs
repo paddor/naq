@@ -166,6 +166,7 @@ mod tests {
             data: b"",
             client_urls: b"",
             leaf_urls: b"",
+            nonce: b"",
         };
         for c in [
             Control::Hello(hello),

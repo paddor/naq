@@ -7,6 +7,7 @@ mod side;
 mod tls;
 pub(crate) mod url;
 
+pub(crate) use creds::prove;
 pub(crate) use link::{LOOP_DELAY, err_delay, loop_error};
 pub(crate) use side::{Facts, LinkSide};
 pub(crate) use tls::Connector;
@@ -79,11 +80,8 @@ pub(crate) fn lds() -> String {
 
 /// Why `opts.remotes` and `opts.leafnodes` cannot run as given.
 pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
-    if let Some(a) = opts.leafnodes.as_ref().and_then(|l| l.account.as_deref())
-        && a != "$G"
-        && !opts.accounts.iter().any(|x| x == a)
-    {
-        return Err(format!("leafnodes: no account {a:?}"));
+    if let Some(l) = &opts.leafnodes {
+        leafnodes(opts, l)?;
     }
     let mut seen = Vec::new();
     for r in &opts.remotes {
@@ -139,6 +137,44 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
     Ok(())
 }
 
+/// Why `l`, the port of naq leafs of `opts`, cannot run as given: its
+/// accounts exist, and its users are distinct and have no permissions.
+fn leafnodes(opts: &crate::Options, l: &crate::Leafnodes) -> Result<(), String> {
+    let exists = |a: &str| a == "$G" || opts.accounts.iter().any(|x| x == a);
+    if let Some(a) = l.account.as_deref()
+        && !exists(a)
+    {
+        return Err(format!("leafnodes: no account {a:?}"));
+    }
+    let mut seen = Vec::new();
+    for u in &l.users {
+        let name = match &u.login {
+            crate::Login::Password { user, .. } => user,
+            crate::Login::Nkey(key) => {
+                if !crate::auth::is_user_nkey(key) {
+                    return Err(format!("leafnodes: {key:?} is not a public user NKey"));
+                }
+                key
+            }
+        };
+        if seen.contains(&name) {
+            return Err(format!("leafnodes: user {name:?} twice"));
+        }
+        seen.push(name);
+        if let Some(a) = u.account.as_deref()
+            && !exists(a)
+        {
+            return Err(format!("leafnodes: user {name:?}: no account {a:?}"));
+        }
+        if u.permissions.is_some() {
+            return Err(format!(
+                "leafnodes: user {name:?}: users of leafs have no permissions"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Why remote `r` of a naq hub at `urls` cannot run as given: its URLs are
 /// all naq ones, and it has none of what a Go hub takes.
 fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
@@ -146,12 +182,10 @@ fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
         return Err("leafnode remote: naq and other urls mixed".into());
     }
     let more = r.credentials.is_some()
-        || r.nkey.is_some()
         || r.tls.is_some()
         || !r.deny_imports.is_empty()
         || !r.deny_exports.is_empty()
-        || r.request_isolation
-        || urls.iter().any(|u| u.user.is_some());
+        || r.request_isolation;
     if more {
         return Err("leafnode remote: naq url with options it takes no part of".into());
     }

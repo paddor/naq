@@ -1,8 +1,9 @@
 //! The `leafnodes` block: the hubs this server dials.
 
+use super::auth::timeout;
 use super::parse::{Item, Value};
 use super::{Bad, duration, int, listen, seconds, string};
-use crate::{Leafnodes, Options, Remote, RemoteTls};
+use crate::{Leafnodes, Login, Options, Remote, RemoteTls, User};
 
 /// `leafnodes { remotes, reconnect, listen, host, port, authorization }`.
 /// The port of a hub takes naq leaf nodes, over OMQ.
@@ -42,7 +43,7 @@ pub(super) fn leafnodes(o: &mut Options, item: &Item) -> Result<(), Bad> {
                     int(v).ok_or_else(|| bad("expected a port"))?;
             }
             "authorization" => {
-                o.leafnodes.get_or_insert_with(Leafnodes::default).account = authorization(v)?;
+                authorization(o.leafnodes.get_or_insert_with(Leafnodes::default), v)?;
             }
             _ => return Err(bad("not supported")),
         }
@@ -50,21 +51,108 @@ pub(super) fn leafnodes(o: &mut Options, item: &Item) -> Result<(), Bad> {
     Ok(())
 }
 
-/// The account of `authorization { account }`, which every naq leaf binds.
-/// Users of leafs are not supported yet.
-fn authorization(item: &Item) -> Result<Option<String>, Bad> {
+/// `authorization { user, password, nkey, users, account, timeout }`: who
+/// naq leafs log in as, and the account of those without a user of their
+/// own.
+fn authorization(l: &mut Leafnodes, item: &Item) -> Result<(), Bad> {
     let Value::Map(m) = &item.value else {
         return Err((item.line, "leafnodes: authorization: expected a map".into()));
     };
-    let mut account = None;
+    let (mut user, mut password, mut nkey) = (None, None, None);
     for (k, v) in m {
+        let k = k.to_ascii_lowercase();
         let bad = |reason: &str| (v.line, format!("leafnodes: authorization: {k}: {reason}"));
-        match k.to_ascii_lowercase().as_str() {
-            "account" => account = Some(string(v).ok_or_else(|| bad("expected a string"))?),
+        let text = || string(v).ok_or_else(|| bad("expected a string"));
+        match k.as_str() {
+            "user" | "username" => user = Some(text()?),
+            "pass" | "password" => password = Some(text()?),
+            "nkey" => {
+                let key = text()?;
+                if !crate::auth::is_user_nkey(&key) {
+                    return Err(bad("not a public user NKey"));
+                }
+                nkey = Some(key);
+            }
+            "users" => l.users.extend(users(v)?),
+            "account" => l.account = Some(text()?),
+            "timeout" => {
+                l.auth_timeout = timeout(v).ok_or_else(|| bad("expected seconds or a duration"))?;
+            }
             _ => return Err(bad("not supported")),
         }
     }
-    Ok(account)
+    let bad = |reason: &str| (item.line, format!("leafnodes: authorization: {reason}"));
+    let single = match (user, password, nkey) {
+        (Some(_), _, Some(_)) => return Err(bad("a user cannot go with an nkey")),
+        (None, Some(_), _) => return Err(bad("password without user")),
+        (Some(user), password, None) => Some(Login::Password {
+            user,
+            password: password.unwrap_or_default(),
+        }),
+        (None, None, Some(key)) => Some(Login::Nkey(key)),
+        (None, None, None) => None,
+    };
+    if let Some(login) = single {
+        if !l.users.is_empty() {
+            return Err(bad("a single user cannot go with users"));
+        }
+        l.users.push(User {
+            login,
+            account: l.account.clone(),
+            permissions: None,
+        });
+    }
+    Ok(())
+}
+
+/// The `users` of naq leafs: each a map of `user`, `password` and
+/// `account`.
+fn users(item: &Item) -> Result<Vec<User>, Bad> {
+    let Value::Array(list) = &item.value else {
+        return Err((
+            item.line,
+            "leafnodes: authorization: users: expected a list".into(),
+        ));
+    };
+    list.iter()
+        .map(|u| {
+            let Value::Map(m) = &u.value else {
+                return Err((
+                    u.line,
+                    "leafnodes: authorization: users: expected maps".into(),
+                ));
+            };
+            let (mut user, mut password, mut account) = (None, None, None);
+            for (k, v) in m {
+                let k = k.to_ascii_lowercase();
+                let bad = |reason: &str| {
+                    let at = format!("leafnodes: authorization: users: {k}");
+                    (v.line, format!("{at}: {reason}"))
+                };
+                let text = string(v).ok_or_else(|| bad("expected a string"));
+                match k.as_str() {
+                    "user" | "username" => user = Some(text?),
+                    "pass" | "password" => password = Some(text?),
+                    "account" => account = Some(text?),
+                    _ => return Err(bad("not supported")),
+                }
+            }
+            let user = user.ok_or_else(|| {
+                (
+                    u.line,
+                    "leafnodes: authorization: users: a user without a name".into(),
+                )
+            })?;
+            Ok(User {
+                login: Login::Password {
+                    user,
+                    password: password.unwrap_or_default(),
+                },
+                account,
+                permissions: None,
+            })
+        })
+        .collect()
 }
 
 /// One remote: `{ url, urls, account, no_randomize, credentials, nkey,

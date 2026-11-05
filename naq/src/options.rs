@@ -94,16 +94,27 @@ pub struct Cluster {
 }
 
 /// The port naq leaf nodes dial (`leafnodes { listen }`), over OMQ, with
-/// the remote URL `naq://host:port`. Go leaf nodes cannot dial it.
+/// the remote URL `naq://host:port`, and who they log in as. Go leaf nodes
+/// cannot dial it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leafnodes {
     /// Host to listen on (`host`, `listen`).
     pub host: String,
     /// Port to listen on (`port`, `listen`); 0 picks a free one.
     pub port: u16,
-    /// The account every naq leaf binds (`authorization { account }`);
-    /// `None` for `$G`.
+    /// The account a naq leaf binds without a user of its own
+    /// (`authorization { account }`); `None` for `$G`.
     pub account: Option<String>,
+    /// The users naq leafs log in as, each into its account or `$G`,
+    /// without permissions: the single one of `authorization { user,
+    /// password }` or `{ nkey }`, into [`Leafnodes::account`], or those of
+    /// `authorization { users }`. Without any, a naq leaf logs in as the
+    /// server's clients do, into its user's account, and without those
+    /// either into [`Leafnodes::account`].
+    pub users: Vec<User>,
+    /// How long a naq leaf has to log in once its hub greeted it
+    /// (`authorization { timeout }`).
+    pub auth_timeout: Duration,
 }
 
 impl Default for Leafnodes {
@@ -112,6 +123,8 @@ impl Default for Leafnodes {
             host: "0.0.0.0".into(),
             port: 7422,
             account: None,
+            users: Vec::new(),
+            auth_timeout: Duration::from_secs(2),
         }
     }
 }
@@ -355,7 +368,8 @@ pub struct Remote {
     /// `nats://` with `user:password@` or a token as `token@` if it takes
     /// them, or a bare `host:port`. The port defaults to 7422. A naq hub
     /// is dialed over OMQ at `naq://host:port` URLs, all of them naq ones,
-    /// with none of the other options but `account` and `no_randomize`.
+    /// with credentials as above, and of the other options only `account`,
+    /// `no_randomize` and `nkey`.
     /// A hub tells of the URLs of its cluster's servers, which come first
     /// once it did.
     pub urls: Vec<String>,

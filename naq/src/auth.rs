@@ -268,6 +268,54 @@ impl Auth {
         Some(auth)
     }
 
+    /// What naq leafs log in with, by `opts.leafnodes`: its users, into
+    /// their accounts without permissions; else what clients log in with,
+    /// `general`. `None`: any leaf links.
+    pub(crate) fn leafnodes(
+        opts: &Options,
+        accounts: &[String],
+        general: Option<&Auth>,
+    ) -> Option<Auth> {
+        let l = opts.leafnodes.as_ref()?;
+        if l.users.is_empty() {
+            let mut auth = general?.clone();
+            auth.timeout = l.auth_timeout;
+            return Some(auth);
+        }
+        let (mut users, mut nkeys) = (FxHashMap::default(), FxHashMap::default());
+        for u in &l.users {
+            let account = u
+                .account
+                .as_ref()
+                .and_then(|n| accounts.iter().position(|a| a == n))
+                // Accounts are few: their count fits.
+                .map_or(GLOBAL, |i| i as u32);
+            let grant = Grant {
+                account,
+                perms: None,
+            };
+            match &u.login {
+                Login::Password { user, password } => {
+                    users.insert(user.clone(), (password.clone(), grant));
+                }
+                Login::Nkey(key) => {
+                    nkeys.insert(key.clone(), grant);
+                }
+            }
+        }
+        Some(Auth {
+            users,
+            nkeys,
+            token_grant: Grant {
+                account: GLOBAL,
+                perms: None,
+            },
+            token: None,
+            no_auth_user: None,
+            timeout: l.auth_timeout,
+        })
+    }
+
     /// Whether clients may connect without credentials, as the
     /// `no_auth_user`.
     pub(crate) const fn open(&self) -> bool {

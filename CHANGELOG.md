@@ -271,6 +271,16 @@ Notable changes to naq. The format follows
   other of its account's `$LDS.` subject; a side that hears its own back
   sends `peer::Control::Error` (`Loop detected for leafnode account=...`)
   and lets the link go, and the leaf waits 30 s before it dials again.
+- `naq`: naq leafs log in to their naq hub as Go leafs do. The hub
+  answers a leaf's `Hello` with its own and a nonce; the leaf sends
+  `peer::Control::Connect` with the user and password or token of its URL,
+  or its `nkey` and the nonce signed. The hub takes the users of
+  `leafnodes { authorization { user, password, nkey, users, account,
+  timeout } }` (`Leafnodes::users`, `Leafnodes::auth_timeout`), each into
+  its account, else those of its clients, and answers others with
+  `Authorization Violation` or `Authentication Timeout`. A leaf counts as
+  linked once the hub took it in. Users with permissions cannot link a naq
+  leaf yet.
 - `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
   `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
   per run, from the same configuration file for `nats-server` and naq

@@ -547,6 +547,9 @@ fn websocket_settings_naq_cannot_use_are_an_error() {
 /// A user NKey seed.
 const SEED: &str = "SUABXPISJ672XCVCU7XD7CVTTXYTBXTGZ4LX3WZCSLCPKHDPCXCLZVMVPI";
 
+/// A public user NKey.
+const KEY: &str = "UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ";
+
 #[test]
 fn remotes_come_from_the_leafnodes_block() {
     let o: Options = "accounts [A]\nleafnodes {\n  reconnect: 2\n  remotes [\n    \
@@ -592,6 +595,7 @@ fn the_port_of_a_hub_comes_from_the_leafnodes_block() {
             host: "127.0.0.1".into(),
             port: 7000,
             account: Some("A".into()),
+            ..naq::Leafnodes::default()
         })
     );
     let o: Options = "leafnodes { port: 7001, host: h }".parse().unwrap();
@@ -601,6 +605,7 @@ fn the_port_of_a_hub_comes_from_the_leafnodes_block() {
             host: "h".into(),
             port: 7001,
             account: None,
+            ..naq::Leafnodes::default()
         })
     );
     let o: Options = "leafnodes { remotes: [{url: \"naq://h:1\"}] }"
@@ -615,13 +620,101 @@ fn the_port_of_a_hub_comes_from_the_leafnodes_block() {
 }
 
 #[test]
+fn naq_leafs_log_in_as_the_leafnodes_block_says() {
+    let user = |login, account: Option<&str>| naq::User {
+        login,
+        account: account.map(Into::into),
+        permissions: None,
+    };
+    let password = |u: &str, p: &str| naq::Login::Password {
+        user: u.into(),
+        password: p.into(),
+    };
+    let users = |text: &str| {
+        let o: Options = format!("accounts [A]\nleafnodes {{ authorization {{ {text} }} }}")
+            .parse()
+            .unwrap();
+        o.leafnodes.unwrap()
+    };
+    let l = users("user: u, password: p, account: A, timeout: 3");
+    assert_eq!(l.users, [user(password("u", "p"), Some("A"))]);
+    assert_eq!(l.auth_timeout, std::time::Duration::from_secs(3));
+    let l = users(&format!("nkey: {KEY}"));
+    assert_eq!(l.users, [user(naq::Login::Nkey(KEY.into()), None)]);
+    let l = users("users: [{user: a, password: b, account: A}, {username: c, pass: d}]");
+    assert_eq!(
+        l.users,
+        [
+            user(password("a", "b"), Some("A")),
+            user(password("c", "d"), None)
+        ]
+    );
+}
+
+#[test]
+fn naq_leaf_logins_that_cannot_work_are_an_error() {
+    for (text, reason) in [
+        (
+            "leafnodes { authorization: 1 }",
+            "leafnodes: authorization: expected a map",
+        ),
+        (
+            "leafnodes { authorization { user: u, nkey: UDDERIQLR7DRZ5U2RYQVMHORTX3VOIBJNN7PBBMML2L4TIQKHZDVQERZ } }",
+            "leafnodes: authorization: a user cannot go with an nkey",
+        ),
+        (
+            "leafnodes { authorization { users: [1] } }",
+            "leafnodes: authorization: users: expected maps",
+        ),
+        (
+            "leafnodes { authorization { token: t } }",
+            "leafnodes: authorization: token: not supported",
+        ),
+        (
+            "leafnodes { authorization { password: p } }",
+            "leafnodes: authorization: password without user",
+        ),
+        (
+            "leafnodes { authorization { nkey: x } }",
+            "leafnodes: authorization: nkey: not a public user NKey",
+        ),
+        (
+            "leafnodes { authorization { user: u, users: [{user: v}] } }",
+            "leafnodes: authorization: a single user cannot go with users",
+        ),
+        (
+            "leafnodes { authorization { users: [{password: p}] } }",
+            "leafnodes: authorization: users: a user without a name",
+        ),
+        (
+            "leafnodes { authorization { users: [{user: u, nkey: k}] } }",
+            "leafnodes: authorization: users: nkey: not supported",
+        ),
+        (
+            "leafnodes { authorization { users: [{user: u}, {user: u}] } }",
+            "leafnodes: user \"u\" twice",
+        ),
+        (
+            "leafnodes { authorization { users: [{user: u, account: B}] } }",
+            "leafnodes: user \"u\": no account \"B\"",
+        ),
+        (
+            "leafnodes { authorization { users: 1 } }",
+            "leafnodes: authorization: users: expected a list",
+        ),
+        (
+            "leafnodes { authorization { timeout: x } }",
+            "leafnodes: authorization: timeout: expected seconds or a duration",
+        ),
+    ] {
+        config_error(text, reason);
+    }
+}
+
+#[test]
 fn naq_leafs_and_hubs_that_cannot_work_are_an_error() {
     for (text, reason) in [
         ("leafnodes { port: x }", "leafnodes: port: expected a port"),
-        (
-            "leafnodes { authorization { user: u } }",
-            "leafnodes: authorization: user: not supported",
-        ),
         (
             "leafnodes { authorization { account: B } }",
             "leafnodes: no account \"B\"",

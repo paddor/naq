@@ -12,7 +12,7 @@ across a hub cluster and the hub's permissions. Servers of one cluster
 mesh over OMQ: they share their clients' interest, carry messages one hop
 and tell clients of each other for failover. naq leaf nodes link to naq
 hubs over OMQ too, by Go's leaf rules, clusters on either side, with
-failover across a hub cluster. It
+credentials and failover across a hub cluster. It
 reads `nats-server` configuration files (`naq -c FILE`), the keys it
 serves so far, and serves `/healthz`, `/varz`, `/connz`, `/routez` and
 `/leafz` (`naq -m PORT`).

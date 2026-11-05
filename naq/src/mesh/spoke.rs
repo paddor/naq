@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use naq_proto::peer::{self, Control, Hello, Role};
+use naq_proto::peer::{self, Connect, Control, Hello, Role};
 use omq_tokio::{MonitorEvent, MonitorStream, Socket, SocketType};
 
 use super::control::{reachable, reachable_url};
@@ -150,12 +150,15 @@ async fn connect(
             at,
             id: id.into(),
             s: &s,
-            found: RefCell::new(None),
+            url,
+            said: RefCell::new(None),
+            greeted: Cell::new(false),
             end: Cell::new(None),
         };
         link.serve(events).await;
         link.down();
-        ended = (link.found.take(), link.end.get().unwrap_or_default());
+        let said = link.said.take();
+        ended = (said.map(|s| s.urls), link.end.get().unwrap_or_default());
     }
     let _ = s.close().await;
     ended
@@ -170,10 +173,24 @@ struct Link<'a> {
     /// The connection's routing identity.
     id: Bytes,
     s: &'a Socket,
-    /// Where the leafs of the hub's cluster dial, once it said.
-    found: RefCell<Option<Vec<String>>>,
+    /// The URL dialed, with the credentials it holds.
+    url: &'a HubUrl,
+    /// What the hub said in its `Hello`, once it did.
+    said: RefCell<Option<Said>>,
+    /// This server logged in and sent its snapshot.
+    greeted: Cell<bool>,
     /// Set once the link cannot go on: the wait before the next dial.
     end: Cell<Option<Duration>>,
+}
+
+/// What a hub says of itself in its `Hello`.
+#[derive(Debug)]
+struct Said {
+    /// Where each of its lanes takes data.
+    endpoints: Vec<String>,
+    cluster: Box<[u8]>,
+    /// Where the leafs of its cluster dial.
+    urls: Vec<String>,
 }
 
 impl Link<'_> {
@@ -219,7 +236,7 @@ impl Link<'_> {
                     }
                 }
                 () = told.wake.notified() => {
-                    if self.is_up() {
+                    if self.greeted.get() {
                         other.tell(false);
                     } else {
                         // Its snapshot carries them.
@@ -227,7 +244,7 @@ impl Link<'_> {
                     }
                 }
                 _ = beat.tick() => {
-                    if self.is_up() {
+                    if self.greeted.get() {
                         other.tell(true);
                     }
                 }
@@ -255,6 +272,7 @@ impl Link<'_> {
             data: b"",
             client_urls: b"",
             leaf_urls: b"",
+            nonce: b"",
         })
         .encode(&mut out);
         out.into()
@@ -275,6 +293,8 @@ impl Link<'_> {
                 self.end.set(Some(err_delay(why)));
                 return None;
             }
+            // The hub took this server in.
+            Control::SnapshotStart { .. } if !self.is_up() => self.linked(),
             _ => {}
         }
         let mut hubs = self.mesh.hubs.borrow_mut();
@@ -295,38 +315,85 @@ impl Link<'_> {
         lost.then(resync)
     }
 
-    /// Links the hub, which said `Hello` `h`: in its slot on every lane,
-    /// with data channels to its lanes; and tells it of interest anew.
+    /// Notes what the hub said in `Hello` `h`, and logs in with the nonce it
+    /// gave, then tells it of interest anew.
     fn met(&self, h: &Hello<'_>, other: &Other) {
-        let (slot, account, host) = {
+        let host = self.url.host.as_str();
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        self.mesh.hubs.borrow_mut()[self.at].name = text(h.name);
+        *self.said.borrow_mut() = Some(Said {
+            endpoints: peer::words(h.data)
+                .map(|e| reachable(&text(e), host))
+                .collect(),
+            cluster: h.cluster.into(),
+            urls: peer::words(h.leaf_urls)
+                .map(|u| reachable_url(&text(u), host))
+                .collect(),
+        });
+        match self.login(h.nonce) {
+            Ok(connect) => {
+                other.greet(Some(connect));
+                self.greeted.set(true);
+            }
+            Err(_) => self.end.set(Some(Duration::ZERO)),
+        }
+    }
+
+    /// This server's `Connect`, with the credentials of its URL and its
+    /// remote, and `nonce` signed if it has an NKey.
+    ///
+    /// # Errors
+    ///
+    /// A seed that cannot sign.
+    fn login(&self, nonce: &[u8]) -> Result<Bytes, String> {
+        let remote = self.mesh.hubs.borrow()[self.at].remote;
+        let r = &self.shared.opts.remotes[remote];
+        let proof = crate::leaf::prove(r, &String::from_utf8_lossy(nonce))?;
+        let (user, pass, token) = match (&self.url.user, &self.url.pass) {
+            (Some(u), Some(p)) => (u.as_str(), p.as_str(), ""),
+            (Some(t), None) => ("", "", t.as_str()),
+            _ => ("", "", ""),
+        };
+        let nkey = proof.nkey.unwrap_or_default();
+        let sig = proof.sig.unwrap_or_default();
+        let mut out = Vec::new();
+        Control::Connect(Connect {
+            user: user.as_bytes(),
+            pass: pass.as_bytes(),
+            token: token.as_bytes(),
+            nkey: nkey.as_bytes(),
+            sig: sig.as_bytes(),
+        })
+        .encode(&mut out);
+        Ok(out.into())
+    }
+
+    /// The hub took this server in: it links in the hub's slot on every
+    /// lane, with data channels to the hub's lanes.
+    fn linked(&self) {
+        let (slot, account) = {
             let mut hubs = self.mesh.hubs.borrow_mut();
             let hub = &mut hubs[self.at];
             hub.up = true;
-            hub.name = String::from_utf8_lossy(h.name).into_owned();
-            (hub.slot, hub.account, hub.host.clone())
+            (hub.slot, hub.account)
         };
-        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-        let endpoints: Vec<String> = peer::words(h.data)
-            .map(|e| reachable(&text(e), &host))
-            .collect();
-        let found = peer::words(h.leaf_urls)
-            .map(|u| reachable_url(&text(u), &host))
-            .collect();
-        *self.found.borrow_mut() = Some(found);
+        let said = self.said.borrow();
+        let Some(said) = said.as_ref() else {
+            return;
+        };
         for tx in &*self.shared.lanes {
             tx.control(LaneControl::Link {
                 slot,
                 id: self.id.to_vec().into(),
-                cluster: h.cluster.into(),
+                cluster: said.cluster.clone(),
                 account,
             });
             tx.control(LaneControl::HubData {
                 slot,
                 id: self.id.to_vec().into(),
-                endpoints: endpoints.clone(),
+                endpoints: said.endpoints.clone(),
             });
         }
-        other.greet(None);
     }
 
     /// The hub is gone: its interest, its data channels, its slot.
