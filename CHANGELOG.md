@@ -356,6 +356,21 @@ Notable changes to naq. The format follows
   are served; unknown kinds are a config error.
 - `naq`: an NKey in a `CONNECT` is passed over where no user has one, as
   in `nats-server`, so the user and password log in.
+- `naq`: auth callout (`authorization { auth_callout }`;
+  `Options::auth_callout`, `AuthCallout`), and in operator mode accounts
+  whose JWT names auth users. A client that is no auth user goes to the
+  service: a request the server signs, on `$SYS.REQ.USER.AUTH` in the
+  callout account, sealed with `xkey` if given, and the answer puts it in
+  an account with permissions, or keeps it out. Answers are checked as
+  `nats-server` checks them; the service may be at another server of the
+  cluster. The first answer counts. A client that acts before its
+  `CONNECT`, or fails its own checks in operator mode, is refused without
+  a callout; naq links never call out. A callout without a system
+  account, or naming unknown accounts or auth users, is refused at start.
+- `naq`: the server ID is the server's NKey, and `INFO` tells its curve
+  key (`xkey`), as in `nats-server`. With TLS, clients have the TLS
+  timeout and a second to log in, unless `authorization { timeout }` says
+  otherwise.
 - `naq`: clients may not publish to `_GR_.`, `$GR.` or `$NRG.` subjects,
   nor with `_R_.`, `$JS.ACK.`, `_GR_.` or `$GR.` replies, as in
   `nats-server`: the message is dropped with a permissions violation.

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(crate) use data::{Batch, Imported, Outs, Source};
-pub(crate) use publish::Routing;
+pub(crate) use publish::{Routing, inject};
 pub(crate) use route::{Queue, Queued};
 #[cfg(test)]
 pub(crate) use slots::Linked;
@@ -425,6 +425,9 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         imported: Cell::new(false),
     });
     crate::imports::service::install(&lane);
+    if let Some(c) = &lane.shared.callouts {
+        c.install(&lane);
+    }
     LANES.with(|l| l.borrow_mut().insert(key, lane.clone()));
     let LaneRx { control, data } = rx;
     let l = lane.clone();

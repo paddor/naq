@@ -112,7 +112,9 @@ fn info_comes_first() {
     assert_eq!(json["port"], s.addr().port());
     assert_eq!(json["max_payload"], 1 << 20);
     assert_eq!(json["headers"], true);
-    assert_eq!(json["server_id"].as_str().unwrap().len(), 22);
+    let id = json["server_id"].as_str().unwrap();
+    assert!(id.starts_with('N') && id.len() == 56, "a server NKey: {id}");
+    assert!(json["xkey"].as_str().unwrap().starts_with('X'));
     assert!(json["client_id"].as_u64().unwrap() > 0);
     assert!(json["version"].is_string());
 }

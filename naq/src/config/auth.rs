@@ -6,7 +6,7 @@ use super::parse::{Item, Value};
 use super::{Bad, string, strings};
 use crate::{ConnectionType, Login, Options, Permissions, Responses, Rules, User};
 
-/// `authorization { user, password, token, timeout, users }`.
+/// `authorization { user, password, token, timeout, users, auth_callout }`.
 pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
     let map = map(item, "authorization")?;
     let (mut user, mut password) = (None, None);
@@ -26,6 +26,7 @@ pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
             "default_permissions" | "default_permission" | "permissions" => {
                 o.default_permissions = Some(permissions(v)?);
             }
+            "auth_callout" | "auth_hook" => o.auth_callout = Some(super::callout::callout(v)?),
             _ => return Err(bad("not supported")),
         }
     }
@@ -35,6 +36,16 @@ pub(super) fn authorization(o: &mut Options, item: &Item) -> Result<(), Bad> {
         (None, None) => {}
     }
     Ok(())
+}
+
+/// Whether the top-level `authorization` block of `map` sets a timeout.
+pub(super) fn timed(map: &super::parse::Map) -> bool {
+    map.iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .any(|(_, item)| match &item.value {
+            Value::Map(m) => m.iter().any(|(k, _)| k.eq_ignore_ascii_case("timeout")),
+            _ => false,
+        })
 }
 
 /// `accounts { NAME { users, exports, imports } }`, or `accounts [NAME]`.

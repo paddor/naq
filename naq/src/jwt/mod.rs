@@ -60,6 +60,11 @@ impl Body for claims::User {
     const ISSUERS: &'static [char] = &['A'];
 }
 
+impl Body for claims::AuthResponse {
+    const TYPE: &'static str = "authorization_response";
+    const ISSUERS: &'static [char] = &['A'];
+}
+
 impl Body for claims::Activation {
     const TYPE: &'static str = "activation";
     const ISSUERS: &'static [char] = &['A', 'O'];

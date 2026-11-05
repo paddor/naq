@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+mod callout;
 mod config;
 mod conn;
 mod error;
@@ -55,8 +56,8 @@ mod ws;
 
 pub use error::Error;
 pub use options::{
-    Account, Cluster, ConnectionType, Cookies, Export, ExportKind, Import, ImportKind, Latency,
-    Leafnodes, Login, Options, Permissions, Remote, RemoteTls, Resolver, ResponseType, Responses,
-    Rules, Sampling, ServiceExport, Tls, User, Websocket, WebsocketAuth,
+    Account, AuthCallout, Cluster, ConnectionType, Cookies, Export, ExportKind, Import, ImportKind,
+    Latency, Leafnodes, Login, Options, Permissions, Remote, RemoteTls, Resolver, ResponseType,
+    Responses, Rules, Sampling, ServiceExport, Tls, User, Websocket, WebsocketAuth,
 };
 pub use server::Server;

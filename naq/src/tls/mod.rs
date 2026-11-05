@@ -32,6 +32,8 @@ pub(crate) struct Acceptor {
     pub(crate) verify: bool,
     /// Their certificates name their users.
     map: bool,
+    /// The certificate authorities of `ca_file`.
+    roots: Vec<CertificateDer<'static>>,
 }
 
 impl std::fmt::Debug for Acceptor {
@@ -58,6 +60,7 @@ impl Acceptor {
         let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
             .map_err(|e| bad("protocols", &e))?;
+        let mut cas = Vec::new();
         let builder = match (&o.ca_file, o.verify) {
             (Some(ca), true) => {
                 let mut roots = rustls::RootCertStore::empty();
@@ -65,6 +68,7 @@ impl Acceptor {
                     .map_err(|e| bad(&ca.display().to_string(), &e))?
                 {
                     let c = c.map_err(|e| bad(&ca.display().to_string(), &e))?;
+                    cas.push(c.clone());
                     roots
                         .add(c)
                         .map_err(|e| bad(&ca.display().to_string(), &e))?;
@@ -88,6 +92,7 @@ impl Acceptor {
             timeout: o.timeout,
             verify: o.verify,
             map: o.map,
+            roots: cas,
         })
     }
 }
@@ -99,6 +104,41 @@ impl Acceptor {
         tcp: tokio::net::TcpStream,
     ) -> Option<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
         self.inner.accept(tcp).await.ok()
+    }
+
+    /// The TLS of the client of `tls`, as an auth callout request tells
+    /// it: its verified chain is the certificates it sent, then the
+    /// authority that issued the last.
+    pub(crate) fn info(
+        &self,
+        tls: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    ) -> crate::callout::request::TlsInfo {
+        let conn = tls.get_ref().1;
+        let version = match conn.protocol_version() {
+            Some(rustls::ProtocolVersion::TLSv1_3) => "1.3",
+            Some(rustls::ProtocolVersion::TLSv1_2) => "1.2",
+            _ => "",
+        };
+        // Go names TLS 1.3 suites without the version.
+        let cipher = conn
+            .negotiated_cipher_suite()
+            .and_then(|s| s.suite().as_str())
+            .map(|n| n.replacen("TLS13_", "TLS_", 1))
+            .unwrap_or_default();
+        let sent = conn.peer_certificates().unwrap_or_default();
+        let root = sent
+            .last()
+            .and_then(|last| self.roots.iter().find(|r| cert::issued_by(last, r)));
+        let chain = sent
+            .iter()
+            .chain(root)
+            .map(|c| crate::callout::request::pem(c))
+            .collect();
+        crate::callout::request::TlsInfo {
+            version,
+            cipher,
+            chain,
+        }
     }
 
     /// What the certificate of the client of `tls` names, where clients
@@ -131,6 +171,9 @@ pub(crate) async fn serve(lane: Rc<Lane>, mut hello: Hello, info: Vec<u8>, strea
         hello.client.out.borrow_mut().extend_from_slice(&info);
     }
     hello.via.cert = acc.names(&tls);
+    if lane.shared.callouts.is_some() {
+        hello.via.tls = Some(Box::new(acc.info(&tls)));
+    }
     let (r, w) = tokio::io::split(tls);
     crate::conn::serve(lane, hello, r, w).await;
 }

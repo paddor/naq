@@ -283,6 +283,73 @@ impl Trust {
     }
 }
 
+impl Trust {
+    /// The accounts whose users call out: those that name auth users.
+    pub(crate) fn callouts(&self) -> impl Iterator<Item = &Arc<JwtAccount>> {
+        self.accounts
+            .values()
+            .filter(|a| !a.claims.nats.authorization.auth_users.is_empty())
+    }
+
+    /// The user an answer of the callout of account `callout` lets in
+    /// with user JWT `user`, connecting as `kind`, as `nats-server` places
+    /// it: in the account that issued it, the callout account or one of
+    /// `allowed`, with its permissions and the account's limits; the
+    /// user's own limits do not count. Why not, if not.
+    pub(crate) fn placed(
+        &self,
+        user: &Claims<claims::User>,
+        callout: &str,
+        allowed: &[String],
+        kind: ConnectionType,
+    ) -> Result<User, String> {
+        let issuer = &user.nats.issuer_account;
+        let key = if issuer.is_empty() { &user.iss } else { issuer };
+        let any = allowed.len() == 1 && allowed[0] == "*";
+        if key != callout && !any && !allowed.contains(key) {
+            return Err(format!("account {:?} not permitted", user.iss));
+        }
+        let account = self
+            .account(key)
+            .ok_or_else(|| format!("no valid account {key:?}"))?;
+        let a = &account.claims;
+        let templated = self
+            .template(user, key, a)
+            .ok_or_else(|| format!("user JWT issuer {:?} is not known", user.iss))?;
+        let limits = templated.as_ref().unwrap_or(&user.nats.limits);
+        let end = time_left(limits)?;
+        if !connects_as(limits, kind) {
+            return Err("not allowed to use connection type".into());
+        }
+        let exp =
+            (user.exp > 0).then(|| UNIX_EPOCH + Duration::from_secs(user.exp.cast_unsigned()));
+        let own = &limits.permissions;
+        Ok(User {
+            account: account.id,
+            perms: if own.is_empty() {
+                account.defaults.clone()
+            } else {
+                defaults(own)
+            },
+            key: user.sub.clone(),
+            subs: a.nats.limits.subs,
+            payload: a.nats.limits.payload,
+            conns: a.nats.limits.conn,
+            expires: [exp, end].into_iter().flatten().min(),
+        })
+    }
+}
+
+/// When the time window of `limits` ends, if it does; an error outside
+/// it.
+pub(crate) fn time_left(limits: &claims::UserLimits) -> Result<Option<SystemTime>, String> {
+    match window(&limits.times, &limits.times_location, SystemTime::now()) {
+        Window::Always => Ok(None),
+        Window::Until(t) => Ok(Some(t)),
+        Window::Outside => Err("outside of valid connect times".into()),
+    }
+}
+
 /// The tighter of two limits, [`NO_LIMIT`] being none.
 const fn tighter(a: i64, b: i64) -> i64 {
     match (a, b) {
@@ -294,7 +361,7 @@ const fn tighter(a: i64, b: i64) -> i64 {
 
 /// Permissions of JWT permissions `p`, if they limit anything, as
 /// `nats-server` builds them: responses default to one within two minutes.
-fn defaults(p: &claims::Permissions) -> Option<Arc<Perms>> {
+pub(crate) fn defaults(p: &claims::Permissions) -> Option<Arc<Perms>> {
     if p.is_empty() {
         return None;
     }
@@ -325,7 +392,7 @@ fn defaults(p: &claims::Permissions) -> Option<Arc<Perms>> {
 /// Whether a user of `limits` may connect as `kind`: by its allowed
 /// connection types, of which `nats-server` drops those it does not know.
 /// None known of some given is none allowed.
-fn connects_as(limits: &claims::UserLimits, kind: ConnectionType) -> bool {
+pub(crate) fn connects_as(limits: &claims::UserLimits, kind: ConnectionType) -> bool {
     let types = &limits.allowed_connection_types;
     types.is_empty()
         || types

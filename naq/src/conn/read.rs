@@ -11,13 +11,12 @@ use naq_proto::{encode, subject};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Instant;
 
+use super::login::Later;
 use super::ping::Tick;
-use super::{Client, Close, Conn, Stage};
-use crate::ConnectionType;
-use crate::auth::{Check, Creds, Grant, Origin, Pending};
+use super::{Client, Close, Conn};
 use crate::index::{Entry, Found, Index, Interest};
 use crate::lane::Routing;
-use crate::perms::{Held, quoted};
+use crate::perms::quoted;
 
 /// Bytes a read may fill at least. With less room, the buffer takes back
 /// what was parsed already, or the read goes on in a buffer of
@@ -39,15 +38,15 @@ enum Stop {
     /// At a `PING` that must wait until every lane has this client's
     /// subscriptions.
     Fence,
-    /// After a `CONNECT` whose password must be compared off the lane.
-    Verify(Box<Pending>),
+    /// After a `CONNECT` whose login finishes off the parse loop.
+    Login(Box<Later>),
 }
 
 /// What to do after an operation.
-enum Step {
+pub(super) enum Step {
     Next,
     Fence,
-    Verify(Box<Pending>),
+    Login(Box<Later>),
 }
 
 impl Conn {
@@ -115,7 +114,7 @@ impl Conn {
                 self.unfenced = false;
                 self.pong();
             }
-            Stop::Verify(p) => self.verify(*p).await?,
+            Stop::Login(l) => self.later(*l).await?,
         }
         self.lane.flush();
         Ok(None)
@@ -148,7 +147,7 @@ impl Conn {
                     match step {
                         Ok(Step::Next) => {}
                         Ok(Step::Fence) => return (at, Ok(Stop::Fence)),
-                        Ok(Step::Verify(p)) => return (at, Ok(Stop::Verify(p))),
+                        Ok(Step::Login(l)) => return (at, Ok(Stop::Login(l))),
                         Err(close) => return (at, Err(close)),
                     }
                 }
@@ -269,133 +268,6 @@ impl Conn {
         }
     }
 
-    /// Applies a `CONNECT`.
-    #[inline(never)]
-    fn connect(&mut self, json: &[u8]) -> Result<Step, Close> {
-        let (mut creds, names) = self.opts.apply(json).map_err(|_| Close::Connect)?;
-        if let Some(cookies) = &self.via.cookies {
-            creds.fill(cookies);
-        }
-        self.client.headers.set(self.opts.headers);
-        let check = self.lane.shared.auth_for(self.via.ws).map(|auth| {
-            let nonce = self.nonce.as_deref().unwrap_or_default();
-            auth.check(&mut creds, nonce.as_bytes(), self.origin())
-        });
-        {
-            let mut meta = self.client.meta.borrow_mut();
-            (meta.name, meta.lang, meta.version) = names;
-            meta.websocket = self.via.ws;
-            meta.user = creds.user.or(creds.nkey);
-        }
-        match check {
-            None => {}
-            Some(Check::Pass(account)) => self.bind(account),
-            Some(Check::Fail) => return Err(Close::Auth),
-            Some(Check::Bcrypt(p)) => return Ok(Step::Verify(Box::new(p))),
-            Some(Check::User(u)) => self.bind_user(&u)?,
-        }
-        self.connected()?;
-        Ok(Step::Next)
-    }
-
-    /// An operation before any `CONNECT`: the client is the `no_auth_user`,
-    /// if there is one; else it is refused.
-    #[cold]
-    #[inline(never)]
-    fn without_connect(&mut self) -> Result<(), Close> {
-        let auth = self.lane.shared.auth_for(self.via.ws);
-        match auth.map(|a| a.check(&mut Creds::default(), b"", self.origin())) {
-            Some(Check::Pass(account)) => {
-                self.bind(account);
-                Ok(())
-            }
-            _ => Err(Close::Auth),
-        }
-    }
-
-    /// How the client connects, for the checks of its login.
-    fn origin(&self) -> Origin<'_> {
-        Origin {
-            ip: self.ip.parse().ok(),
-            kind: if self.via.ws {
-                ConnectionType::Websocket
-            } else {
-                ConnectionType::Standard
-            },
-            cert: self.via.cert.as_deref(),
-        }
-    }
-
-    /// Compares a password with its bcrypt hash off the lane, then finishes
-    /// the `CONNECT`.
-    async fn verify(&mut self, p: Pending) -> Result<(), Close> {
-        let grant = p.grant.clone();
-        let holds = tokio::task::spawn_blocking(move || p.holds()).await;
-        if !matches!(holds, Ok(true)) {
-            return Err(Close::Auth);
-        }
-        self.bind(grant);
-        self.connected()
-    }
-
-    /// Puts the client into `account`. Subscriptions in another it had are
-    /// dropped, as a new `CONNECT` drops them in `nats-server`.
-    fn bind(&mut self, grant: Grant) {
-        self.auth_by = None;
-        self.out.account = grant.account;
-        let held = grant.perms.map(|p| Rc::new(Held::new(p)));
-        self.client.guarded.set(held.is_some());
-        *self.client.held.borrow_mut() = held;
-        if self.client.account.get() == grant.account {
-            return;
-        }
-        let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
-        for sid in sids {
-            self.client.unsubscribe(&self.lane, &sid);
-        }
-        self.client.account.set(grant.account);
-    }
-
-    /// Puts the client into the account of user `u` of a JWT, with its
-    /// limits, unless the account has all the connections it may.
-    #[cold]
-    #[inline(never)]
-    fn bind_user(&mut self, u: &crate::jwt::trust::User) -> Result<(), Close> {
-        let shared = self.lane.shared.clone();
-        if self.bounds.counted != Some(u.account) {
-            if !shared.count(u.account, u.conns) {
-                return Err(Close::AccountConns);
-            }
-            if let Some(a) = self.bounds.counted.replace(u.account) {
-                shared.uncount(a);
-            }
-        }
-        self.bind(Grant {
-            account: u.account,
-            perms: u.perms.clone(),
-        });
-        let server = shared.opts.max_payload;
-        self.bounds.limits.max_payload =
-            usize::try_from(u.payload).map_or(server, |p| p.min(server));
-        self.bounds.subs = u.subs;
-        self.bounds.deadline = if u.subs == 0 {
-            // As `nats-server` does: once it is in, it is told and closed.
-            Some((
-                Instant::now() + std::time::Duration::from_millis(20),
-                Close::MaxSubs,
-            ))
-        } else {
-            u.expires.map(|t| {
-                let left = t
-                    .duration_since(std::time::SystemTime::now())
-                    .unwrap_or_default();
-                (Instant::now() + left, Close::UserExpired)
-            })
-        };
-        self.client.meta.borrow_mut().user = Some(u.key.clone());
-        Ok(())
-    }
-
     /// Whether it may send `p`, as `nats-server` checks a client's
     /// publish: not to a subject a gateway reserves, as its permissions
     /// say, not to `$NRG.`, and not with a reply imports and JetStream
@@ -462,25 +334,6 @@ impl Conn {
         };
         self.error(&text);
         false
-    }
-
-    /// The rest of a `CONNECT`, from a client that is who it says.
-    fn connected(&mut self) -> Result<(), Close> {
-        if self.stage == Stage::Fresh {
-            self.stage = Stage::Connected;
-        }
-        let interval = self.ping.interval;
-        let jitter = super::ping::jitter(interval, |n| self.lane.below(n));
-        let rtt = self.ping.connected(Instant::now(), interval, jitter);
-        self.client.rtt.set(rtt);
-        if !(0..=1).contains(&self.opts.protocol) {
-            return Err(Close::Refused(super::BAD_PROTOCOL));
-        }
-        if self.opts.no_responders && !self.opts.headers {
-            return Err(Close::Refused("no responders requires headers support"));
-        }
-        self.ok();
-        Ok(())
     }
 
     /// After a publish no subscription got: the status 503 to a requester

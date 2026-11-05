@@ -89,6 +89,16 @@ impl Perms {
         }
     }
 
+    /// Permissions `p`, or none, that deny publishing to `subject` too.
+    pub(crate) fn denying(p: Option<&Perms>, subject: &[u8]) -> Perms {
+        let mut rules = p.map(|p| p.rules.clone()).unwrap_or_default();
+        rules
+            .publish
+            .deny
+            .push(String::from_utf8_lossy(subject).into_owned());
+        Perms::new(&rules)
+    }
+
     /// Whether the rules let it publish to `subject`; replies aside.
     pub(crate) fn publish(&self, subject: &[u8]) -> bool {
         self.publish.allow.as_ref().is_none_or(|a| a.plain(subject))

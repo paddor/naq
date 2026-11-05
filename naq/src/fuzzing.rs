@@ -50,6 +50,7 @@ pub fn jwt(data: &[u8]) {
     let _ = crate::jwt::decode::<crate::jwt::claims::Account>(token);
     let _ = crate::jwt::decode::<crate::jwt::claims::User>(token);
     let _ = crate::jwt::decode::<crate::jwt::claims::Activation>(token);
+    let _ = crate::jwt::decode::<crate::jwt::claims::AuthResponse>(token);
 }
 
 /// Reads a client certificate as `verify_and_map` reads it, and the

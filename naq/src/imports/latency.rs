@@ -8,7 +8,7 @@ use naq_proto::client::Pub;
 use serde::Serialize;
 
 use super::info::ClientInfo;
-use crate::lane::{Imported, Lane, Outs, Routing};
+use crate::lane::{Lane, Outs};
 use crate::{Latency, Sampling};
 
 /// Headers that asked for a sample, by their canonical names.
@@ -266,23 +266,14 @@ pub(crate) fn rfc3339_nano(t: SystemTime) -> String {
 /// with an empty reply, as `nats-server` sends a sample: routed on `lane`,
 /// what goes on held in `out`.
 pub(crate) fn publish(lane: &Lane, out: &mut Outs, account: u32, subject: &[u8], payload: &[u8]) {
-    let Imported { arena, outs, .. } = out.imported(lane);
-    let at = arena.len();
-    arena.extend_from_slice(subject);
-    arena.extend_from_slice(payload);
-    let base: &[u8] = arena;
     let p = Pub {
-        subject: &base[at..at + subject.len()],
+        subject,
         // Empty, not absent: the `MSG` line has two blanks before the size.
-        reply: Some(&base[at..at]),
+        reply: Some(b""),
         headers: None,
-        payload: &base[at + subject.len()..],
+        payload,
     };
-    let out = Imported::outs_of(outs, lane, account, false);
-    let index = lane.index(account).borrow();
-    if let Some(found) = index.matches(p.subject) {
-        Routing::new(lane, out, &p, base, 0).route(&found);
-    }
+    crate::lane::inject(lane, out, account, &p);
 }
 
 #[cfg(test)]

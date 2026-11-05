@@ -298,3 +298,32 @@ fn merged_before(found: &Few<'_, Interest>, k: usize, name: &[u8]) -> bool {
         .take(k)
         .any(|i| i.queues.iter().any(|(n, _)| **n == *name))
 }
+
+/// Publishes `m` in `account` from the server itself, copied into the
+/// arena of `out`: routed on `lane`, what goes on held in `out`.
+pub(crate) fn inject(lane: &Lane, out: &mut Outs, account: u32, m: &Pub<'_>) {
+    let super::Imported { arena, outs, .. } = out.imported(lane);
+    let at = arena.len();
+    let (reply, headers) = (m.reply.unwrap_or_default(), m.headers.unwrap_or_default());
+    for part in [m.subject, reply, headers, m.payload] {
+        arena.extend_from_slice(part);
+    }
+    let base: &[u8] = arena;
+    let mut next = at;
+    let mut take = |len: usize| {
+        let part = &base[next..next + len];
+        next += len;
+        part
+    };
+    let p = Pub {
+        subject: take(m.subject.len()),
+        reply: m.reply.map(|r| take(r.len())),
+        headers: m.headers.map(|h| take(h.len())),
+        payload: take(m.payload.len()),
+    };
+    let out = super::Imported::outs_of(outs, lane, account, false);
+    let index = lane.index(account).borrow();
+    if let Some(found) = index.matches(p.subject) {
+        Routing::new(lane, out, &p, base, 0).route(&found);
+    }
+}

@@ -1,6 +1,7 @@
 //! `nats-server` configuration files, the part of them naq serves.
 
 mod auth;
+pub(crate) mod callout;
 mod cluster;
 mod imports;
 mod leaf;
@@ -75,6 +76,13 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
         at: at(line, file),
         reason,
     })?;
+    // As in `nats-server`: with TLS, clients have a second more than the
+    // handshake takes to log in, unless the file says otherwise.
+    if let Some(t) = &opts.tls
+        && !auth::timed(&map)
+    {
+        opts.auth_timeout = t.timeout + Duration::from_secs(1);
+    }
     let whole = || file.map_or_else(|| "config".into(), |f| f.display().to_string());
     crate::auth::validate(&opts).map_err(|reason| Error::Config {
         at: whole(),

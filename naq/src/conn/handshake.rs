@@ -120,6 +120,8 @@ struct Info<'a> {
     /// With a cluster: this server's client URL, then the others'.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     connect_urls: Vec<String>,
+    /// The server's curve key, for sealed auth callouts.
+    xkey: String,
 }
 
 /// The client an `INFO` is for.
@@ -172,6 +174,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
         bound: bound.is_some(),
         remote_account: bound,
         connect_urls: connect_urls(shared),
+        xkey: shared.keys.xkey.public_key(),
     };
     // Cannot fail: no maps, no fallible serializers.
     let json = serde_json::to_vec(&info).unwrap_or_default();

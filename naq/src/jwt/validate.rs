@@ -40,8 +40,30 @@ pub(crate) fn account(c: &Claims<claims::Account>) -> Result<(), String> {
     if !a.mappings.is_empty() {
         return Err("subject mappings are not supported".into());
     }
-    if !a.authorization.auth_users.is_empty() {
-        return Err("auth callout is not supported".into());
+    authorization(&a.authorization)
+}
+
+/// The auth callout of an account, as nats-io/jwt checks it.
+fn authorization(a: &claims::Authorization) -> Result<(), String> {
+    if a.auth_users.is_empty() && !a.allowed_accounts.is_empty() {
+        return Err("External authorization cannot have accounts without users specified".into());
+    }
+    if let Some(u) = a.auth_users.iter().find(|u| !super::is_key(u, 'U')) {
+        return Err(format!("AuthUser {u:?} is not a valid user public key"));
+    }
+    let any = a.allowed_accounts.iter().any(|k| k == "*");
+    if any && a.allowed_accounts.len() > 1 {
+        return Err("AllowedAccounts can only be a list of accounts or \"*\"".into());
+    }
+    if let Some(k) = a
+        .allowed_accounts
+        .iter()
+        .find(|k| !any && !super::is_key(k, 'A'))
+    {
+        return Err(format!("Account {k:?} is not a valid account public key"));
+    }
+    if !a.xkey.is_empty() && !crate::config::callout::is_curve_key(&a.xkey) {
+        return Err(format!("XKey {:?} is not a valid public xkey", a.xkey));
     }
     Ok(())
 }
@@ -371,14 +393,34 @@ mod tests {
             ..Account::default()
         };
         assert!(check(a).unwrap_err().contains("mappings"));
-        let a = Account {
-            limits: open(),
-            authorization: crate::jwt::claims::Authorization {
-                auth_users: vec!["U".into()],
-                ..Default::default()
-            },
-            ..Account::default()
+    }
+
+    #[test]
+    fn auth_callouts_that_nats_io_jwt_refuses_refuse_the_account() {
+        let user = nkeys::KeyPair::new_user().public_key();
+        let account = nkeys::KeyPair::new_account().public_key();
+        let with = |users: &[&str], allowed: &[&str], xkey: &str| {
+            check(Account {
+                limits: open(),
+                authorization: crate::jwt::claims::Authorization {
+                    auth_users: users.iter().map(|u| (*u).to_owned()).collect(),
+                    allowed_accounts: allowed.iter().map(|a| (*a).to_owned()).collect(),
+                    xkey: xkey.into(),
+                },
+                ..Account::default()
+            })
         };
-        assert!(check(a).unwrap_err().contains("auth callout"));
+        let x = nkeys::XKey::new().public_key();
+        assert!(with(&[&user], &[&account], &x).is_ok());
+        assert!(with(&[&user], &["*"], "").is_ok());
+        for (bad, why) in [
+            (with(&[], &[&account], ""), "without users"),
+            (with(&["U"], &[], ""), "not a valid user"),
+            (with(&[&user], &["*", &account], ""), "a list of accounts"),
+            (with(&[&user], &["A"], ""), "not a valid account"),
+            (with(&[&user], &[], &account), "XKey"),
+        ] {
+            assert!(bad.unwrap_err().contains(why), "{why}");
+        }
     }
 }

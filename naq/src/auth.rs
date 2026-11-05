@@ -174,6 +174,18 @@ impl Pending {
     }
 }
 
+#[cfg(test)]
+impl Pending {
+    /// A comparison that never holds, of a user that gets `grant`.
+    pub(crate) const fn for_tests(grant: Grant) -> Pending {
+        Pending {
+            hash: String::new(),
+            password: String::new(),
+            grant,
+        }
+    }
+}
+
 /// The name of the system account `nats-server` makes.
 pub(crate) const SYSTEM: &str = "$SYS";
 
@@ -242,6 +254,7 @@ pub(crate) fn validate(opts: &Options) -> Result<(), String> {
         return Err(format!("no_auth_user {n:?} is not a user"));
     }
     crate::jwt::trust::validate(opts)?;
+    crate::callout::validate(opts)?;
     if let Some(a) = system_name(opts)
         && !accounts(opts).contains(&a)
     {
@@ -455,6 +468,40 @@ impl Auth {
             }
         }
         Some(auth)
+    }
+
+    /// The operator mode users log in under, if any.
+    pub(crate) fn trust(&self) -> Option<&crate::jwt::trust::Trust> {
+        self.trust.as_deref()
+    }
+
+    /// Whom credentials `c` name, before any secret is checked, as
+    /// `nats-server` tells auth callout users: a configured NKey, the
+    /// `no_auth_user` for none, or a configured user name.
+    pub(crate) fn id_of<'a>(&'a self, c: &'a Creds) -> Option<&'a str> {
+        if !self.nkeys.is_empty()
+            && let Some(key) = &c.nkey
+        {
+            return self.nkeys.contains_key(key).then_some(key.as_str());
+        }
+        if c.is_blank() {
+            return self.no_auth_user.as_deref();
+        }
+        c.user.as_deref().filter(|u| self.users.contains_key(*u))
+    }
+
+    /// Credentials `c` as `nats-server` fills them in for none: those of
+    /// the `no_auth_user`.
+    pub(crate) fn fill_free(&self, c: &mut Creds) {
+        let Some(u) = self.no_auth_user.as_ref().filter(|_| c.is_blank()) else {
+            return;
+        };
+        if self.nkeys.contains_key(u) {
+            c.nkey = Some(u.clone());
+        } else if let Some((pass, _)) = self.users.get(u) {
+            c.user = Some(u.clone());
+            c.pass = Some(pass.clone());
+        }
     }
 
     /// Whether clients may connect without credentials, as the
@@ -1002,6 +1049,50 @@ mod tests {
             ..creds(Some("a"), Some("p"), None)
         };
         assert_eq!(check(&auth, &c, b""), pass(0));
+    }
+
+    #[test]
+    fn credentials_name_users_before_any_secret_is_checked() {
+        let opts = Options {
+            users: vec![
+                user("a", "p", None),
+                User {
+                    login: Login::Nkey(PUBLIC.into()),
+                    account: None,
+                    permissions: None,
+                    connection_types: Vec::new(),
+                },
+            ],
+            no_auth_user: Some("a".into()),
+            ..Options::default()
+        };
+        let auth = Auth::new(&opts, &accounts(&opts)).unwrap();
+        let nkey = |key: &str| Creds {
+            nkey: Some(key.into()),
+            ..Creds::default()
+        };
+        assert_eq!(auth.id_of(&nkey(PUBLIC)), Some(PUBLIC));
+        assert_eq!(auth.id_of(&nkey("UOTHER")), None, "an NKey no user has");
+        assert_eq!(
+            auth.id_of(&creds(Some("a"), Some("wrong"), None)),
+            Some("a")
+        );
+        assert_eq!(auth.id_of(&creds(Some("x"), None, None)), None);
+        assert_eq!(auth.id_of(&Creds::default()), Some("a"), "the no_auth_user");
+        let mut free = Creds::default();
+        auth.fill_free(&mut free);
+        assert_eq!(free, creds(Some("a"), Some("p"), None));
+        let mut given = creds(Some("b"), None, None);
+        auth.fill_free(&mut given);
+        assert_eq!(given, creds(Some("b"), None, None), "only for none");
+        let by_key = Options {
+            no_auth_user: Some(PUBLIC.into()),
+            ..opts
+        };
+        let auth = Auth::new(&by_key, &accounts(&by_key)).unwrap();
+        let mut free = Creds::default();
+        auth.fill_free(&mut free);
+        assert_eq!(free, nkey(PUBLIC));
     }
 
     #[test]

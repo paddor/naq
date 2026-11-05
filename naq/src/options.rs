@@ -65,6 +65,9 @@ pub struct Options {
     /// Permissions of users that have none of their own
     /// (`authorization { default_permissions }`).
     pub default_permissions: Option<Permissions>,
+    /// Clients log in as an auth service answers
+    /// (`authorization { auth_callout }`).
+    pub auth_callout: Option<AuthCallout>,
     /// Hubs this server dials as a leaf node (`leafnodes { remotes }`).
     pub remotes: Vec<Remote>,
     /// naq leaf nodes this server takes as their hub, over OMQ
@@ -291,6 +294,25 @@ pub enum ImportKind {
     },
 }
 
+/// Auth callout (`authorization { auth_callout }`): a client logs in as
+/// an auth service answers a request about it on `$SYS.REQ.USER.AUTH`,
+/// as in `nats-server`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthCallout {
+    /// The public account key that signs the service's answers (`issuer`).
+    pub issuer: String,
+    /// The account the service answers in (`account`); `None` for `$G`.
+    pub account: Option<String>,
+    /// The users of the service, by name or NKey: they log in as
+    /// configured (`auth_users`).
+    pub auth_users: Vec<String>,
+    /// The service's public curve key, if requests and answers are sealed
+    /// (`xkey`).
+    pub xkey: Option<String>,
+    /// The accounts whose users call out; empty is all (`allowed_accounts`).
+    pub allowed_accounts: Vec<String>,
+}
+
 /// A user that may connect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
@@ -438,6 +460,7 @@ impl Default for Options {
             no_auth_user: None,
             auth_timeout: Duration::from_secs(2),
             default_permissions: None,
+            auth_callout: None,
             remotes: Vec::new(),
             leafnodes: None,
             leaf_reconnect: Duration::from_secs(1),

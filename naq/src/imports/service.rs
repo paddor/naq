@@ -25,6 +25,8 @@ pub(crate) enum Tap {
     /// The responses to requests this server sent into the account, on
     /// `_R_.<prefix>.>`.
     Responses(Arc<Responses>),
+    /// The answers to auth callout requests, on `$SYS._INBOX.<hash>.*`.
+    Callout(Arc<crate::callout::Waiting>),
     /// A shadow of the plain interest of a naq hub or leaf in `slot`, bound
     /// to account `importer`, for its stream import `import`.
     Shadow {
@@ -366,6 +368,7 @@ impl Run<'_, '_> {
             delivered |= match *tap {
                 Tap::Service(ref si) => self.request(w, si),
                 Tap::Responses(ref r) => self.response(w, r),
+                Tap::Callout(ref c) => self.callout(w, c),
                 Tap::Shadow {
                     slot,
                     importer,
@@ -483,6 +486,14 @@ impl Run<'_, '_> {
     /// Sends the response `w` holds back to the requester, by the reply it
     /// came on. The first one sends the latency sample of a sampled
     /// request.
+    /// Hands the answer `w` holds to the auth callout request it names.
+    fn callout(&mut self, w: Work, c: &crate::callout::Waiting) -> bool {
+        let (lane, m) = (self.lane, self.m);
+        let imported = self.out.imported(lane);
+        let src = message(m, &imported.arena, w.msg);
+        c.answer(w.account, src.subject, src.payload)
+    }
+
     fn response(&mut self, w: Work, r: &Responses) -> bool {
         let (lane, m) = (self.lane, self.m);
         let imported = self.out.imported(lane);

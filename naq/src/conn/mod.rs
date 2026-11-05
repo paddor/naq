@@ -1,6 +1,7 @@
 //! One client connection: `INFO`, the read loop and the writer.
 
 mod handshake;
+mod login;
 mod ping;
 mod read;
 mod write;
@@ -235,6 +236,8 @@ pub(crate) struct Via {
     /// What its certificate names, where its listener maps certificates
     /// to users.
     pub(crate) cert: Option<Box<crate::tls::cert::Names>>,
+    /// Its TLS, as auth callout requests tell it.
+    pub(crate) tls: Option<Box<crate::callout::request::TlsInfo>>,
 }
 
 /// The reader's side of a connection.
@@ -334,6 +337,7 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
         ws,
         cookies: None,
         cert: None,
+        tls: None,
     };
     (Hello { client, nonce, via }, info)
 }

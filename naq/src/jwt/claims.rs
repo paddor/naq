@@ -289,6 +289,17 @@ pub(crate) struct User {
     pub(crate) tags: Vec<String>,
 }
 
+/// The body of the answer of an auth callout service.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub(crate) struct AuthResponse {
+    /// The user JWT it lets in, or none.
+    pub(crate) jwt: String,
+    /// Why it keeps the client out, or nothing.
+    pub(crate) error: String,
+    pub(crate) issuer_account: String,
+}
+
 /// The body of an activation JWT: a token to import an export.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]

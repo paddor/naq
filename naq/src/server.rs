@@ -27,8 +27,9 @@ pub(crate) struct Shared {
     pub(crate) opts: Options,
     /// Where clients connect, as bound.
     pub(crate) addr: SocketAddr,
-    /// Random part of the server ID in `INFO`.
+    /// The server ID in `INFO`: the public key of `keys.server`.
     pub(crate) server_id: String,
+    pub(crate) keys: Keys,
     /// The way into each lane.
     pub(crate) lanes: Box<[lane::LaneTx]>,
     /// Account names by id, `$G` first.
@@ -49,6 +50,8 @@ pub(crate) struct Shared {
     pub(crate) auth: Option<Auth>,
     /// What WebSocket clients authenticate with, where it is not `auth`.
     ws_auth: Option<Auth>,
+    /// The auth callouts clients log in through, if any.
+    pub(crate) callouts: Option<crate::callout::Callouts>,
     /// The loop detection subject of each account on leaf node links.
     pub(crate) lds: Box<[String]>,
     /// Message counts of each lane.
@@ -159,21 +162,21 @@ impl Server {
             ..Config::default()
         })
         .map_err(|e| Error::Lanes(io(e)))?;
-        let listen = |source| Error::Listen {
-            addr: format!("{}:{}", opts.host, opts.port),
-            source,
-        };
-        let (client, addr) = bind(&ctx, &opts.host, opts.port).map_err(listen)?;
-        let monitor = bind_monitor(&ctx, opts)?;
-        let ws = bind_websocket(&ctx, opts)?;
-        let monitor_addr = monitor.as_ref().map(|(_, a)| *a);
-        let ws_addr = ws.as_ref().map(|(_, a)| *a);
+        let (ports, at) = bind_all(&ctx, opts)?;
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
+        let keys = Keys::new();
         let shared = Arc::new(Shared {
             id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
             opts: opts.clone(),
-            addr,
-            server_id: server_id(),
+            addr: at.client,
+            callouts: crate::callout::Callouts::new(
+                opts,
+                &accounts,
+                auth.as_ref(),
+                node(&opts.server_name),
+            ),
+            server_id: keys.server.public_key(),
+            keys,
             lanes: txs.into_boxed_slice(),
             lds: accounts.iter().map(|_| crate::leaf::lds()).collect(),
             conns: std::iter::repeat_with(Default::default)
@@ -187,7 +190,7 @@ impl Server {
             started: std::time::SystemTime::now(),
             gone: AtomicU64::new(0),
             tls: setup.tls,
-            ws: door(opts, ws_addr, setup.ws_tls),
+            ws: door(opts, at.ws, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
             responses: responses(setup.imports.len()),
             imports: setup.imports,
@@ -196,17 +199,12 @@ impl Server {
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });
-        let ports = Ports {
-            client,
-            monitor: monitor.map(|(l, _)| l),
-            ws: ws.map(|(l, _)| l),
-        };
         let mesh = run(&ctx, &shared, rxs, ports)?;
         Ok(Server {
             _ctx: ctx,
-            addr,
-            monitor: monitor_addr,
-            websocket: ws_addr,
+            addr: at.client,
+            monitor: at.monitor,
+            websocket: at.ws,
             mesh,
         })
     }
@@ -390,6 +388,35 @@ fn lanes(wanted: usize) -> usize {
 }
 
 /// Binds the monitoring port, if `opts` want one.
+/// Where a server's listeners are bound.
+struct Addrs {
+    client: SocketAddr,
+    monitor: Option<SocketAddr>,
+    ws: Option<SocketAddr>,
+}
+
+/// The listeners of `opts`: for clients, monitoring and WebSocket.
+fn bind_all(ctx: &Context, opts: &Options) -> Result<(Ports, Addrs), Error> {
+    let listen = |source| Error::Listen {
+        addr: format!("{}:{}", opts.host, opts.port),
+        source,
+    };
+    let (client, addr) = bind(ctx, &opts.host, opts.port).map_err(listen)?;
+    let monitor = bind_monitor(ctx, opts)?;
+    let ws = bind_websocket(ctx, opts)?;
+    let at = Addrs {
+        client: addr,
+        monitor: monitor.as_ref().map(|(_, a)| *a),
+        ws: ws.as_ref().map(|(_, a)| *a),
+    };
+    let ports = Ports {
+        client,
+        monitor: monitor.map(|(l, _)| l),
+        ws: ws.map(|(l, _)| l),
+    };
+    Ok((ports, at))
+}
+
 fn bind_monitor(ctx: &Context, opts: &Options) -> Result<Option<(Listener, SocketAddr)>, Error> {
     let Some(port) = opts.http_port else {
         return Ok(None);
@@ -531,20 +558,28 @@ fn random() -> impl FnMut(u64) -> u64 {
     }
 }
 
-fn server_id() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let state = std::collections::hash_map::RandomState::new();
-    let mut id = String::with_capacity(22);
-    let mut bits = 0u64;
-    for i in 0..22 {
-        if i % 12 == 0 {
-            let mut h = state.build_hasher();
-            h.write_usize(i);
-            bits = h.finish();
+/// The keys a server makes at each start, as `nats-server` does.
+pub(crate) struct Keys {
+    /// Its NKey: it signs auth callout requests.
+    pub(crate) server: nkeys::KeyPair,
+    /// Its curve key, for sealed auth callouts.
+    pub(crate) xkey: nkeys::XKey,
+}
+
+impl Keys {
+    fn new() -> Keys {
+        Keys {
+            server: nkeys::KeyPair::new_server(),
+            xkey: nkeys::XKey::new(),
         }
-        id.push(char::from(ALPHABET[(bits & 31) as usize]));
-        bits >>= 5;
     }
-    id
+}
+
+impl std::fmt::Debug for Keys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keys")
+            .field("server", &self.server.public_key())
+            .field("xkey", &self.xkey.public_key())
+            .finish()
+    }
 }

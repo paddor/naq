@@ -165,23 +165,10 @@ fn escape(v: &str) -> String {
 }
 
 /// The names in certificate `der`; `None` if it is not one Go reads.
-fn read(mut der: &[u8]) -> Option<Names> {
-    let mut cert = expect(&mut der, 0x30)?;
-    let mut tbs = expect(&mut cert, 0x30)?;
-    let (mut tag, _) = element(&mut tbs)?;
-    if tag == 0xa0 {
-        // The version, then the serial number.
-        (tag, _) = element(&mut tbs)?;
-    }
-    if tag != 0x02 {
-        return None;
-    }
-    // The signature algorithm, the issuer and the validity.
-    for _ in 0..3 {
-        expect(&mut tbs, 0x30)?;
-    }
+fn read(der: &[u8]) -> Option<Names> {
+    let (_, raw, mut tbs) = parts(der)?;
     let mut names = Names {
-        subject: subject(expect(&mut tbs, 0x30)?)?,
+        subject: subject(raw)?,
         ..Names::default()
     };
     expect(&mut tbs, 0x30)?;
@@ -192,6 +179,35 @@ fn read(mut der: &[u8]) -> Option<Names> {
         }
     }
     Some(names)
+}
+
+/// The contents of the issuer and the subject of certificate `der`, and
+/// what follows them.
+fn parts(mut der: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
+    let mut cert = expect(&mut der, 0x30)?;
+    let mut tbs = expect(&mut cert, 0x30)?;
+    let (mut tag, _) = element(&mut tbs)?;
+    if tag == 0xa0 {
+        // The version, then the serial number.
+        (tag, _) = element(&mut tbs)?;
+    }
+    if tag != 0x02 {
+        return None;
+    }
+    expect(&mut tbs, 0x30)?;
+    let issuer = expect(&mut tbs, 0x30)?;
+    expect(&mut tbs, 0x30)?;
+    let subject = expect(&mut tbs, 0x30)?;
+    Some((issuer, subject, tbs))
+}
+
+/// Whether certificate `ca` issued certificate `cert`, by their names,
+/// and `cert` is not `ca` itself.
+pub(crate) fn issued_by(cert: &[u8], ca: &[u8]) -> bool {
+    match (parts(cert), parts(ca)) {
+        (Some((issuer, _, _)), Some((_, of_ca, _))) => issuer == of_ca && cert != ca,
+        _ => false,
+    }
 }
 
 /// The RDNs of a subject's contents.
