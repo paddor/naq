@@ -7,6 +7,7 @@ mod side;
 mod tls;
 pub(crate) mod url;
 
+pub(crate) use link::{LOOP_DELAY, err_delay, loop_error};
 pub(crate) use side::{Facts, LinkSide};
 pub(crate) use tls::Connector;
 pub(crate) use url::HubUrl;

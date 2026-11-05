@@ -95,6 +95,7 @@ fn peer_frames() -> Vec<Vec<u8>> {
         },
         Control::Beat { epoch: 1, seq: 1 },
         Control::Resync,
+        Control::Error(b"Loop detected"),
     ];
     let mut all: Vec<Vec<u8>> = controls
         .iter()

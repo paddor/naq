@@ -267,6 +267,10 @@ Notable changes to naq. The format follows
   whose hub says nothing for 3 s, gives way to the next. A hub tells its
   leafs where its cluster's servers take leafs, and those URLs come first
   after a link, as in `nats-server`; `peer::Hello` has `leaf_urls`.
+- `naq`: naq links find loops as `nats-server` does. Each side tells the
+  other of its account's `$LDS.` subject; a side that hears its own back
+  sends `peer::Control::Error` (`Loop detected for leafnode account=...`)
+  and lets the link go, and the leaf waits 30 s before it dials again.
 - `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
   `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
   per run, from the same configuration file for `nats-server` and naq

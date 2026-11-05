@@ -29,7 +29,7 @@ const FIRST_INFO: Duration = Duration::from_secs(1);
 /// Time the hub has to answer the `CONNECT` with an `INFO`.
 const CONNECT_INFO: Duration = Duration::from_secs(2);
 /// The wait after an error that says the link loops.
-const LOOP_DELAY: Duration = Duration::from_secs(30);
+pub(crate) const LOOP_DELAY: Duration = Duration::from_secs(30);
 /// The wait after a hub refuses this server's version.
 const VERSION_DELAY: Duration = Duration::from_secs(5);
 /// How long the writer may take to write what is left at the end.
@@ -609,10 +609,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             LeafOp::Sub(i) if i.subject == lds => {
                 // Our own subject came back: the links loop.
                 let account = &self.lane.shared.accounts[client.account.get() as usize];
-                self.send_err(
-                client,
-                &format!("Loop detected for leafnode account={account:?}. Delaying attempt to reconnect for 30s"),
-            );
+                self.send_err(client, &loop_error(account));
                 return Err(LOOP_DELAY);
             }
             LeafOp::Sub(i) => side.hub_interest(self.lane, &i, true),
@@ -679,8 +676,14 @@ fn cluster_error(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The error a link of `account` that loops ends with, as `nats-server`
+/// words it.
+pub(crate) fn loop_error(account: &str) -> String {
+    format!("Loop detected for leafnode account={account:?}. Delaying attempt to reconnect for 30s")
+}
+
 /// How long to wait before dialing again after the hub sent `-ERR text`.
-fn err_delay(text: &[u8]) -> End {
+pub(crate) fn err_delay(text: &[u8]) -> End {
     let has = |s: &[u8]| text.windows(s.len()).any(|w| w == s);
     if has(b"Loop detected") || has(b"remote leafnode has same cluster name") {
         LOOP_DELAY

@@ -218,6 +218,13 @@ fn socket_options(identity: Bytes) -> Options {
     }
 }
 
+/// `Error` `why`, encoded.
+fn error(why: &str) -> Bytes {
+    let mut out = Vec::new();
+    Control::Error(why.as_bytes()).encode(&mut out);
+    out.into()
+}
+
 /// A `Resync`, encoded.
 fn resync() -> Bytes {
     let mut out = Vec::new();

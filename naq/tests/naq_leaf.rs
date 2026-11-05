@@ -95,11 +95,16 @@ fn leafz(s: &Server, f: impl Fn(&serde_json::Value) -> bool) -> serde_json::Valu
     }
 }
 
-/// The subjects `s`'s only link hears of.
+/// The subjects `s`'s only link hears of, but loop detection ones.
 fn subjects(z: &serde_json::Value) -> Vec<String> {
     z["leafs"][0]["subscriptions_list"]
         .as_array()
-        .map(|l| l.iter().map(|s| s.as_str().unwrap().to_owned()).collect())
+        .map(|l| {
+            l.iter()
+                .map(|s| s.as_str().unwrap().to_owned())
+                .filter(|s| !s.starts_with("$LDS."))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -173,6 +178,55 @@ fn linked() -> (Server, Server) {
     leafz(&h, |z| z["leafnodes"] == 1);
     leafz(&l, |z| z["leafnodes"] == 1);
     (h, l)
+}
+
+#[test]
+fn each_side_of_a_link_tells_the_other_of_its_loop_detection_subject() {
+    let (h, l) = linked();
+    for s in [&h, &l] {
+        leafz(s, |z| {
+            let all = z["leafs"][0]["subscriptions_list"].as_array().unwrap();
+            all.iter().any(|x| x.as_str().unwrap().starts_with("$LDS."))
+        });
+    }
+}
+
+#[test]
+fn links_that_loop_are_let_go_and_wait() {
+    let ports = [free_port(), free_port()];
+    let proxy = Proxy::to("127.0.0.1", ports[0]);
+    proxy.cut();
+    let at = |i: usize, name: &str, hub: u16| {
+        Server::start(&Options {
+            leafnodes: Some(Leafnodes {
+                host: "127.0.0.1".into(),
+                port: ports[i],
+                account: None,
+            }),
+            remotes: vec![naq_remote(hub)],
+            ..base(name)
+        })
+        .unwrap()
+    };
+    // A leaf of B; B a leaf of A, once the proxy lets it through.
+    let a = at(0, "a", ports[1]);
+    let b = at(1, "b", proxy.port);
+    leafz(&a, |z| z["leafnodes"] == 1);
+    leafz(&b, |z| z["leafnodes"] == 1);
+    proxy.set(OPEN);
+    let quiet = |s: &Server| {
+        let deadline = Instant::now() + WAIT;
+        let mut since = Instant::now();
+        while since.elapsed() < Duration::from_secs(1) {
+            if get(s, "/leafz")["leafnodes"] != 0 {
+                since = Instant::now();
+            }
+            assert!(Instant::now() < deadline, "/leafz: {}", get(s, "/leafz"));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    quiet(&a);
+    quiet(&b);
 }
 
 #[test]

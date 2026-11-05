@@ -44,6 +44,7 @@ const SNAPSHOT_END: u8 = 4;
 const DELTA: u8 = 5;
 const BEAT: u8 = 6;
 const RESYNC: u8 = 7;
+const ERROR: u8 = 8;
 const BATCH: u8 = 16;
 
 const REPLY: u8 = 1;
@@ -112,6 +113,9 @@ pub enum Control<'a> {
     },
     /// The receiver lost track and asks for a snapshot.
     Resync,
+    /// The link cannot go on, and the sender lets it go: why, as
+    /// `nats-server` words its `-ERR`.
+    Error(&'a [u8]),
 }
 
 /// What the sender of a [`Hello`] is to the receiver.
@@ -229,6 +233,10 @@ impl Control<'_> {
                 out.put_u64_le(*seq);
             }
             Control::Resync => out.put_u8(RESYNC),
+            Control::Error(why) => {
+                out.put_u8(ERROR);
+                short(out, why);
+            }
         }
     }
 }
@@ -296,6 +304,7 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
             seq: r.u64()?,
         },
         RESYNC => Control::Resync,
+        ERROR => Control::Error(r.short()?),
         k => return Err(Error::Kind(k)),
     };
     r.done()?;

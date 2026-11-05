@@ -2,7 +2,7 @@
 //! each, with a routing identity of its own for every connection, and data
 //! channels to every lane of the hub.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,9 +16,9 @@ use super::control::{reachable, reachable_url};
 use super::interest::{Change, Heard};
 use super::tell::{self, BEAT, Item, Other, Sink};
 use super::told::Told;
-use super::{Mesh, endpoint, resync, socket_options};
+use super::{Mesh, endpoint, error, resync, socket_options};
 use crate::lane::Control as LaneControl;
-use crate::leaf::{HubUrl, url};
+use crate::leaf::{HubUrl, LOOP_DELAY, err_delay, loop_error, url};
 use crate::server::Shared;
 
 /// How long a hub has to say `Hello` on a new connection, before the next
@@ -57,6 +57,11 @@ impl Hub {
         let name = r.account.as_deref().unwrap_or("$G");
         // Known to exist: the options were checked.
         let account = shared.accounts.iter().position(|a| a == name).unwrap_or(0);
+        let told = Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default()));
+        // Accounts are few: their count fits.
+        told.pin(account as u32, shared.lds[account].as_bytes());
+        // Its snapshot carries it.
+        told.take();
         Hub {
             slot,
             remote,
@@ -67,7 +72,7 @@ impl Hub {
             up: false,
             name: String::new(),
             heard: Heard::default(),
-            told: Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default())),
+            told,
             link: shared.next_client(),
         }
     }
@@ -96,7 +101,6 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
             urls.swap(i, j);
         }
     }
-    let ctx = omq_tokio::Context::current();
     let interval = shared.opts.leaf_reconnect;
     let mut n = 0u64;
     loop {
@@ -106,28 +110,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
         urls.push_back(url.clone());
         n += 1;
         let id = format!("{}/{remote}/{n}", shared.server_id);
-        let s = ctx.socket(SocketType::Dealer, socket_options(id.clone().into()));
-        let events = s.monitor();
-        let mut found = None;
-        if s.connect(endpoint(&url.host, url.port)).await.is_ok() {
-            {
-                let mut hubs = mesh.hubs.borrow_mut();
-                hubs[at].host.clone_from(&url.host);
-                hubs[at].port = url.port;
-            }
-            let link = Link {
-                shared: &shared,
-                mesh: &mesh,
-                at,
-                id: id.into(),
-                s: &s,
-                found: RefCell::new(None),
-            };
-            link.serve(events).await;
-            link.down();
-            found = link.found.take();
-        }
-        let _ = s.close().await;
+        let (found, delay) = connect(&shared, &mesh, at, &url, id).await;
         let wait = match found {
             Some(found) => {
                 urls = url::rebuild(&found, &configured).into();
@@ -136,8 +119,46 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
             // Some jitter, so leafs do not dial a hub in step.
             None => interval + interval.mul_f64(lane.below(1000) as f64 / 1000.0),
         };
-        tokio::time::sleep(wait).await;
+        tokio::time::sleep(wait + delay).await;
     }
+}
+
+/// Connects to hub `at` of `mesh` at `url`, as routing identity `id`, and
+/// serves the link until it is gone. Returns where the leafs of the hub's
+/// cluster dial, if it said, and how much longer to wait before the next
+/// dial.
+async fn connect(
+    shared: &Arc<Shared>,
+    mesh: &Rc<Mesh>,
+    at: usize,
+    url: &HubUrl,
+    id: String,
+) -> (Option<Vec<String>>, Duration) {
+    let ctx = omq_tokio::Context::current();
+    let s = ctx.socket(SocketType::Dealer, socket_options(id.clone().into()));
+    let events = s.monitor();
+    let mut ended = (None, Duration::ZERO);
+    if s.connect(endpoint(&url.host, url.port)).await.is_ok() {
+        {
+            let mut hubs = mesh.hubs.borrow_mut();
+            hubs[at].host.clone_from(&url.host);
+            hubs[at].port = url.port;
+        }
+        let link = Link {
+            shared,
+            mesh,
+            at,
+            id: id.into(),
+            s: &s,
+            found: RefCell::new(None),
+            end: Cell::new(None),
+        };
+        link.serve(events).await;
+        link.down();
+        ended = (link.found.take(), link.end.get().unwrap_or_default());
+    }
+    let _ = s.close().await;
+    ended
 }
 
 /// One connection to a hub.
@@ -151,6 +172,8 @@ struct Link<'a> {
     s: &'a Socket,
     /// Where the leafs of the hub's cluster dial, once it said.
     found: RefCell<Option<Vec<String>>>,
+    /// Set once the link cannot go on: the wait before the next dial.
+    end: Cell<Option<Duration>>,
 }
 
 impl Link<'_> {
@@ -190,6 +213,9 @@ impl Link<'_> {
                     let Ok(bytes) = msg.into_bytes() else { continue };
                     if let Some(answer) = self.take(&bytes, &other) {
                         let _ = self.s.send(omq_tokio::Message::single(answer)).await;
+                    }
+                    if self.end.get().is_some() {
+                        return;
                     }
                 }
                 () = told.wake.notified() => {
@@ -245,15 +271,27 @@ impl Link<'_> {
                 other.push(Item::Snapshot);
                 return None;
             }
+            Control::Error(why) => {
+                self.end.set(Some(err_delay(why)));
+                return None;
+            }
             _ => {}
         }
         let mut hubs = self.mesh.hubs.borrow_mut();
         let hub = &mut hubs[self.at];
         let (slot, account) = (hub.slot, hub.account);
         let shared = self.shared;
-        let lost = hub
-            .heard
-            .take(&c, &mut |ch| interest(shared, slot, account, ch));
+        let lds = shared.lds[account as usize].as_bytes();
+        let mut looped = false;
+        let lost = hub.heard.take(&c, &mut |ch| {
+            looped |= ch.1 == lds && ch.3 > 0;
+            interest(shared, slot, account, ch);
+        });
+        if looped {
+            // Our own subject came back: the links loop.
+            self.end.set(Some(LOOP_DELAY));
+            return Some(error(&loop_error(&shared.accounts[account as usize])));
+        }
         lost.then(resync)
     }
 
@@ -317,9 +355,12 @@ impl Drop for Stop {
 }
 
 /// Sets the interest of the hub in slot `slot` of a link that binds
-/// `account` on every lane, as change `c` says. Its account name is the
-/// hub's.
+/// `account` on every lane, as change `c` says, but in this server's own
+/// loop detection subject. Its account name is the hub's.
 fn interest(shared: &Shared, slot: u16, account: u32, (_, subject, queue, weight): Change<'_>) {
+    if subject == shared.lds[account as usize].as_bytes() {
+        return;
+    }
     for tx in &*shared.lanes {
         tx.control(LaneControl::Server {
             account,

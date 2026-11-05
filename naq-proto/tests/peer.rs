@@ -57,6 +57,7 @@ fn controls() -> Vec<Control<'static>> {
         },
         Control::Beat { epoch: 7, seq: 42 },
         Control::Resync,
+        Control::Error(b"Loop detected"),
     ]
 }
 

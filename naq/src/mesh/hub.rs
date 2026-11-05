@@ -10,15 +10,16 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use naq_proto::peer::{self, Control, Hello, Role};
-use omq_tokio::{IdentitySocket, MonitorEvent, MonitorStream, Socket};
+use omq_tokio::{IdentitySocket, Message, MonitorEvent, MonitorStream, Socket};
 use tokio::time::Instant;
 
 use super::interest::{Change, Heard};
 use super::tell::{self, BEAT, Item, Other, Sink};
 use super::told::Told;
 use super::view::{self, ForLeaf};
-use super::{Mesh, resync};
+use super::{Mesh, error, resync};
 use crate::lane::{Control as LaneControl, Lane, SLOTS};
+use crate::leaf::loop_error;
 use crate::server::Shared;
 
 /// How long a leaf may stay silent before it is let go: past a few beats.
@@ -209,16 +210,40 @@ impl Hub {
             return;
         };
         l.heard_at = Instant::now();
-        if c == Control::Resync {
-            l.other.push(Item::Snapshot);
-            return;
+        match c {
+            Control::Resync => {
+                l.other.push(Item::Snapshot);
+                return;
+            }
+            // The leaf lets the link go.
+            Control::Error(_) => {
+                drop(leafs);
+                self.unlink(&who);
+                return;
+            }
+            _ => {}
         }
         let (slot, account) = (l.slot, l.account);
         let shared = &self.shared;
-        if l.heard
-            .take(&c, &mut |ch| interest(shared, slot, account, ch))
-        {
+        let lds = shared.lds[account as usize].as_bytes();
+        let mut looped = false;
+        let lost = l.heard.take(&c, &mut |ch| {
+            looped |= ch.1 == lds && ch.3 > 0;
+            interest(shared, slot, account, ch);
+        });
+        if lost {
             l.other.push(Item::Msg(resync()));
+        }
+        drop(leafs);
+        if looped {
+            // Our own subject came back: the links loop. The leaf waits
+            // before it dials again.
+            let why = error(&loop_error(&shared.accounts[account as usize]));
+            self.unlink(&who);
+            let ids = self.ids.clone();
+            tokio::task::spawn_local(async move {
+                let _ = ids.send_to(&who, Message::single(why)).await;
+            });
         }
     }
 
@@ -325,6 +350,7 @@ impl Hub {
                 told.set(account, filter, Some(q), v);
             }
         });
+        told.pin(account, self.shared.lds[account as usize].as_bytes());
         told.take();
     }
 
@@ -386,8 +412,12 @@ impl Hub {
 }
 
 /// Sets the interest of the leaf in slot `slot`, bound to `account`, on
-/// every lane, as change `c` says. Its account name is the leaf's.
+/// every lane, as change `c` says, but in this server's own loop detection
+/// subject. Its account name is the leaf's.
 fn interest(shared: &Shared, slot: u16, account: u32, (_, subject, queue, weight): Change<'_>) {
+    if subject == shared.lds[account as usize].as_bytes() {
+        return;
+    }
     for tx in &*shared.lanes {
         tx.control(LaneControl::Server {
             account,

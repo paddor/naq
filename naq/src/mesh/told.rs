@@ -31,6 +31,8 @@ pub(crate) struct Told {
     seq: Cell<u64>,
     weights: RefCell<FxHashMap<Key, ByOrigin>>,
     outbox: RefCell<VecDeque<Bytes>>,
+    /// Plain interest always told, if any: by account ID and filter.
+    pinned: RefCell<Option<(u32, Box<[u8]>)>>,
     /// Woken when the outbox gets a delta; shared with other tellers.
     pub(super) wake: Rc<Notify>,
 }
@@ -45,6 +47,7 @@ impl Told {
             seq: Cell::new(0),
             weights: RefCell::default(),
             outbox: RefCell::default(),
+            pinned: RefCell::default(),
             wake,
         }
     }
@@ -52,6 +55,17 @@ impl Told {
     /// Tells of the interest in `filter` of account `account`, in `queue`
     /// if given, as `now` has it: a delta for each origin told otherwise.
     pub(crate) fn set(&self, account: u32, filter: &[u8], queue: Option<&[u8]>, now: ByOrigin) {
+        let pinned = queue.is_none()
+            && self
+                .pinned
+                .borrow()
+                .as_ref()
+                .is_some_and(|(a, f)| *a == account && **f == *filter);
+        let now = if pinned && now.is_empty() {
+            vec![(None, 1)]
+        } else {
+            now
+        };
         let key = (account, Box::from(filter), queue.map(Box::from));
         let mut weights = self.weights.borrow_mut();
         let was = weights.get(&key).map_or(&[][..], Vec::as_slice);
@@ -86,6 +100,14 @@ impl Told {
         }
         drop(weights);
         self.wake.notify_one();
+    }
+
+    /// Tells of plain interest in `filter` of account `account` from now
+    /// on, whatever else is told of it: the loop detection subject of a
+    /// leaf node link.
+    pub(super) fn pin(&self, account: u32, filter: &[u8]) {
+        *self.pinned.borrow_mut() = Some((account, filter.into()));
+        self.set(account, filter, None, ByOrigin::new());
     }
 
     /// Makes the next delta: `interest` now.
@@ -202,5 +224,17 @@ mod tests {
             peer::decode(&told.beat()),
             Ok(Control::Beat { epoch: 9, seq: 7 })
         );
+    }
+
+    #[test]
+    fn a_pinned_subject_stays_told() {
+        let told = Told::new(9, vec!["$G".to_owned()].into(), Rc::default());
+        told.pin(0, b"$LDS.x");
+        told.set(0, b"$LDS.x", None, Vec::new());
+        told.set(0, b"$LDS.x", None, vec![(None, 1)]);
+        assert_eq!(deltas(&told), [(1, None)], "told once, kept");
+        told.set(0, b"$LDS.x", Some(b"q"), vec![(None, 2)]);
+        told.set(0, b"$LDS.x", Some(b"q"), Vec::new());
+        assert_eq!(deltas(&told), [(2, None), (0, None)], "but not its queues");
     }
 }
