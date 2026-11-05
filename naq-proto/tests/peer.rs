@@ -10,6 +10,8 @@ const CONNECT: Connect<'static> = Connect {
     token: b"",
     nkey: b"",
     sig: b"",
+    deny_pub: b"a b.>",
+    isolate: true,
 };
 
 fn controls() -> Vec<Control<'static>> {
@@ -110,6 +112,10 @@ fn broken_control_messages_are_errors() {
     assert_eq!(peer::decode(&tag), Err(Error::Flags(4)));
     assert_eq!(peer::decode(&[1, 2]), Err(Error::Version(2)));
     assert_eq!(peer::decode(&[1, 1, 3]), Err(Error::Flags(3)));
+    let mut connect = Vec::new();
+    Control::Connect(CONNECT).encode(&mut connect);
+    *connect.last_mut().unwrap() = 2;
+    assert_eq!(peer::decode(&connect), Err(Error::Flags(2)));
 }
 
 #[test]

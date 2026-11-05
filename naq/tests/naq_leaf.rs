@@ -131,16 +131,17 @@ fn client_with(s: &Server, connect: &str, ops: &str) -> Client {
     let mut l = String::new();
     while l != "PONG\r\n" {
         l.clear();
-        r.read_line(&mut l).unwrap();
+        assert_ne!(r.read_line(&mut l).unwrap(), 0, "closed");
     }
     r
 }
 
-/// The next line `c` gets, without its CRLF, but the server's pings.
+/// The next line `c` gets, without its CRLF, but the server's pings. It
+/// must not be closed.
 fn line(c: &mut Client) -> String {
     loop {
         let mut l = String::new();
-        c.read_line(&mut l).unwrap();
+        assert_ne!(c.read_line(&mut l).unwrap(), 0, "closed");
         if l != "PING\r\n" {
             return l.trim_end_matches(['\r', '\n']).to_owned();
         }
@@ -784,26 +785,6 @@ fn naq_leafs_log_in_as_clients_without_users_of_their_own() {
     leafz(&hub, |z| z["leafnodes"] == 1);
     let without = leaf_of("without", naq_remote(port));
     stays_linked(&without, 0);
-    // Permissions do not hold on naq leaf links yet: such a user is
-    // refused.
-    let hub = hub_with(
-        Vec::new(),
-        Options {
-            users: vec![naq::User {
-                login: naq::Login::Password {
-                    user: "u".into(),
-                    password: "p".into(),
-                },
-                account: None,
-                permissions: Some(naq::Permissions::default()),
-            }],
-            ..base("strict")
-        },
-    );
-    let port = hub.leafnode_addr().unwrap().port();
-    let limited = leaf_of("limited", with_login(port, "u", Some("p")));
-    stays_linked(&hub, 0);
-    stays_linked(&limited, 0);
 }
 
 /// A naq leaf of a hub, driven message by message over OMQ.
@@ -924,4 +905,145 @@ fn users_of_naq_leafs_that_cannot_work_are_refused() {
     })
     .unwrap();
     assert!(e.contains("is not a public user NKey"), "{e}");
+}
+
+/// Reads `c` until `last`; none of the lines before is `never`.
+fn until_line(c: &mut Client, last: &str, never: &str) {
+    loop {
+        let l = line(c);
+        assert_ne!(l, never, "got what should stay away");
+        if l == last {
+            return;
+        }
+    }
+}
+
+#[test]
+fn the_deny_rules_of_a_naq_leaf_hold_both_ways() {
+    let h = hub("hub");
+    let l = leaf_of(
+        "leaf",
+        Remote {
+            deny_exports: vec!["secret.>".into()],
+            deny_imports: vec!["private".into()],
+            ..naq_remote(h.leafnode_addr().unwrap().port())
+        },
+    );
+    leafz(&h, |z| z["leafnodes"] == 1);
+    // Out: the hub's literal interest in what the leaf may not send does
+    // not count, and its wildcard interest gets none of it.
+    let mut at_hub = client(&h, "SUB secret.x 1\r\nSUB secret.* 2\r\nSUB open 3\r\n");
+    hears(&l, "open");
+    hears(&l, "secret.*");
+    let told = subjects(&get(&l, "/leafz?subs=1"));
+    assert!(!told.contains(&"secret.x".to_owned()), "{told:?}");
+    let mut p = client(&l, "");
+    until_heard(&mut p, &mut at_hub, "open");
+    send(&mut p, "PUB secret.x 2\r\nno\r\nPUB open 4\r\nmark\r\n");
+    until_line(&mut at_hub, "mark", "no");
+    // In: the hub hears of no interest in what the leaf takes nothing on,
+    // and sends none of it to its wildcard interest.
+    let mut at_leaf = client(&l, "SUB private 1\r\nSUB > 2\r\n");
+    hears(&h, ">");
+    let told = subjects(&get(&h, "/leafz?subs=1"));
+    assert!(!told.contains(&"private".to_owned()), "{told:?}");
+    let mut q = client(&h, "");
+    until_heard(&mut q, &mut at_leaf, "open");
+    send(&mut q, "PUB private 2\r\nno\r\nPUB open 4\r\nmark\r\n");
+    until_line(&mut at_leaf, "mark", "no");
+}
+
+#[test]
+fn the_permissions_of_a_leaf_s_user_hold_on_its_naq_link() {
+    let limited = naq::User {
+        permissions: Some(naq::Permissions {
+            publish: naq::Rules {
+                allow: Some(vec!["up.>".into()]),
+                deny: vec!["up.secret".into()],
+            },
+            subscribe: naq::Rules {
+                allow: Some(vec!["down.>".into()]),
+                deny: Vec::new(),
+            },
+            responses: None,
+        }),
+        ..user("u", "p", None)
+    };
+    let h = hub_with(
+        Vec::new(),
+        Options {
+            users: vec![limited, user("admin", "p", None)],
+            ..base("hub")
+        },
+    );
+    let admin = "{\"verbose\":false,\"user\":\"admin\",\"pass\":\"p\"}";
+    let l = leaf_of(
+        "leaf",
+        with_login(h.leafnode_addr().unwrap().port(), "u", Some("p")),
+    );
+    leafz(&h, |z| z["leafnodes"] == 1);
+    // The leaf hears of interest only where its user may publish, and
+    // sends only there.
+    let mut at_hub = client_with(&h, admin, "SUB up.a 1\r\nSUB down.b 2\r\n");
+    hears(&l, "up.a");
+    assert_eq!(subjects(&get(&l, "/leafz?subs=1")), ["up.a"]);
+    let mut p = client(&l, "");
+    until_heard(&mut p, &mut at_hub, "up.a");
+    // The leaf sends to the hub's wildcard interest what its user may not
+    // publish: the hub drops it.
+    let mut wide = client_with(&h, admin, "SUB up.* 1\r\n");
+    hears(&l, "up.*");
+    until_heard(&mut p, &mut wide, "up.a");
+    send(&mut p, "PUB up.secret 2\r\nno\r\nPUB up.a 4\r\nmark\r\n");
+    until_line(&mut wide, "mark", "no");
+    // The hub takes the leaf's interest only where its user may
+    // subscribe, and sends only there.
+    let mut at_leaf = client(&l, "SUB down.c 1\r\nSUB side.d 2\r\nSUB *.e 3\r\n");
+    hears(&h, "*.e");
+    let mut told = subjects(&get(&h, "/leafz?subs=1"));
+    told.sort();
+    assert_eq!(told, ["*.e", "down.c"]);
+    let mut q = client_with(&h, admin, "");
+    until_heard(&mut q, &mut at_leaf, "down.c");
+    send(&mut q, "PUB side.e 2\r\nno\r\nPUB down.e 4\r\nmark\r\n");
+    until_line(&mut at_leaf, "mark", "no");
+}
+
+#[test]
+fn an_isolated_naq_leaf_hears_of_no_interest_of_other_leafs() {
+    let hubs = pair("h", |i| Options {
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            ..Leafnodes::default()
+        }),
+        ..base(&format!("h{i}"))
+    });
+    let port = |i: usize| hubs[i].leafnode_addr().unwrap().port();
+    let alone = leaf_of(
+        "alone",
+        Remote {
+            request_isolation: true,
+            ..naq_remote(port(0))
+        },
+    );
+    let near = leaf("near", port(0));
+    let far = leaf("far", port(1));
+    let z = leafz(&hubs[0], |z| z["leafnodes"] == 2);
+    let isolated: Vec<_> = (0..2).map(|i| &z["leafs"][i]["is_isolated"]).collect();
+    assert!(isolated.contains(&&serde_json::Value::Bool(true)), "{z}");
+    let z = leafz(&alone, |z| z["leafnodes"] == 1);
+    assert_eq!(z["leafs"][0]["is_isolated"], true);
+    let _subs = [
+        client(&near, "SUB near 1\r\n"),
+        client(&far, "SUB far 1\r\n"),
+        client(&hubs[1], "SUB route 1\r\n"),
+        client(&hubs[0], "SUB here 1\r\n"),
+    ];
+    hears(&alone, "here");
+    hears(&alone, "route");
+    hears(&far, "near");
+    let mut told = subjects(&get(&alone, "/leafz?subs=1"));
+    told.sort();
+    assert_eq!(told, ["here", "route"]);
 }

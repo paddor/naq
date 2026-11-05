@@ -11,8 +11,8 @@ use rustc_hash::FxHashMap;
 use crate::conn::Client;
 use crate::index::{Index, Peer};
 use crate::lane::Lane;
-use crate::perms::Perms;
-use crate::{Permissions, Remote, Rules};
+use crate::perms::LinkPerms;
+use crate::{Remote, Rules};
 
 /// Subjects `nats-server` denies on every link of an account that is not
 /// the system account: a literal one in an `LS+` ends the link.
@@ -49,7 +49,7 @@ pub(crate) struct LinkSide {
     /// What the link may send and take: `publish` for messages to the hub
     /// and its interest in literal subjects, `subscribe` for messages from
     /// it and the interest it is told of. `None` limits nothing.
-    perms: Option<Perms>,
+    perms: Option<LinkPerms>,
     pub(crate) facts: Facts,
     told: RefCell<Told>,
     /// The hub's interest, as its `LS+` and `LS-` left it: the weight of
@@ -62,7 +62,7 @@ impl LinkSide {
         account: u32,
         client: Rc<Client>,
         headers: bool,
-        perms: Option<Perms>,
+        perms: Option<LinkPerms>,
         facts: Facts,
     ) -> LinkSide {
         LinkSide {
@@ -147,7 +147,7 @@ impl LinkSide {
         stalled: &mut Option<Rc<Client>>,
     ) {
         let c = &self.client;
-        if c.is_closed() || !self.perms.as_ref().is_none_or(|p| p.publish(m.subject)) {
+        if c.is_closed() || !self.perms.as_ref().is_none_or(|p| p.sends(m.subject)) {
             return;
         }
         let headers = m.headers.filter(|_| self.headers);
@@ -236,56 +236,33 @@ impl LinkSide {
 impl LinkSide {
     /// Whether the hub hears of interest in `filter`.
     fn tells(&self, filter: &[u8]) -> bool {
+        self.perms.as_ref().is_none_or(|p| p.tells(filter))
+    }
+
+    /// Whether the hub's interest in `subject` counts.
+    fn takes_interest(&self, subject: &[u8]) -> bool {
         self.perms
             .as_ref()
-            .is_none_or(|p| p.subscribe(filter, None))
+            .is_none_or(|p| p.takes_interest(subject))
     }
 
-    /// Whether the hub's interest in `subject` counts: one the link may not
-    /// send to is left out where literal, as `nats-server` leaves it out.
-    fn takes_interest(&self, subject: &[u8]) -> bool {
-        !subject::is_literal(subject)
-            || internal(subject)
-            || self.perms.as_ref().is_none_or(|p| p.publish(subject))
-    }
-
-    /// Whether a message of the hub on `subject` comes in. Replies of
-    /// service imports and JetStream acks always do.
+    /// Whether a message of the hub on `subject` comes in.
     pub(crate) fn takes(&self, subject: &[u8]) -> bool {
-        subject.starts_with(b"_R_.")
-            || subject.starts_with(b"$JS.ACK.")
-            || self
-                .perms
-                .as_ref()
-                .is_none_or(|p| p.subscribe(subject, None))
+        self.perms.as_ref().is_none_or(|p| p.takes(subject))
     }
 }
 
 /// The permissions of a link: the hub's `export` and `import`, with the
 /// remote's `deny_exports` and `deny_imports` added. `None` without any.
-pub(crate) fn perms(export: Rules, import: Rules, r: &Remote) -> Option<Perms> {
+pub(crate) fn perms(export: Rules, import: Rules, r: &Remote) -> Option<LinkPerms> {
     let merge = |mut rules: Rules, deny: &[String]| {
         rules.deny.extend_from_slice(deny);
         rules
     };
-    let publish = merge(export, &r.deny_exports);
-    let subscribe = merge(import, &r.deny_imports);
-    let open = |r: &Rules| r.allow.is_none() && r.deny.is_empty();
-    (!open(&publish) || !open(&subscribe)).then(|| {
-        Perms::new(&Permissions {
-            publish,
-            subscribe,
-            responses: None,
-        })
-    })
-}
-
-/// Loop detection and gateway reply subjects, which no permission holds
-/// back.
-fn internal(subject: &[u8]) -> bool {
-    [b"$LDS.".as_slice(), b"_GR_.", b"$GR."]
-        .iter()
-        .any(|p| subject.starts_with(p))
+    LinkPerms::new(
+        merge(export, &r.deny_exports),
+        merge(import, &r.deny_imports),
+    )
 }
 
 /// Members of a group, as an `LS+` weight.

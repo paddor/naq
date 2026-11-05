@@ -19,7 +19,7 @@ use super::{Ended, Facts, HubUrl, LinkSide, Told, creds, side};
 use crate::Rules;
 use crate::conn::{self, Client};
 use crate::lane::{Lane, Outs, Routing, Source};
-use crate::perms::Perms;
+use crate::perms::LinkPerms;
 use crate::ws;
 
 /// Time to connect to a hub.
@@ -78,7 +78,7 @@ impl From<Option<Acl>> for Rules {
 struct Terms {
     /// The link carries header blocks.
     headers: bool,
-    perms: Option<Perms>,
+    perms: Option<LinkPerms>,
     facts: Facts,
 }
 

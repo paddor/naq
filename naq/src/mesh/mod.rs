@@ -163,23 +163,30 @@ impl Mesh {
             .get(account as usize)
             .map_or("$G", String::as_str);
         let peers = self.peers.borrow();
+        let tells =
+            |p: &Option<Arc<crate::perms::LinkPerms>>| p.as_ref().is_none_or(|p| p.tells(filter));
         for l in self.leafs.borrow().iter().filter(|l| l.account == account) {
             let leaf = view::ForLeaf {
                 slot: l.slot,
                 cluster: &l.cluster,
                 account: name.as_bytes(),
                 routes: &peers,
+                isolated: l.carries.isolated,
             };
-            let v = view::leaf(index, slots, leaf, filter, queue);
+            let v = if tells(&l.carries.perms) {
+                view::leaf(index, slots, leaf, filter, queue)
+            } else {
+                told::ByOrigin::new()
+            };
             l.told.set(account, filter, queue, v);
         }
         for h in self.hubs.borrow().iter().filter(|h| h.account == account) {
-            h.told.set(
-                account,
-                filter,
-                queue,
-                view::hub(index, slots, filter, queue),
-            );
+            let v = if tells(&h.perms) {
+                view::hub(index, slots, filter, queue)
+            } else {
+                told::ByOrigin::new()
+            };
+            h.told.set(account, filter, queue, v);
         }
     }
 }

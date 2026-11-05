@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use naq_proto::peer::{Connect, Hello};
+use naq_proto::peer::{self, Connect, Hello};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -27,13 +27,17 @@ pub(super) struct Greeted {
     pub(super) name: String,
     pub(super) cluster: Rc<[u8]>,
     pub(super) epoch: u64,
+    /// What it takes no messages on, from its `Connect`.
+    pub(super) deny: Vec<String>,
+    /// It hears of no interest of other leafs.
+    pub(super) isolate: bool,
 }
 
 /// What came of a `Connect`.
 #[derive(Debug)]
 pub(super) enum Outcome {
-    /// The leaf links, bound to the account.
-    Pass(Greeted, u32),
+    /// The leaf links, with what it was granted.
+    Pass(Greeted, Grant),
     /// It does not, at this routing identity.
     Fail(Bytes),
     /// A bcrypt comparison runs: the outcome comes from [`Logins::next`].
@@ -90,6 +94,8 @@ impl Logins {
             name: String::from_utf8_lossy(h.name).into_owned(),
             cluster: h.cluster.into(),
             epoch: h.epoch,
+            deny: Vec::new(),
+            isolate: false,
         });
         nonce
     }
@@ -99,14 +105,22 @@ impl Logins {
         let Some(at) = self.waiting.iter().position(|g| *g.who == *who) else {
             return Outcome::Unknown;
         };
-        let Some(g) = self.waiting.remove(at) else {
+        let Some(mut g) = self.waiting.remove(at) else {
             return Outcome::Unknown;
         };
+        g.deny = peer::words(c.deny_pub)
+            .map(|w| String::from_utf8_lossy(w).into_owned())
+            .collect();
+        g.isolate = c.isolate;
         let Some(auth) = &self.auth else {
-            return Outcome::Pass(g, self.account);
+            let grant = Grant {
+                account: self.account,
+                perms: None,
+            };
+            return Outcome::Pass(g, grant);
         };
         match auth.check(&creds(c), g.nonce.as_bytes()) {
-            Check::Pass(grant) => outcome(g, Some(&grant)),
+            Check::Pass(grant) => Outcome::Pass(g, grant),
             Check::Fail => Outcome::Fail(g.who),
             Check::Bcrypt(p) => {
                 let tx = self.done.0.clone();
@@ -114,7 +128,11 @@ impl Logins {
                     let grant = p.grant.clone();
                     // Slow by design: off the lane.
                     let holds = tokio::task::spawn_blocking(move || p.holds()).await;
-                    let _ = tx.send(outcome(g, holds.unwrap_or(false).then_some(&grant)));
+                    let _ = tx.send(if holds.unwrap_or(false) {
+                        Outcome::Pass(g, grant)
+                    } else {
+                        Outcome::Fail(g.who)
+                    });
                 });
                 Outcome::Later
             }
@@ -141,18 +159,6 @@ impl Logins {
             }
         }
         late
-    }
-}
-
-/// What came of a login of `g` that got `grant`, if any. A user with
-/// permissions does not link: they do not hold on naq leaf links yet.
-fn outcome(g: Greeted, grant: Option<&Grant>) -> Outcome {
-    match grant {
-        Some(Grant {
-            account,
-            perms: None,
-        }) => Outcome::Pass(g, *account),
-        _ => Outcome::Fail(g.who),
     }
 }
 

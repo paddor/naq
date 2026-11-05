@@ -728,7 +728,7 @@ fn naq_leafs_and_hubs_that_cannot_work_are_an_error() {
             "leafnode remote: naq and other urls mixed",
         ),
         (
-            "leafnodes { remotes: [{url: \"naq://h\", deny_imports: a}] }",
+            "leafnodes { remotes: [{url: \"naq://h\", credentials: x.creds}] }",
             "leafnode remote: naq url with options it takes no part of",
         ),
     ] {

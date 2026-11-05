@@ -65,6 +65,8 @@ pub(super) struct ForLeaf<'a> {
     pub(super) account: &'a [u8],
     /// The routes, whose interest names the leaf cluster it is of.
     pub(super) routes: &'a [Peer],
+    /// It hears of no interest of leafs and hubs, as it asked.
+    pub(super) isolated: bool,
 }
 
 /// What naq leaf `leaf` hears of the interest in `filter`, in `queue` if
@@ -81,6 +83,9 @@ pub(super) fn leaf(
     let Some(g) = index.group(filter, queue) else {
         return Vec::new();
     };
+    if leaf.isolated {
+        return one(isolated(g, slots, leaf, filter, queue), queue);
+    }
     let skips = bit(leaf.slot) | slots.of_cluster(leaf.cluster);
     let servers = g.servers.iter().filter(|&&(s, _)| skips & bit(s) == 0);
     let mut n = g.weight() + servers.map(|&(_, w)| u64::from(w)).sum::<u64>();
@@ -88,12 +93,33 @@ pub(super) fn leaf(
     if !leaf.cluster.is_empty() {
         for &(s, _) in g.servers.iter().filter(|&&(s, _)| slots.is_route(s)) {
             let of_cluster = leaf.routes.get(usize::from(s)).map_or(0, |r| {
-                r.heard.of_origin(leaf.account, filter, queue, leaf.cluster)
+                r.heard
+                    .of_origin(leaf.account, filter, queue, Some(leaf.cluster))
             });
             n = n.saturating_sub(u64::from(of_cluster));
         }
     }
     one(n, queue)
+}
+
+/// The members of `g`, the interest in `filter`, in `queue` if given, that
+/// isolated leaf `leaf` hears of: of clients here and at the routes, as
+/// `nats-server` leaves out all of leafs for it.
+#[cold]
+fn isolated(
+    g: &crate::index::Group,
+    slots: &Slots,
+    leaf: ForLeaf<'_>,
+    filter: &[u8],
+    queue: Option<&[u8]>,
+) -> u64 {
+    let routes = g.servers.iter().filter(|&&(s, _)| slots.is_route(s));
+    let at_routes = routes.map(|&(s, _)| {
+        leaf.routes.get(usize::from(s)).map_or(0, |r| {
+            u64::from(r.heard.of_origin(leaf.account, filter, queue, None))
+        })
+    });
+    g.weight() + at_routes.sum::<u64>()
 }
 
 /// `n` members from no origin: plain interest is there or not, a queue
@@ -128,6 +154,7 @@ mod tests {
                     id: Rc::from(&[s as u8][..]),
                     cluster: x.clone(),
                     account: 0,
+                    perms: None,
                 },
             );
         }
@@ -189,6 +216,7 @@ mod tests {
                     id: Rc::from(&[s as u8][..]),
                     cluster: cluster.into(),
                     account: 0,
+                    perms: None,
                 },
             );
         };
@@ -204,6 +232,7 @@ mod tests {
             cluster,
             account: b"$G",
             routes: &[],
+            isolated: false,
         };
         let at = |l| leaf(&idx, &slots, l, b"a", Some(b"q"));
         assert_eq!(at(of(2, b"x")), [(None, 16)], "not slots 2 and 3");
@@ -215,20 +244,56 @@ mod tests {
             weight: 5,
             origin: Some(b"x"),
         });
-        let with_route = leaf(
-            &idx,
-            &slots,
-            ForLeaf {
-                routes: &[route],
-                ..of(2, b"x")
-            },
-            b"a",
-            Some(b"q"),
-        );
+        let l = ForLeaf {
+            routes: std::slice::from_ref(&route),
+            ..of(2, b"x")
+        };
+        let with_route = leaf(&idx, &slots, l, b"a", Some(b"q"));
         assert_eq!(with_route, [(None, 11)], "nor its cluster at the route");
         assert_eq!(hub(&idx, &slots, b"a", Some(b"q")), [(None, 14)]);
         idx.server(b"p", None, 0, 1);
         assert!(hub(&idx, &slots, b"p", None).is_empty(), "no route's");
         assert_eq!(leaf(&idx, &slots, of(2, b"x"), b"p", None), [(None, 1)]);
+    }
+    #[test]
+    fn an_isolated_leaf_hears_only_of_clients_here_and_at_routes() {
+        let slots = Slots::new(1, 0);
+        slots.link(
+            1,
+            Linked {
+                id: Rc::from(&[1u8][..]),
+                cluster: Rc::from(&b"x"[..]),
+                account: 0,
+                perms: None,
+            },
+        );
+        let mut idx = Index::default();
+        // The route: 5 members of leafs, 6 of clients; a leaf: 2.
+        idx.server(b"a", Some(b"q"), 0, 11);
+        idx.server(b"a", Some(b"q"), 1, 2);
+        let at = |weight, origin| Interest {
+            account: b"$G",
+            subject: b"a",
+            queue: Some(b"q"),
+            weight,
+            origin,
+        };
+        let mut route = route_with(at(5, Some(b"x")));
+        let delta = Control::Delta {
+            epoch: 1,
+            seq: 1,
+            interest: at(6, None),
+        };
+        route.heard.take(&delta, &mut |_| {});
+        let l = ForLeaf {
+            slot: 2,
+            cluster: b"",
+            account: b"$G",
+            routes: std::slice::from_ref(&route),
+            isolated: true,
+        };
+        assert_eq!(leaf(&idx, &slots, l, b"a", Some(b"q")), [(None, 6)]);
+        let l = ForLeaf { routes: &[], ..l };
+        assert_eq!(leaf(&idx, &slots, l, b"a", Some(b"q")), ByOrigin::new());
     }
 }

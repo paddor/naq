@@ -231,9 +231,17 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
     };
     out.account = account;
     let index = lane.index(out.account).borrow();
+    // The naq hub or leaf it came from, whose link may hold some back.
+    let link = match from {
+        From::Route => None,
+        From::Hub(s) | From::Leaf(s) => Some(s),
+    };
     let mut stalled = None;
     for r in b.records() {
         let Ok(r) = r else { break };
+        if link.is_some_and(|s| !slots.takes(s, r.subject)) {
+            continue;
+        }
         let p = Pub {
             subject: r.subject,
             reply: r.reply,

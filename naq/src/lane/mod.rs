@@ -81,12 +81,14 @@ pub(crate) enum Control {
     /// sends waiting on it give up.
     Gone { server: u16 },
     /// A naq hub or leaf, of control identity `id`, cluster `cluster`, is
-    /// in slot `slot`, bound to `account`. A leaf gets its data link here.
+    /// in slot `slot`, bound to `account`, with the permissions of its link
+    /// if any. A leaf gets its data link here.
     Link {
         slot: u16,
         id: Box<[u8]>,
         cluster: Box<[u8]>,
         account: u32,
+        perms: Option<Arc<crate::perms::LinkPerms>>,
     },
     /// Slot `slot` is free again: its data link closes.
     Unlink { slot: u16 },
@@ -272,20 +274,13 @@ impl Lane {
         }
     }
 
-    /// Puts the naq hub or leaf of control identity `id`, cluster
-    /// `cluster`, in slot `slot`, bound to `account`; a leaf gets its data
-    /// link on this lane.
-    fn link(&self, slot: u16, id: &[u8], cluster: &[u8], account: u32) {
-        self.slots.link(
-            slot,
-            slots::Linked {
-                id: id.into(),
-                cluster: cluster.into(),
-                account,
-            },
-        );
+    /// Puts the naq hub or leaf `linked` in slot `slot`; a leaf gets its
+    /// data link on this lane.
+    fn link(&self, slot: u16, linked: slots::Linked) {
+        let id = linked.id.clone();
+        self.slots.link(slot, linked);
         if !self.slots.is_hub(slot) {
-            crate::mesh::leaf(self, slot, id);
+            crate::mesh::leaf(self, slot, &id);
         }
     }
 
@@ -346,7 +341,16 @@ impl Lane {
                 id,
                 cluster,
                 account,
-            } => self.link(slot, &id, &cluster, account),
+                perms,
+            } => self.link(
+                slot,
+                slots::Linked {
+                    id: id.into(),
+                    cluster: cluster.into(),
+                    account,
+                    perms,
+                },
+            ),
             Control::Unlink { slot } => {
                 self.slots.unlink(slot);
                 crate::mesh::gone(self, slot);

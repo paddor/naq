@@ -110,6 +110,10 @@ impl<'a, 'p> Routing<'a, 'p> {
     /// Routes the message to the interest `found` for its subject.
     #[inline]
     pub(crate) fn route(&mut self, found: &Found<'_>) {
+        // Links whose permissions hold it back get it as if sent already.
+        let denied = self.lane.slots.denies(self.p.subject);
+        self.skips |= denied;
+        self.sent |= denied;
         match found {
             Found::One(i) => {
                 self.plain(i, false);

@@ -279,8 +279,15 @@ Notable changes to naq. The format follows
   timeout } }` (`Leafnodes::users`, `Leafnodes::auth_timeout`), each into
   its account, else those of its clients, and answers others with
   `Authorization Violation` or `Authentication Timeout`. A leaf counts as
-  linked once the hub took it in. Users with permissions cannot link a naq
-  leaf yet.
+  linked once the hub took it in.
+- `naq`: permissions on naq links, as `nats-server` applies them on leaf
+  links. A leaf's `deny_exports` and `deny_imports` hold back what it sends
+  and takes, and the interest it tells of and takes; the hub learns its
+  `deny_imports` (`peer::Connect::deny_pub`). A hub gives a leaf what its
+  user may subscribe to, and takes what it may publish. A leaf with
+  `request_isolation` (`peer::Connect::isolate`) hears of no interest of
+  the hub's other leafs and hubs; `/leafz` shows it as isolated, and lists
+  only the interest a link takes.
 - `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
   `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
   per run, from the same configuration file for `nats-server` and naq

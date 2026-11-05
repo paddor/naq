@@ -5,6 +5,9 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+
+use crate::perms::LinkPerms;
 
 /// Slots in all: their bits fit a `u64`.
 pub(crate) const SLOTS: usize = 64;
@@ -25,6 +28,8 @@ pub(crate) struct Linked {
     pub(crate) cluster: Rc<[u8]>,
     /// The account its link binds here.
     pub(crate) account: u32,
+    /// What its link carries, if not all.
+    pub(crate) perms: Option<Arc<LinkPerms>>,
 }
 
 /// The slots of a lane's server.
@@ -36,6 +41,8 @@ pub(crate) struct Slots {
     hubs: u64,
     /// naq leafs linked now, as bits.
     leafs: Cell<u64>,
+    /// Hubs and leafs whose links have permissions, as bits.
+    guarded: Cell<u64>,
     /// The hub or leaf in each slot, by slot.
     by_slot: RefCell<Vec<Option<Linked>>>,
 }
@@ -48,6 +55,7 @@ impl Slots {
             routes: ones(routes),
             hubs: ones(routes + hubs) & !ones(routes),
             leafs: Cell::new(0),
+            guarded: Cell::new(0),
             by_slot: RefCell::default(),
         }
     }
@@ -64,6 +72,9 @@ impl Slots {
         if all.len() <= at {
             all.resize(at + 1, None);
         }
+        let guarded = self.guarded.get() & !bit(s);
+        let with = if linked.perms.is_some() { bit(s) } else { 0 };
+        self.guarded.set(guarded | with);
         all[at] = Some(linked);
         if self.hubs & bit(s) == 0 {
             self.leafs.set(self.leafs.get() | bit(s));
@@ -76,6 +87,46 @@ impl Slots {
             *slot = None;
         }
         self.leafs.set(self.leafs.get() & !bit(s));
+        self.guarded.set(self.guarded.get() & !bit(s));
+    }
+
+    /// The slots whose links may not carry a message on `subject`, as
+    /// bits.
+    #[inline]
+    pub(crate) fn denies(&self, subject: &[u8]) -> u64 {
+        if self.guarded.get() == 0 {
+            return 0;
+        }
+        self.guarded_by(|p| !p.sends(subject))
+    }
+
+    /// Whether the link in slot `s` takes a message on `subject` in.
+    #[inline]
+    pub(crate) fn takes(&self, s: u16, subject: &[u8]) -> bool {
+        if self.guarded.get() & bit(s) == 0 {
+            return true;
+        }
+        let all = self.by_slot.borrow();
+        let perms = all
+            .get(usize::from(s))
+            .and_then(|l| l.as_ref()?.perms.as_deref());
+        perms.is_none_or(|p| p.takes(subject))
+    }
+
+    /// The guarded slots whose permissions `f` holds of, as bits.
+    #[cold]
+    fn guarded_by(&self, f: impl Fn(&LinkPerms) -> bool) -> u64 {
+        let all = self.by_slot.borrow();
+        let mut bits = 0;
+        for (s, l) in all.iter().enumerate() {
+            if let Some(p) = l.as_ref().and_then(|l| l.perms.as_deref())
+                && f(p)
+            {
+                // Slots are below 64: they fit.
+                bits |= bit(s as u16);
+            }
+        }
+        bits
     }
 
     /// The hub or leaf in slot `s`, if one.
@@ -170,6 +221,7 @@ mod tests {
             id: cluster.into(),
             cluster: cluster.into(),
             account: 0,
+            perms: None,
         }
     }
 

@@ -9,7 +9,7 @@ pub(crate) mod url;
 
 pub(crate) use creds::prove;
 pub(crate) use link::{LOOP_DELAY, err_delay, loop_error};
-pub(crate) use side::{Facts, LinkSide};
+pub(crate) use side::{Facts, LinkSide, perms};
 pub(crate) use tls::Connector;
 pub(crate) use url::HubUrl;
 
@@ -176,17 +176,13 @@ fn leafnodes(opts: &crate::Options, l: &crate::Leafnodes) -> Result<(), String> 
 }
 
 /// Why remote `r` of a naq hub at `urls` cannot run as given: its URLs are
-/// all naq ones, and it has none of what a Go hub takes.
+/// all naq ones, and it has no TLS and no credentials file, which naq hubs
+/// do not take yet.
 fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
     if !urls.iter().all(|u| u.naq) {
         return Err("leafnode remote: naq and other urls mixed".into());
     }
-    let more = r.credentials.is_some()
-        || r.tls.is_some()
-        || !r.deny_imports.is_empty()
-        || !r.deny_exports.is_empty()
-        || r.request_isolation;
-    if more {
+    if r.credentials.is_some() || r.tls.is_some() {
         return Err("leafnode remote: naq url with options it takes no part of".into());
     }
     Ok(())

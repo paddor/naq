@@ -175,6 +175,11 @@ pub struct Connect<'a> {
     pub nkey: &'a [u8],
     /// The hub's nonce, signed with the NKey's seed, in base64.
     pub sig: &'a [u8],
+    /// Subjects the leaf takes no messages on, separated by blanks: the
+    /// hub sends none.
+    pub deny_pub: &'a [u8],
+    /// The hub tells the leaf of no interest of its other leafs.
+    pub isolate: bool,
 }
 
 /// Interest of a server in `subject` of `account`: of plain subscriptions,
@@ -240,9 +245,10 @@ impl Control<'_> {
             }
             Control::Connect(c) => {
                 out.put_u8(CONNECT);
-                for s in [c.user, c.pass, c.token, c.nkey, c.sig] {
+                for s in [c.user, c.pass, c.token, c.nkey, c.sig, c.deny_pub] {
                     short(out, s);
                 }
+                out.put_u8(u8::from(c.isolate));
             }
         }
     }
@@ -344,6 +350,12 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
             token: r.short()?,
             nkey: r.short()?,
             sig: r.short()?,
+            deny_pub: r.short()?,
+            isolate: match r.u8()? {
+                0 => false,
+                1 => true,
+                f => return Err(Error::Flags(f)),
+            },
         }),
         k => return Err(Error::Kind(k)),
     };

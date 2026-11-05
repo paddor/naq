@@ -125,17 +125,18 @@ impl Heard {
     }
 
     /// The members the other server told of in `subject` of `account`, in
-    /// `queue` if given, for its leafs of cluster `origin`.
+    /// `queue` if given, for its leafs of cluster `origin`, or for its
+    /// clients without one.
     pub(crate) fn of_origin(
         &self,
         account: &[u8],
         subject: &[u8],
         queue: Option<&[u8]>,
-        origin: &[u8],
+        origin: Option<&[u8]>,
     ) -> u32 {
         let k = (
             (account.into(), subject.into(), queue.map(Into::into)),
-            Some(origin.into()),
+            origin.map(Into::into),
         );
         self.view.get(&k).copied().unwrap_or(0)
     }
@@ -392,8 +393,8 @@ mod tests {
             ],
         );
         assert_eq!(changes, [("a".into(), 5), ("a".into(), 6), ("a".into(), 4)]);
-        assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), b"x"), 3);
-        assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), b"z"), 0);
+        assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), Some(b"x")), 3);
+        assert_eq!(h.of_origin(b"$G", b"a", Some(b"q"), Some(b"z")), 0);
         assert_eq!(h.len(), 1, "one entry, summed");
         let mut gone = Vec::new();
         h.forget(&mut |(_, _, _, w): Change<'_>| gone.push(w));

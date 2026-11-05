@@ -70,6 +70,8 @@ pub(crate) struct Perms {
     publish: Compiled,
     subscribe: Compiled,
     responses: Option<Responses>,
+    /// The rules, as given.
+    rules: Permissions,
 }
 
 impl Perms {
@@ -83,6 +85,7 @@ impl Perms {
             publish,
             subscribe: Compiled::new(&p.subscribe),
             responses: p.responses,
+            rules: p.clone(),
         }
     }
 
@@ -130,6 +133,72 @@ impl Perms {
     pub(crate) const fn takes_replies(&self) -> bool {
         self.responses.is_some()
     }
+}
+
+/// The permissions of a leaf node link, from this side of it, as
+/// `nats-server` applies them: what goes over it, and what comes.
+#[derive(Debug)]
+pub(crate) struct LinkPerms(Perms);
+
+impl LinkPerms {
+    /// Permissions that send what `sends` lets publish and take what
+    /// `takes` lets subscribe. `None` where both let everything through.
+    pub(crate) fn new(sends: Rules, takes: Rules) -> Option<LinkPerms> {
+        let open = |r: &Rules| r.allow.is_none() && r.deny.is_empty();
+        (!open(&sends) || !open(&takes)).then(|| {
+            LinkPerms(Perms::new(&Permissions {
+                publish: sends,
+                subscribe: takes,
+                responses: None,
+            }))
+        })
+    }
+
+    /// Those of a hub to a leaf that logged in as a user of permissions
+    /// `user`, if any, and takes nothing on `deny`: the leaf gets what the
+    /// user may subscribe to, and sends what it may publish, as
+    /// `nats-server` turns them around for a leaf.
+    pub(crate) fn of_leaf(user: Option<&Perms>, deny: &[String]) -> Option<LinkPerms> {
+        let (mut sends, takes) = user
+            .map(|p| (p.rules.subscribe.clone(), p.rules.publish.clone()))
+            .unwrap_or_default();
+        sends.deny.extend_from_slice(deny);
+        LinkPerms::new(sends, takes)
+    }
+
+    /// Whether a message on `subject` goes over the link.
+    #[inline]
+    pub(crate) fn sends(&self, subject: &[u8]) -> bool {
+        self.0.publish(subject)
+    }
+
+    /// Whether the other side hears of interest in `filter`.
+    pub(crate) fn tells(&self, filter: &[u8]) -> bool {
+        self.0.subscribe(filter, None)
+    }
+
+    /// Whether interest of the other side in `subject` counts: one the link
+    /// may not send to is left out where literal, as `nats-server` leaves it
+    /// out. Loop detection and gateway reply subjects always count.
+    pub(crate) fn takes_interest(&self, subject: &[u8]) -> bool {
+        !subject::is_literal(subject) || internal(subject) || self.0.publish(subject)
+    }
+
+    /// Whether a message of the other side on `subject` comes in. Replies
+    /// of service imports and JetStream acks always do.
+    pub(crate) fn takes(&self, subject: &[u8]) -> bool {
+        subject.starts_with(b"_R_.")
+            || subject.starts_with(b"$JS.ACK.")
+            || self.0.subscribe(subject, None)
+    }
+}
+
+/// Loop detection and gateway reply subjects, which no permission holds
+/// back.
+fn internal(subject: &[u8]) -> bool {
+    [b"$LDS.".as_slice(), b"_GR_.", b"$GR."]
+        .iter()
+        .any(|p| subject.starts_with(p))
 }
 
 /// A client's permissions with what it learned: decisions on subjects it

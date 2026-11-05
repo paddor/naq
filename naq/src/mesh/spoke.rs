@@ -17,8 +17,10 @@ use super::interest::{Change, Heard};
 use super::tell::{self, BEAT, Item, Other, Sink};
 use super::told::Told;
 use super::{Mesh, endpoint, error, resync, socket_options};
+use crate::Rules;
 use crate::lane::Control as LaneControl;
 use crate::leaf::{HubUrl, LOOP_DELAY, err_delay, loop_error, url};
+use crate::perms::LinkPerms;
 use crate::server::Shared;
 
 /// How long a hub has to say `Hello` on a new connection, before the next
@@ -44,6 +46,11 @@ pub(crate) struct Hub {
     pub(crate) told: Rc<Told>,
     /// Its ID in `/leafz`.
     pub(crate) link: u64,
+    /// What the link carries, by the remote's `deny_exports` and
+    /// `deny_imports`, if not all.
+    pub(crate) perms: Option<Arc<LinkPerms>>,
+    /// It asked for no interest of the hub's other leafs.
+    pub(crate) isolated: bool,
 }
 
 impl Hub {
@@ -74,6 +81,8 @@ impl Hub {
             heard: Heard::default(),
             told,
             link: shared.next_client(),
+            perms: crate::leaf::perms(Rules::default(), Rules::default(), r).map(Arc::new),
+            isolated: r.request_isolation,
         }
     }
 }
@@ -300,12 +309,13 @@ impl Link<'_> {
         let mut hubs = self.mesh.hubs.borrow_mut();
         let hub = &mut hubs[self.at];
         let (slot, account) = (hub.slot, hub.account);
+        let perms = hub.perms.as_deref();
         let shared = self.shared;
         let lds = shared.lds[account as usize].as_bytes();
         let mut looped = false;
         let lost = hub.heard.take(&c, &mut |ch| {
             looped |= ch.1 == lds && ch.3 > 0;
-            interest(shared, slot, account, ch);
+            interest(shared, slot, account, perms, ch);
         });
         if looped {
             // Our own subject came back: the links loop.
@@ -356,6 +366,7 @@ impl Link<'_> {
         };
         let nkey = proof.nkey.unwrap_or_default();
         let sig = proof.sig.unwrap_or_default();
+        let deny_pub = r.deny_imports.join(" ");
         let mut out = Vec::new();
         Control::Connect(Connect {
             user: user.as_bytes(),
@@ -363,6 +374,8 @@ impl Link<'_> {
             token: token.as_bytes(),
             nkey: nkey.as_bytes(),
             sig: sig.as_bytes(),
+            deny_pub: deny_pub.as_bytes(),
+            isolate: r.request_isolation,
         })
         .encode(&mut out);
         Ok(out.into())
@@ -371,11 +384,11 @@ impl Link<'_> {
     /// The hub took this server in: it links in the hub's slot on every
     /// lane, with data channels to the hub's lanes.
     fn linked(&self) {
-        let (slot, account) = {
+        let (slot, account, perms) = {
             let mut hubs = self.mesh.hubs.borrow_mut();
             let hub = &mut hubs[self.at];
             hub.up = true;
-            (hub.slot, hub.account)
+            (hub.slot, hub.account, hub.perms.clone())
         };
         let said = self.said.borrow();
         let Some(said) = said.as_ref() else {
@@ -387,6 +400,7 @@ impl Link<'_> {
                 id: self.id.to_vec().into(),
                 cluster: said.cluster.clone(),
                 account,
+                perms: perms.clone(),
             });
             tx.control(LaneControl::HubData {
                 slot,
@@ -401,9 +415,10 @@ impl Link<'_> {
         let mut hubs = self.mesh.hubs.borrow_mut();
         let hub = &mut hubs[self.at];
         let (slot, account) = (hub.slot, hub.account);
+        let perms = hub.perms.as_deref();
         let shared = self.shared;
         hub.heard
-            .forget(&mut |ch| interest(shared, slot, account, ch));
+            .forget(&mut |ch| interest(shared, slot, account, perms, ch));
         hub.up = false;
         drop(hubs);
         for tx in &*shared.lanes {
@@ -422,10 +437,19 @@ impl Drop for Stop {
 }
 
 /// Sets the interest of the hub in slot `slot` of a link that binds
-/// `account` on every lane, as change `c` says, but in this server's own
-/// loop detection subject. Its account name is the hub's.
-fn interest(shared: &Shared, slot: u16, account: u32, (_, subject, queue, weight): Change<'_>) {
-    if subject == shared.lds[account as usize].as_bytes() {
+/// `account`, of permissions `perms` if any, on every lane, as change `c`
+/// says: but in this server's own loop detection subject, and in what the
+/// link may not send to. Its account name is the hub's.
+fn interest(
+    shared: &Shared,
+    slot: u16,
+    account: u32,
+    perms: Option<&LinkPerms>,
+    (_, subject, queue, weight): Change<'_>,
+) {
+    if subject == shared.lds[account as usize].as_bytes()
+        || perms.is_some_and(|p| !p.takes_interest(subject))
+    {
         return;
     }
     for tx in &*shared.lanes {

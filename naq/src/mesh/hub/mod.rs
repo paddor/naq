@@ -22,8 +22,10 @@ use super::tell::{self, BEAT, Item, Other, Sink};
 use super::told::Told;
 use super::view::{self, ForLeaf};
 use super::{Mesh, error, resync};
+use crate::auth::Grant;
 use crate::lane::{Control as LaneControl, Lane, SLOTS};
 use crate::leaf::loop_error;
+use crate::perms::LinkPerms;
 use crate::server::Shared;
 
 /// How long a leaf may stay silent before it is let go: past a few beats.
@@ -51,6 +53,16 @@ pub(crate) struct Leaf {
     pub(crate) link: u64,
     /// When it last sent anything.
     heard_at: Instant,
+    pub(crate) carries: Carries,
+}
+
+/// What the link of a leaf carries.
+#[derive(Debug, Default)]
+pub(crate) struct Carries {
+    /// What goes to it and comes from it, if not all.
+    pub(crate) perms: Option<Arc<LinkPerms>>,
+    /// It hears of no interest of other leafs and hubs.
+    pub(crate) isolated: bool,
 }
 
 /// What this server, as hub, tells its leafs of itself.
@@ -240,12 +252,13 @@ impl Hub {
             _ => {}
         }
         let (slot, account) = (l.slot, l.account);
+        let perms = l.carries.perms.as_deref();
         let shared = &self.shared;
         let lds = shared.lds[account as usize].as_bytes();
         let mut looped = false;
         let lost = l.heard.take(&c, &mut |ch| {
             looped |= ch.1 == lds && ch.3 > 0;
-            interest(shared, slot, account, ch);
+            interest(shared, slot, account, perms, ch);
         });
         if lost {
             l.other.push(Item::Msg(resync()));
@@ -275,15 +288,15 @@ impl Hub {
     /// Acts on what came of a login.
     fn outcome(&mut self, o: Outcome) {
         match o {
-            Outcome::Pass(g, account) => self.admit(g, account),
+            Outcome::Pass(g, grant) => self.admit(g, &grant),
             Outcome::Fail(who) => self.send(who, error("Authorization Violation")),
             Outcome::Later | Outcome::Unknown => {}
         }
     }
 
-    /// Links leaf `g`, which logged in to `account`: in place of an older
+    /// Links leaf `g`, which logged in with `grant`: in place of an older
     /// link of the same remote, in a free slot.
-    fn admit(&mut self, g: Greeted, account: u32) {
+    fn admit(&mut self, g: Greeted, grant: &Grant) {
         let remote = remote_of(&g.who);
         let older: Vec<Bytes> = self
             .mesh
@@ -304,7 +317,11 @@ impl Hub {
         let Some(slot) = slot else {
             return;
         };
-        self.link(slot, g, account);
+        let carries = Carries {
+            perms: LinkPerms::of_leaf(grant.perms.as_deref(), &g.deny).map(Arc::new),
+            isolated: g.isolate,
+        };
+        self.link(slot, g, grant.account, carries);
     }
 
     /// Sends `m` to the leaf of routing identity `who`, linked or not.
@@ -315,15 +332,16 @@ impl Hub {
         });
     }
 
-    /// Puts leaf `g`, bound to `account`, in slot `slot`, and starts telling
-    /// it.
-    fn link(&self, slot: u16, g: Greeted, account: u32) {
+    /// Puts leaf `g`, bound to `account`, whose link carries `carries`, in
+    /// slot `slot`, and starts telling it.
+    fn link(&self, slot: u16, g: Greeted, account: u32, carries: Carries) {
         for tx in &*self.shared.lanes {
             tx.control(LaneControl::Link {
                 slot,
                 id: g.who.to_vec().into(),
                 cluster: g.cluster.to_vec().into(),
                 account,
+                perms: carries.perms.clone(),
             });
         }
         let told = Rc::new(Told::new(
@@ -331,7 +349,17 @@ impl Hub {
             self.shared.accounts.clone(),
             self.mesh.leaf_wake.clone(),
         ));
-        self.fill(&told, slot, &g.cluster, account);
+        {
+            let routes = self.mesh.peers.borrow();
+            let leaf = ForLeaf {
+                slot,
+                cluster: &g.cluster,
+                account: self.shared.accounts[account as usize].as_bytes(),
+                routes: &routes,
+                isolated: carries.isolated,
+            };
+            self.fill(&told, account, leaf, carries.perms.as_deref());
+        }
         let other = Rc::new(Other::new(
             Sink::Router(self.ids.clone(), g.who.clone()),
             told.clone(),
@@ -349,23 +377,20 @@ impl Hub {
             other,
             link: self.shared.next_client(),
             heard_at: Instant::now(),
+            carries,
         });
     }
 
-    /// Fills `told` with what the leaf in slot `slot`, of cluster
-    /// `cluster`, bound to `account`, hears of now. Its snapshot carries
-    /// it: no delta goes.
-    fn fill(&self, told: &Told, slot: u16, cluster: &[u8], account: u32) {
+    /// Fills `told` with what `leaf`, bound to `account`, of permissions
+    /// `perms` if any, hears of now. Its snapshot carries it: no delta
+    /// goes.
+    fn fill(&self, told: &Told, account: u32, leaf: ForLeaf<'_>, perms: Option<&LinkPerms>) {
         let index = self.lane.index(account).borrow();
-        let routes = self.mesh.peers.borrow();
-        let leaf = ForLeaf {
-            slot,
-            cluster,
-            account: self.shared.accounts[account as usize].as_bytes(),
-            routes: &routes,
-        };
         let slots = &self.lane.slots;
         index.each(|filter, i| {
+            if perms.is_some_and(|p| !p.tells(filter)) {
+                return;
+            }
             told.set(
                 account,
                 filter,
@@ -407,11 +432,13 @@ impl Hub {
             account,
             mut heard,
             other,
+            carries,
             ..
         } = leaf;
         other.close();
         let shared = &self.shared;
-        heard.forget(&mut |ch| interest(shared, slot, account, ch));
+        let perms = carries.perms.as_deref();
+        heard.forget(&mut |ch| interest(shared, slot, account, perms, ch));
         for tx in &*shared.lanes {
             tx.control(LaneControl::Unlink { slot });
         }
@@ -442,11 +469,20 @@ impl Hub {
     }
 }
 
-/// Sets the interest of the leaf in slot `slot`, bound to `account`, on
-/// every lane, as change `c` says, but in this server's own loop detection
-/// subject. Its account name is the leaf's.
-fn interest(shared: &Shared, slot: u16, account: u32, (_, subject, queue, weight): Change<'_>) {
-    if subject == shared.lds[account as usize].as_bytes() {
+/// Sets the interest of the leaf in slot `slot`, bound to `account`, of
+/// permissions `perms` if any, on every lane, as change `c` says: but in
+/// this server's own loop detection subject, and in what the link may not
+/// send to. Its account name is the leaf's.
+fn interest(
+    shared: &Shared,
+    slot: u16,
+    account: u32,
+    perms: Option<&LinkPerms>,
+    (_, subject, queue, weight): Change<'_>,
+) {
+    if subject == shared.lds[account as usize].as_bytes()
+        || perms.is_some_and(|p| !p.takes_interest(subject))
+    {
         return;
     }
     for tx in &*shared.lanes {

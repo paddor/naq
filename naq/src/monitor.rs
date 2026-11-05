@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 use zzq_tokio::transport::{Driver, Listener};
 
 use crate::lane::{Control, Lane};
+use crate::perms::LinkPerms;
 use crate::server::Shared;
 use crate::stats::Totals;
 
@@ -145,8 +146,18 @@ fn go_links(lane: &Lane) -> Vec<LeafInfo> {
 /// `mesh` on `lane`, to `all`, with the subjects of their interest.
 fn naq_links(lane: &Lane, mesh: &crate::mesh::Mesh, all: &mut Vec<LeafInfo>) {
     let accounts = &lane.shared.accounts;
-    let info = |id, name: &str, spoke, account: u32, heard: &crate::mesh::Heard| {
-        let mut subs: Vec<String> = heard.entries().map(|e| text(e.1)).collect();
+    // Interest a link's permissions leave out is not applied: not listed.
+    let info = |id,
+                name: &str,
+                spoke,
+                account: u32,
+                heard: &crate::mesh::Heard,
+                perms: Option<&LinkPerms>| {
+        let mut subs: Vec<String> = heard
+            .entries()
+            .filter(|e| perms.is_none_or(|p| p.takes_interest(e.1)))
+            .map(|e| text(e.1))
+            .collect();
         subs.sort_unstable();
         LeafInfo {
             id,
@@ -167,12 +178,23 @@ fn naq_links(lane: &Lane, mesh: &crate::mesh::Mesh, all: &mut Vec<LeafInfo>) {
         }
     };
     for l in mesh.leafs.borrow().iter() {
-        all.push(info(l.link, &l.name, false, l.account, &l.heard));
+        let perms = l.carries.perms.as_deref();
+        let mut i = info(l.link, &l.name, false, l.account, &l.heard, perms);
+        i.is_isolated = l.carries.isolated;
+        all.push(i);
     }
     for h in mesh.hubs.borrow().iter().filter(|h| h.up) {
-        let mut i = info(h.link, &h.name, true, h.account, &h.heard);
+        let mut i = info(
+            h.link,
+            &h.name,
+            true,
+            h.account,
+            &h.heard,
+            h.perms.as_deref(),
+        );
         i.ip.clone_from(&h.host);
         i.port = h.port;
+        i.is_isolated = h.isolated;
         all.push(i);
     }
 }
