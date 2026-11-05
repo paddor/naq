@@ -110,10 +110,9 @@ impl<'a, 'p> Routing<'a, 'p> {
     /// Routes the message to the interest `found` for its subject.
     #[inline]
     pub(crate) fn route(&mut self, found: &Found<'_>) {
-        // Links whose permissions hold it back get it as if sent already.
-        let denied = self.lane.slots.denies(self.p.subject);
-        self.skips |= denied;
-        self.sent |= denied;
+        if self.lane.slots.guarded() != 0 {
+            self.hold_back();
+        }
         match found {
             Found::One(i) => {
                 self.plain(i, false);
@@ -128,6 +127,17 @@ impl<'a, 'p> Routing<'a, 'p> {
         if self.lane.has_hits() {
             self.lane.send_hits(self.p, &mut self.stalled);
         }
+    }
+
+    /// Counts the links whose permissions hold the message back as sent to
+    /// already. Out of line: links with permissions are rare, and folding
+    /// the bits in on every message stalled on the stores just made.
+    #[cold]
+    #[inline(never)]
+    fn hold_back(&mut self) {
+        let denied = self.lane.slots.denies(self.p.subject);
+        self.skips |= denied;
+        self.sent |= denied;
     }
 
     /// Whether queue group `name` gets a pick.

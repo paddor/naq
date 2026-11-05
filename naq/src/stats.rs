@@ -39,6 +39,18 @@ impl Tally {
         self.in_bytes.set(self.in_bytes.get() + bytes as u64);
     }
 
+    /// `msgs` messages of `bytes` in all came in.
+    pub(crate) fn took_many(&self, msgs: u64, bytes: u64) {
+        self.in_msgs.set(self.in_msgs.get() + msgs);
+        self.in_bytes.set(self.in_bytes.get() + bytes);
+    }
+
+    /// `msgs` messages of `bytes` in all went out.
+    pub(crate) fn gave_many(&self, msgs: u64, bytes: u64) {
+        self.out_msgs.set(self.out_msgs.get() + msgs);
+        self.out_bytes.set(self.out_bytes.get() + bytes);
+    }
+
     /// A message of `bytes` went out.
     #[inline]
     pub(crate) fn gave(&self, bytes: usize) {

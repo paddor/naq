@@ -15,7 +15,7 @@ use omq_tokio::{IdentitySocket, Message, Socket, SocketType};
 
 use super::socket_options;
 use crate::conn::{self, Client};
-use crate::lane::{Lane, Outs, Routing, Source};
+use crate::lane::{Lane, Outs, Routing, Source, bit};
 
 /// A lane's data link to the server in a slot.
 #[derive(Debug, Clone)]
@@ -208,6 +208,56 @@ async fn take(lane: &Lane, out: &mut Outs, chunk: Bytes, from: From) {
 fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Client>> {
     let b = peer::Batch::parse(chunk).ok()?;
     let slots = &lane.slots;
+    let skips = begin(lane, out, &b, from)?;
+    let index = lane.index(out.account).borrow();
+    // The naq hub or leaf it came from, and that one if its link may hold
+    // some back.
+    let link = match from {
+        From::Route => None,
+        From::Hub(s) | From::Leaf(s) => Some(s),
+    };
+    let held = link.filter(|&s| slots.guarded() & bit(s) != 0);
+    let (mut msgs, mut bytes) = (0, 0);
+    let mut stalled = None;
+    for r in b.records() {
+        let Ok(r) = r else { break };
+        if held.is_some_and(|s| !slots.takes(s, r.subject)) {
+            continue;
+        }
+        let p = Pub {
+            subject: r.subject,
+            reply: r.reply,
+            headers: r.headers,
+            payload: r.payload,
+        };
+        let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
+        lane.tally.took(size);
+        msgs += 1;
+        bytes += size as u64;
+        let Some(found) = index.matches(p.subject) else {
+            continue;
+        };
+        let routing = Routing::new(lane, out, &p, chunk, 0);
+        let mut routing = match from {
+            From::Route => routing.by_server(r.queue, skips),
+            From::Hub(_) | From::Leaf(_) => routing.by_linked(r.queue, skips),
+        };
+        routing.route(&found);
+        if let Some(s) = routing.stalled {
+            stalled = Some(s);
+        }
+    }
+    if let Some(s) = link {
+        slots.tally(s).took_many(msgs, bytes);
+    }
+    stalled
+}
+
+/// Readies `out` for batch `b` from `from`: its account and origin.
+/// Returns the slots its messages skip; `None` for an account or a link
+/// this server has not.
+fn begin(lane: &Lane, out: &mut Outs, b: &peer::Batch<'_>, from: From) -> Option<u64> {
+    let slots = &lane.slots;
     let (account, skips) = match from {
         From::Route => {
             let account = lane
@@ -230,43 +280,7 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
         }
     };
     out.account = account;
-    let index = lane.index(out.account).borrow();
-    // The naq hub or leaf it came from, whose link may hold some back.
-    let link = match from {
-        From::Route => None,
-        From::Hub(s) | From::Leaf(s) => Some(s),
-    };
-    let mut stalled = None;
-    for r in b.records() {
-        let Ok(r) = r else { break };
-        if link.is_some_and(|s| !slots.takes(s, r.subject)) {
-            continue;
-        }
-        let p = Pub {
-            subject: r.subject,
-            reply: r.reply,
-            headers: r.headers,
-            payload: r.payload,
-        };
-        let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
-        lane.tally.took(size);
-        if let Some(s) = link {
-            slots.tally(s).took(size);
-        }
-        let Some(found) = index.matches(p.subject) else {
-            continue;
-        };
-        let routing = Routing::new(lane, out, &p, chunk, 0);
-        let mut routing = match from {
-            From::Route => routing.by_server(r.queue, skips),
-            From::Hub(_) | From::Leaf(_) => routing.by_linked(r.queue, skips),
-        };
-        routing.route(&found);
-        if let Some(s) = routing.stalled {
-            stalled = Some(s);
-        }
-    }
-    stalled
+    Some(skips)
 }
 
 /// The control identity of the leaf of channel identity `c`: what comes

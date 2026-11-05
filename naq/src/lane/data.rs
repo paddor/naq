@@ -174,8 +174,8 @@ impl Outs {
             queue,
         }
         .encode(&mut batch.buf);
-        let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
-        lane.slots.tally(s).gave(size);
+        batch.msgs += 1;
+        batch.bytes += (p.payload.len() + p.headers.map_or(0, <[u8]>::len)) as u64;
     }
 }
 
@@ -186,6 +186,9 @@ struct ServerBatch {
     buf: BytesMut,
     /// A bit more than the last batch took.
     room: usize,
+    /// Its messages and their bytes, for the server's tally.
+    msgs: u64,
+    bytes: u64,
 }
 
 impl ServerBatch {
@@ -204,6 +207,7 @@ impl ServerBatch {
         }
         let mut buf = std::mem::take(&mut self.buf);
         self.room = buf.len() + buf.len() / 4;
+        (self.msgs, self.bytes) = (0, 0);
         let batch = buf.split().freeze();
         spent.retire(buf);
         Some(batch)
@@ -343,9 +347,12 @@ impl Lane {
     /// batch is sent.
     pub(crate) async fn ship_servers(&self, out: &mut Outs) {
         for (s, b) in out.servers.iter_mut().enumerate() {
+            let (msgs, bytes) = (b.msgs, b.bytes);
             let Some(batch) = b.take(&self.batches) else {
                 continue;
             };
+            // Slots are below 64: they fit.
+            self.slots.tally(s as u16).gave_many(msgs, bytes);
             let link = self.sends.borrow().get(s).cloned().flatten();
             if let Some(link) = link {
                 link.send(batch).await;

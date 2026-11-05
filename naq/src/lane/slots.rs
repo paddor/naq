@@ -96,9 +96,14 @@ impl Slots {
         self.guarded.set(self.guarded.get() & !bit(s));
     }
 
+    /// Hubs and leafs whose links have permissions, as bits.
+    #[inline]
+    pub(crate) const fn guarded(&self) -> u64 {
+        self.guarded.get()
+    }
+
     /// The slots whose links may not carry a message on `subject`, as
     /// bits.
-    #[inline]
     pub(crate) fn denies(&self, subject: &[u8]) -> u64 {
         if self.guarded.get() == 0 {
             return 0;
@@ -106,8 +111,9 @@ impl Slots {
         self.guarded_by(|p| !p.sends(subject))
     }
 
-    /// Whether the link in slot `s` takes a message on `subject` in.
-    #[inline]
+    /// Whether the link in slot `s` takes a message on `subject` in. Out of
+    /// line: only for links with permissions.
+    #[inline(never)]
     pub(crate) fn takes(&self, s: u16, subject: &[u8]) -> bool {
         if self.guarded.get() & bit(s) == 0 {
             return true;
