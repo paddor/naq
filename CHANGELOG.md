@@ -297,3 +297,5 @@ Notable changes to naq. The format follows
   as in `nats-server`. The single user is `Options::user`, apart from
   `Options::users`; it cannot go with users lists or a token, and it is no
   `no_auth_user`.
+- `naq`: a naq leaf closes all its channels to a hub once the link is gone,
+  not only those it sends on; the others dialed the hub on and on.

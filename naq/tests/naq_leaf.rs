@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 
 use naq::{Cluster, Leafnodes, Options, Remote, Server};
 
+mod proxy;
+
+use proxy::{OPEN, Proxy};
+
 /// Longest wait for anything a test expects.
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -442,4 +446,77 @@ fn a_hub_cluster_carries_a_leaf_s_messages_to_its_other_servers_and_leafs() {
     until_heard(&mut p, &mut at_h0, "t");
     let mut q = client(&b, "");
     until_heard(&mut q, &mut at_h0, "t");
+}
+
+/// The established TCP connections to `host` but to its `port`, by the
+/// kernel: of the channels of a naq leaf to the lanes of a hub there.
+#[cfg(target_os = "linux")]
+fn channels_to(host: [u8; 4], port: u16) -> usize {
+    const ESTABLISHED: &str = "01";
+    // Little-endian, as the kernel prints it.
+    let addr = format!("{:08X}", u32::from_le_bytes(host));
+    std::fs::read_to_string("/proc/net/tcp")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (at, p) = f[2].split_once(':').unwrap();
+            at == addr && u16::from_str_radix(p, 16).unwrap() != port && f[3] == ESTABLISHED
+        })
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_leaf_closes_every_channel_of_a_hub_link_gone() {
+    // A loopback address of its own: no other test dials it.
+    const HOST: [u8; 4] = [127, 0, 0, 37];
+    let host = std::net::Ipv4Addr::from(HOST).to_string();
+    let h = Server::start(&Options {
+        lanes: 4,
+        leafnodes: Some(Leafnodes {
+            host: host.clone(),
+            port: 0,
+            account: None,
+        }),
+        ..base("hub")
+    })
+    .unwrap();
+    let port = h.leafnode_addr().unwrap().port();
+    let proxy = Proxy::to(&host, port);
+    // One lane: four channels, three of them only to take the hub's data.
+    let l = Server::start(&Options {
+        lanes: 1,
+        remotes: vec![naq_remote(proxy.port)],
+        ..base("leaf")
+    })
+    .unwrap();
+    let channels = |n| {
+        let deadline = Instant::now() + WAIT;
+        while channels_to(HOST, port) != n {
+            assert!(
+                Instant::now() < deadline,
+                "{} channels",
+                channels_to(HOST, port)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    leafz(&h, |z| z["leafnodes"] == 1);
+    channels(4);
+    proxy.cut();
+    leafz(&l, |z| z["leafnodes"] == 0);
+    channels(0);
+    proxy.set(OPEN);
+    leafz(&l, |z| z["leafnodes"] == 1);
+    channels(4);
+    // The new channels carry what each lane of the hub sends: its clients
+    // go to its lanes in turn.
+    let mut sub = client(&l, "SUB s 1\r\n");
+    hears(&h, "s");
+    for _ in 0..4 {
+        let mut p = client(&h, "");
+        until_heard(&mut p, &mut sub, "s");
+    }
 }

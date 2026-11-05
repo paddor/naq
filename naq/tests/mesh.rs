@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 
 use naq::{Cluster, Options, Server};
 
+mod proxy;
+
+use proxy::{BLACKHOLE, CUT, OPEN, Proxy, STALLED, STALLING};
+
 /// Longest wait for anything a test expects.
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -626,137 +630,13 @@ fn a_server_that_starts_again_is_heard_anew() {
     until_heard(&mut p, &mut new, "new");
 }
 
-/// A TCP proxy to a port, to cut or blackhole what goes through it.
-struct Proxy {
-    port: u16,
-    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    conns: std::sync::Arc<std::sync::Mutex<Vec<TcpStream>>>,
-}
-
-/// [`Proxy`] states.
-const OPEN: u8 = 0;
-const CUT: u8 = 1;
-const BLACKHOLE: u8 = 2;
-const STOPPED: u8 = 3;
-/// Reads nothing: what is sent backs up.
-const STALLED: u8 = 4;
-/// Open until the dialing side sends more after a heartbeat, then
-/// [`STALLED`].
-const STALLING: u8 = 5;
-
-impl Proxy {
-    fn to(port: u16) -> Proxy {
-        use std::sync::atomic::Ordering;
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let p = Proxy {
-            port: l.local_addr().unwrap().port(),
-            state: std::sync::Arc::default(),
-            conns: std::sync::Arc::default(),
-        };
-        let (state, conns) = (p.state.clone(), p.conns.clone());
-        std::thread::spawn(move || {
-            for c in l.incoming() {
-                // Relaxed: a test switch, nothing else hangs on it.
-                let now = state.load(Ordering::Relaxed);
-                let Ok(c) = c else { return };
-                if now == STOPPED {
-                    return;
-                }
-                if now == CUT {
-                    continue;
-                }
-                let Ok(up) = TcpStream::connect(("127.0.0.1", port)) else {
-                    continue;
-                };
-                conns
-                    .lock()
-                    .unwrap()
-                    .extend([c.try_clone().unwrap(), up.try_clone().unwrap()]);
-                for (from, to, dialer) in [
-                    (c.try_clone().unwrap(), up.try_clone().unwrap(), true),
-                    (up, c, false),
-                ] {
-                    let state = state.clone();
-                    std::thread::spawn(move || forward(from, to, &state, dialer));
-                }
-            }
-        });
-        p
-    }
-
-    /// Closes what goes through it, and what comes, until set [`OPEN`].
-    fn cut(&self) {
-        self.set(CUT);
-        self.close();
-    }
-
-    fn close(&self) {
-        for c in self.conns.lock().unwrap().drain(..) {
-            let _ = c.shutdown(std::net::Shutdown::Both);
-        }
-    }
-
-    fn set(&self, state: u8) {
-        self.state
-            .store(state, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Copies `from` to `to` as `state` says. Only the `dialer` side, from the
-/// server that connects, turns [`STALLING`] into [`STALLED`].
-fn forward(
-    mut from: TcpStream,
-    mut to: TcpStream,
-    state: &std::sync::atomic::AtomicU8,
-    dialer: bool,
-) {
-    use std::sync::atomic::Ordering;
-    // Whether this link carried a heartbeat yet.
-    let mut pinged = false;
-    let mut buf = [0; 16 << 10];
-    loop {
-        // Relaxed: a test switch, nothing else hangs on it.
-        while state.load(Ordering::Relaxed) == STALLED {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let Ok(n @ 1..) = from.read(&mut buf) else {
-            break;
-        };
-        let now = state.load(Ordering::Relaxed);
-        if matches!(now, OPEN | STALLING) && to.write_all(&buf[..n]).is_err() {
-            break;
-        }
-        if dialer {
-            // ZMTP command names come length first.
-            let ping = buf[..n].windows(5).any(|w| w == b"\x04PING");
-            if now == STALLING && pinged && !ping {
-                state.store(STALLED, Ordering::Relaxed);
-            }
-            pinged |= ping;
-        }
-    }
-    // A blackhole tells of no end either.
-    if state.load(Ordering::Relaxed) != BLACKHOLE {
-        let _ = to.shutdown(std::net::Shutdown::Both);
-    }
-}
-
-impl Drop for Proxy {
-    fn drop(&mut self) {
-        self.set(STOPPED);
-        self.close();
-        // Wakes its accept.
-        let _ = TcpStream::connect(("127.0.0.1", self.port));
-    }
-}
-
 /// Three servers whose routes go through proxies, by server and route.
 fn proxied() -> (Vec<Server>, Vec<Vec<Option<Proxy>>>) {
     let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
     let proxies: Vec<Vec<Option<Proxy>>> = (0..3)
         .map(|i| {
             (0..3)
-                .map(|j| (i != j).then(|| Proxy::to(ports[j])))
+                .map(|j| (i != j).then(|| Proxy::to("127.0.0.1", ports[j])))
                 .collect()
         })
         .collect();
@@ -940,8 +820,7 @@ fn a_server_that_stops_reading_is_let_go() {
     let proxy = proxies[2][1].as_ref().unwrap();
     proxy.set(STALLING);
     let deadline = Instant::now() + WAIT;
-    // Relaxed: the proxy's own switch.
-    while proxy.state.load(std::sync::atomic::Ordering::Relaxed) != STALLED {
+    while proxy.state() != STALLED {
         assert!(Instant::now() < deadline, "no heartbeat");
         std::thread::sleep(Duration::from_millis(20));
     }

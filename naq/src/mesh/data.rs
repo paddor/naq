@@ -24,8 +24,9 @@ pub(crate) enum DataLink {
     Push(Socket),
     /// This lane's ROUTER for naq leafs, to the channel of one.
     Leaf(IdentitySocket, Bytes),
-    /// A DEALER to the lane of a naq hub.
-    Hub(Socket),
+    /// A DEALER to the lane of a naq hub, and the lane's channels to
+    /// the hub that only take its data, when it has more lanes.
+    Hub(Socket, Rc<[Socket]>),
 }
 
 impl DataLink {
@@ -34,7 +35,7 @@ impl DataLink {
     pub(crate) async fn send(&self, batch: Bytes) {
         let m = Message::single(batch);
         let _ = match self {
-            DataLink::Push(s) | DataLink::Hub(s) => s.send(m).await,
+            DataLink::Push(s) | DataLink::Hub(s, _) => s.send(m).await,
             DataLink::Leaf(ids, to) => ids.send_to(to, m).await,
         };
     }
@@ -51,11 +52,16 @@ fn set(lane: &Lane, s: u16, link: Option<DataLink>) {
         }
         std::mem::replace(&mut all[at], link)
     };
-    if let Some(DataLink::Push(s) | DataLink::Hub(s)) = old {
-        tokio::task::spawn_local(async move {
+    let all: Vec<Socket> = match old {
+        Some(DataLink::Push(s)) => vec![s],
+        Some(DataLink::Hub(s, rest)) => std::iter::once(s).chain(rest.iter().cloned()).collect(),
+        Some(DataLink::Leaf(..)) | None => return,
+    };
+    tokio::task::spawn_local(async move {
+        for s in all {
             let _ = s.close().await;
-        });
-    }
+        }
+    });
 }
 
 /// Gives `lane` a data link to server `server`, by route, at `endpoint`,
@@ -104,17 +110,21 @@ pub(crate) fn hub(lane: &Rc<Lane>, s: u16, id: &[u8], endpoints: &[String]) {
     let lanes = lane.lanes();
     let channels = lanes.max(endpoints.len());
     let ctx = omq_tokio::Context::current();
-    for c in (lane.id..channels).step_by(lanes) {
+    let open = |c: usize| {
         let dealer = ctx.socket(SocketType::Dealer, socket_options(channel(id, c)));
         let (dial, at) = (dealer.clone(), endpoints[c % endpoints.len()].clone());
         tokio::task::spawn_local(async move {
             let _ = dial.connect(at).await;
         });
         tokio::task::spawn_local(receive_hub(lane.clone(), dealer.clone(), s));
-        if c == lane.id {
-            set(lane, s, Some(DataLink::Hub(dealer)));
-        }
-    }
+        dealer
+    };
+    let send = open(lane.id);
+    let rest = (lane.id + lanes..channels)
+        .step_by(lanes)
+        .map(open)
+        .collect();
+    set(lane, s, Some(DataLink::Hub(send, rest)));
 }
 
 /// Where a batch comes from.
