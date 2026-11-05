@@ -731,3 +731,33 @@ fn an_importer_and_its_exporter_share_a_queue_group_of_one_name() {
         assert!((700..1300).contains(&c), "{counts:?}");
     }
 }
+
+#[test]
+fn accounts_past_the_first_few_hundred_keep_their_interest_apart() {
+    use std::fmt::Write as _;
+    let accounts = (0..300).fold(String::new(), |mut all, i| {
+        writeln!(all, "  A{i} {{ users: [{{user: u{i}, password: p}}] }}").unwrap();
+        all
+    });
+    let mut opts: Options = format!("accounts {{\n{accounts}}}\n").parse().unwrap();
+    opts.lanes = 2;
+    let s = server_with(opts);
+    let login = |i: usize| {
+        Client::new(
+            &s,
+            &format!(r#"{{"verbose":false,"user":"u{i}","pass":"p"}}"#),
+        )
+    };
+    let (mut far, mut near, mut next) = (login(299), login(0), login(298));
+    far.send("SUB t 1\r\nPING\r\n");
+    far.expect("PONG");
+    near.send("PUB t 4\r\nnear\r\n");
+    near.flush();
+    next.send("PUB t 4\r\nnext\r\n");
+    next.flush();
+    let mut same = login(299);
+    same.send("PUB t 4\r\nsame\r\n");
+    same.flush();
+    far.expect("MSG t 1 4");
+    far.expect("same");
+}

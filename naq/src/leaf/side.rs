@@ -131,7 +131,7 @@ impl LinkSide {
             shadow: Peer::DIRECT,
         };
         put_peer(lane, self.account, subject, queue, peer);
-        let streams = &lane.shared.imports[self.account as usize].streams;
+        let streams = &lane.shared.accounts.imports(self.account).streams;
         for (k, im) in streams.iter().enumerate() {
             if let Some(shadow) = im.shadow(subject) {
                 // Imports are few: their count fits.

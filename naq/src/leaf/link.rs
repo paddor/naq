@@ -469,7 +469,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             .as_deref()
             .unwrap_or("$G");
         // Known to exist: the options were checked.
-        let account = shared.accounts.iter().position(|a| a == name).unwrap_or(0) as u32;
+        let account = shared.accounts.id(name).unwrap_or(0);
         let client = self.client.clone();
         client.account.set(account);
         self.out.account = account;
@@ -486,7 +486,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             terms.perms,
             terms.facts,
         ));
-        let lds = shared.lds[account as usize].as_bytes();
+        let lds = shared.accounts.lds(account);
         side.snapshot(
             &self.lane.index(account).borrow(),
             lds,
@@ -608,7 +608,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             }
             LeafOp::Sub(i) if i.subject == lds => {
                 // Our own subject came back: the links loop.
-                let account = &self.lane.shared.accounts[client.account.get() as usize];
+                let account = self.lane.shared.accounts.name(client.account.get());
                 self.send_err(client, &loop_error(account));
                 return Err(LOOP_DELAY);
             }

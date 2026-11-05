@@ -210,11 +210,7 @@ impl Outs {
         let batch = &mut self.servers[at];
         if batch.buf.is_empty() {
             batch.open(&lane.batches);
-            let name = lane
-                .shared
-                .accounts
-                .get(self.account as usize)
-                .map_or("$G", String::as_str);
+            let name = lane.shared.accounts.name(self.account);
             let origin = self.from_leaf.then_some(&self.origin[..]);
             peer::batch(&mut batch.buf, origin, name.as_bytes());
         }

@@ -22,9 +22,7 @@ pub(crate) fn add(
     queue: Option<&[u8]>,
 ) -> Vec<Shadowed> {
     let account = client.account.get();
-    let Some(imports) = lane.shared.imports.get(account as usize) else {
-        return Vec::new();
-    };
+    let imports = lane.shared.accounts.imports(account);
     let mut made = Vec::new();
     for im in &imports.streams {
         let Some(subject) = im.shadow(filter) else {
@@ -64,9 +62,7 @@ pub(crate) fn remove(
 /// Queue groups of naq links get no shadows: their messages go to the
 /// link's account only.
 pub(crate) fn server(lane: &Lane, account: u32, filter: &[u8], slot: u16, add: bool) {
-    let Some(imports) = lane.shared.imports.get(account as usize) else {
-        return;
-    };
+    let imports = lane.shared.accounts.imports(account);
     if lane.slots.is_route(slot) {
         return;
     }

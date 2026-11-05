@@ -213,10 +213,17 @@ impl Client {
         self.w.write_all(s.as_bytes()).unwrap();
     }
 
+    /// The next line from the server, past its `PING`s, which get their
+    /// `PONG`: the first comes 2 s after the client connected.
     fn line(&mut self) -> String {
-        let mut l = String::new();
-        assert_ne!(self.r.read_line(&mut l).unwrap(), 0, "closed");
-        l.trim_end_matches("\r\n").to_owned()
+        loop {
+            let mut l = String::new();
+            assert_ne!(self.r.read_line(&mut l).unwrap(), 0, "closed");
+            if l != "PING\r\n" {
+                return l.trim_end_matches("\r\n").to_owned();
+            }
+            self.send("PONG\r\n");
+        }
     }
 
     /// Whether the server closed it, with nothing more to say.
@@ -456,11 +463,7 @@ fn an_update_at_one_server_of_the_cluster_reaches_the_clients_of_another() {
             revoked.len()
         ));
         c.send("PING\r\n");
-        let mut line = c.line();
-        if line == "PING" {
-            c.send("PONG\r\n");
-            line = c.line();
-        }
+        let line = c.line();
         if line == "-ERR 'User Authentication Revoked'" {
             break;
         }

@@ -31,6 +31,7 @@
 
 #![forbid(unsafe_code)]
 
+mod accounts;
 mod auth;
 mod callout;
 mod config;

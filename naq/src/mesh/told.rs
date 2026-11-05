@@ -4,11 +4,14 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use naq_proto::peer::{Control, Interest};
 use rustc_hash::FxHashMap;
 use tokio::sync::Notify;
+
+use crate::accounts::Accounts;
 
 /// Deltas waiting to be sent, at most. Past it, a delta is dropped: the
 /// receivers see the gap and ask for a snapshot.
@@ -25,8 +28,8 @@ pub(crate) type ByOrigin = Vec<(Option<Rc<[u8]>>, u32)>;
 #[derive(Debug)]
 pub(crate) struct Told {
     epoch: u64,
-    /// Account names, by ID.
-    accounts: Box<[String]>,
+    /// The accounts, by ID.
+    accounts: Arc<Accounts>,
     /// The last delta made.
     seq: Cell<u64>,
     weights: RefCell<FxHashMap<Key, ByOrigin>>,
@@ -40,7 +43,7 @@ pub(crate) struct Told {
 impl Told {
     /// A teller of start `epoch`, of accounts `accounts`, that wakes
     /// `wake` when it has deltas.
-    pub(super) fn new(epoch: u64, accounts: Box<[String]>, wake: Rc<Notify>) -> Told {
+    pub(super) fn new(epoch: u64, accounts: Arc<Accounts>, wake: Rc<Notify>) -> Told {
         Told {
             epoch,
             accounts,
@@ -73,7 +76,7 @@ impl Told {
             all.iter().find(|(x, _)| x == o).map_or(0, |&(_, w)| w)
         };
         let at = |origin, weight| Interest {
-            account: name(&self.accounts, account),
+            account: self.accounts.name(account).as_bytes(),
             subject: filter,
             queue,
             weight,
@@ -144,7 +147,7 @@ impl Told {
         for ((account, subject, queue), by_origin) in weights.iter() {
             for (origin, weight) in by_origin {
                 one(Control::Entry(Interest {
-                    account: name(&self.accounts, *account),
+                    account: self.accounts.name(*account).as_bytes(),
                     subject,
                     queue: queue.as_deref(),
                     weight: *weight,
@@ -173,13 +176,6 @@ impl Told {
     }
 }
 
-/// The name of account `id` among `accounts`.
-fn name(accounts: &[String], id: u32) -> &[u8] {
-    accounts
-        .get(id as usize)
-        .map_or(&b"$G"[..], |a| a.as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use naq_proto::peer;
@@ -204,7 +200,7 @@ mod tests {
 
     #[test]
     fn a_delta_goes_out_for_each_origin_that_changed() {
-        let told = Told::new(9, vec!["$G".to_owned()].into(), Rc::default());
+        let told = Told::new(9, Arc::new(Accounts::of(&["$G"])), Rc::default());
         let x: Rc<[u8]> = Rc::from(&b"x"[..]);
         told.set(0, b"a", None, vec![(None, 1)]);
         told.set(0, b"a", None, vec![(None, 1)]);
@@ -228,7 +224,7 @@ mod tests {
 
     #[test]
     fn a_pinned_subject_stays_told() {
-        let told = Told::new(9, vec!["$G".to_owned()].into(), Rc::default());
+        let told = Told::new(9, Arc::new(Accounts::of(&["$G"])), Rc::default());
         told.pin(0, b"$LDS.x");
         told.set(0, b"$LDS.x", None, Vec::new());
         told.set(0, b"$LDS.x", None, vec![(None, 1)]);

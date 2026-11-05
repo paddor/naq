@@ -109,8 +109,8 @@ fn endpoint(host: &str, port: u16) -> String {
 pub(crate) struct Mesh {
     /// Random for each start of this server.
     epoch: u64,
-    /// Account names, by ID.
-    accounts: Box<[String]>,
+    /// The accounts, by ID.
+    accounts: Arc<crate::accounts::Accounts>,
     /// The other servers of the cluster, by route.
     pub(crate) peers: RefCell<Vec<Peer>>,
     /// What the routes are told.
@@ -147,7 +147,7 @@ impl Mesh {
     /// Takes in the taps of imports `lane`, lane 0, holds from its start:
     /// the routes, naq leafs and naq hubs hear of them as of clients.
     fn tell_taps(&self, lane: &crate::lane::Lane) {
-        for account in 0..lane.shared.accounts.len() as u32 {
+        for account in 0..lane.shared.accounts.len() {
             let mut tapped = Vec::new();
             lane.index(account).borrow().each(|filter, i| {
                 if !i.taps.is_empty() {
@@ -174,10 +174,7 @@ impl Mesh {
         let slots = &lane.slots;
         let routes = view::routes(index, slots, filter, queue);
         self.told.set(account, filter, queue, routes);
-        let name = self
-            .accounts
-            .get(account as usize)
-            .map_or("$G", String::as_str);
+        let name = self.accounts.name(account);
         let peers = self.peers.borrow();
         let tells =
             |p: &Option<Arc<crate::perms::LinkPerms>>| p.as_ref().is_none_or(|p| p.tells(filter));
@@ -277,7 +274,7 @@ fn leafnodes_account(shared: &Shared) -> u32 {
         .and_then(|l| l.account.as_deref())
         .unwrap_or("$G");
     // Known to exist: the options were checked. Accounts are few.
-    shared.accounts.iter().position(|a| a == name).unwrap_or(0) as u32
+    shared.accounts.id(name).unwrap_or(0)
 }
 
 /// Where lane 0 bound the ports of the mesh.

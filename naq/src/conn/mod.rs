@@ -467,7 +467,7 @@ impl Conn {
         self.stage = Stage::Ready;
         if self.opts.protocol >= 1 {
             let shared = &self.lane.shared;
-            let account = &shared.accounts[self.client.account.get() as usize];
+            let account = shared.accounts.name(self.client.account.get());
             let to = handshake::To {
                 id: self.client.id,
                 ip: &self.ip,

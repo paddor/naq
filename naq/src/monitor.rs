@@ -73,7 +73,7 @@ pub(crate) fn conns(lane: &Lane) -> Vec<ConnInfo> {
                 name: meta.name.clone(),
                 lang: meta.lang.clone(),
                 version: meta.version.clone(),
-                account: lane.shared.accounts[c.account.get() as usize].clone(),
+                account: lane.shared.accounts.name(c.account.get()).to_owned(),
             }
         })
         .collect()
@@ -141,7 +141,7 @@ fn go_links(lane: &Lane) -> Vec<LeafInfo> {
                 name: f.name.clone(),
                 is_spoke: true,
                 is_isolated: f.isolated,
-                account: lane.shared.accounts[l.account as usize].clone(),
+                account: lane.shared.accounts.name(l.account).to_owned(),
                 ip: f.ip.clone(),
                 port: f.port,
                 in_msgs: t.in_msgs,
@@ -180,7 +180,7 @@ fn naq_links(lane: &Lane, mesh: &crate::mesh::Mesh, all: &mut Vec<LeafInfo>) {
             name: name.to_owned(),
             is_spoke: spoke,
             is_isolated: false,
-            account: accounts[account as usize].clone(),
+            account: accounts.name(account).to_owned(),
             ip: String::new(),
             port: 0,
             in_msgs: 0,
@@ -445,7 +445,7 @@ fn varz(shared: &Shared) -> serde_json::Value {
         "out_client_bytes": t.out_bytes,
         "slow_consumers": load(&shared.events.slow_consumers),
         "stale_connections": load(&shared.events.stale),
-        "system_account": shared.system.map(|a| shared.accounts[a as usize].as_str()),
+        "system_account": shared.system.map(|a| shared.accounts.name(a)),
     })
 }
 

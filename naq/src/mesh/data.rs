@@ -286,14 +286,9 @@ fn begin(lane: &Lane, out: &mut Outs, b: &peer::Batch<'_>, from: From) -> Option
     let slots = &lane.slots;
     let (account, skips) = match from {
         From::Route => {
-            let account = lane
-                .shared
-                .accounts
-                .iter()
-                .position(|a| a.as_bytes() == b.account)?;
+            let account = lane.account_id(b.account)?;
             out.set_origin(b.origin);
-            // Accounts are few: their count fits.
-            (account as u32, slots.route_skips(b.origin))
+            (account, slots.route_skips(b.origin))
         }
         From::Hub(s) => {
             out.set_origin(None);

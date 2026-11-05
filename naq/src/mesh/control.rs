@@ -156,14 +156,14 @@ fn server_interest(
     i: usize,
     (account, subject, queue, all, of_leafs): Change<'_>,
 ) {
-    let Some(account) = shared.accounts.iter().position(|a| a.as_bytes() == account) else {
+    let Some(account) = shared.accounts.id_of(account) else {
         return;
     };
     // Routes are few: their count fits.
     let server = i as u16;
     for tx in &*shared.lanes {
         tx.control(LaneControl::Server {
-            account: account as u32,
+            account,
             subject: subject.into(),
             queue: queue.map(Into::into),
             server,

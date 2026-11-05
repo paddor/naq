@@ -155,8 +155,7 @@ fn placed(
     }
     let account = shared
         .accounts
-        .iter()
-        .position(|a| *a == user.aud)
+        .id(&user.aud)
         .ok_or_else(|| format!("no valid account {:?}", user.aud))?;
     let limits = &user.nats.limits;
     let end = trust::time_left(limits)?;
@@ -166,7 +165,7 @@ fn placed(
     let exp = (user.exp > 0).then(|| UNIX_EPOCH + Duration::from_secs(user.exp.cast_unsigned()));
     Ok(User {
         // Accounts are few: their count fits.
-        account: account as u32,
+        account,
         perms: trust::defaults(&limits.permissions),
         key: String::new(),
         subs: NO_LIMIT,

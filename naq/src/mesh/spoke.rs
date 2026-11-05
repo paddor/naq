@@ -63,17 +63,16 @@ impl Hub {
         let (host, port) = url.map(|u| (u.host, u.port)).unwrap_or_default();
         let name = r.account.as_deref().unwrap_or("$G");
         // Known to exist: the options were checked.
-        let account = shared.accounts.iter().position(|a| a == name).unwrap_or(0);
+        let account = shared.accounts.id(name).unwrap_or(0);
         let told = Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default()));
-        // Accounts are few: their count fits.
-        told.pin(account as u32, shared.lds[account].as_bytes());
+        told.pin(account, shared.accounts.lds(account));
         // Its snapshot carries it.
         told.take();
         Hub {
             slot,
             remote,
             // Accounts are few: their count fits.
-            account: account as u32,
+            account,
             host,
             port,
             up: false,
@@ -273,7 +272,7 @@ impl Link<'_> {
         let mut out = Vec::new();
         Control::Hello(Hello {
             role: Role::Leaf,
-            account: shared.accounts[account as usize].as_bytes(),
+            account: shared.accounts.name(account).as_bytes(),
             epoch: self.mesh.epoch,
             server_id: shared.server_id.as_bytes(),
             name: shared.opts.server_name.as_bytes(),
@@ -311,7 +310,7 @@ impl Link<'_> {
         let (slot, account) = (hub.slot, hub.account);
         let perms = hub.perms.as_deref();
         let shared = self.shared;
-        let lds = shared.lds[account as usize].as_bytes();
+        let lds = shared.accounts.lds(account);
         let mut looped = false;
         let lost = hub.heard.take(&c, &mut |ch| {
             looped |= ch.1 == lds && ch.3 > 0;
@@ -320,7 +319,7 @@ impl Link<'_> {
         if looped {
             // Our own subject came back: the links loop.
             self.end.set(Some(LOOP_DELAY));
-            return Some(error(&loop_error(&shared.accounts[account as usize])));
+            return Some(error(&loop_error(shared.accounts.name(account))));
         }
         lost.then(resync)
     }
@@ -447,8 +446,7 @@ fn interest(
     perms: Option<&LinkPerms>,
     (_, subject, queue, weight, _): Change<'_>,
 ) {
-    if subject == shared.lds[account as usize].as_bytes()
-        || perms.is_some_and(|p| !p.takes_interest(subject))
+    if subject == shared.accounts.lds(account) || perms.is_some_and(|p| !p.takes_interest(subject))
     {
         return;
     }

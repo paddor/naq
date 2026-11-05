@@ -113,7 +113,7 @@ impl Me {
         let mut hello = Vec::new();
         Control::Hello(Hello {
             role: Role::Hub,
-            account: shared.accounts[self.account as usize].as_bytes(),
+            account: shared.accounts.name(self.account).as_bytes(),
             epoch: self.epoch,
             server_id: shared.server_id.as_bytes(),
             name: shared.opts.server_name.as_bytes(),
@@ -254,7 +254,7 @@ impl Hub {
         let (slot, account) = (l.slot, l.account);
         let perms = l.carries.perms.as_deref();
         let shared = &self.shared;
-        let lds = shared.lds[account as usize].as_bytes();
+        let lds = shared.accounts.lds(account);
         let mut looped = false;
         let lost = l.heard.take(&c, &mut |ch| {
             looped |= ch.1 == lds && ch.3 > 0;
@@ -267,7 +267,7 @@ impl Hub {
         if looped {
             // Our own subject came back: the links loop. The leaf waits
             // before it dials again.
-            let why = error(&loop_error(&shared.accounts[account as usize]));
+            let why = error(&loop_error(shared.accounts.name(account)));
             self.unlink(&who);
             let ids = self.ids.clone();
             tokio::task::spawn_local(async move {
@@ -354,7 +354,7 @@ impl Hub {
             let leaf = ForLeaf {
                 slot,
                 cluster: &g.cluster,
-                account: self.shared.accounts[account as usize].as_bytes(),
+                account: self.shared.accounts.name(account).as_bytes(),
                 routes: &routes,
                 isolated: carries.isolated,
             };
@@ -402,7 +402,7 @@ impl Hub {
                 told.set(account, filter, Some(q), v);
             }
         });
-        told.pin(account, self.shared.lds[account as usize].as_bytes());
+        told.pin(account, self.shared.accounts.lds(account));
         told.take();
     }
 
@@ -480,8 +480,7 @@ fn interest(
     perms: Option<&LinkPerms>,
     (_, subject, queue, weight, _): Change<'_>,
 ) {
-    if subject == shared.lds[account as usize].as_bytes()
-        || perms.is_some_and(|p| !p.takes_interest(subject))
+    if subject == shared.accounts.lds(account) || perms.is_some_and(|p| !p.takes_interest(subject))
     {
         return;
     }

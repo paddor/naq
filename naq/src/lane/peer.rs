@@ -106,7 +106,7 @@ impl Lane {
                 l.deliver(self, m, &h.queues, stalled);
                 continue;
             }
-            let imports = &self.shared.imports[l.account as usize].streams;
+            let imports = &self.shared.accounts.imports(l.account).streams;
             if let Some(im) = imports.get(h.shadow as usize) {
                 let mut subject = Vec::new();
                 im.deliver_as(m.subject, &mut subject);

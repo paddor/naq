@@ -32,17 +32,10 @@ pub(crate) struct Shared {
     pub(crate) keys: Keys,
     /// The way into each lane.
     pub(crate) lanes: Box<[lane::LaneTx]>,
-    /// Account names by id, `$G` first.
-    pub(crate) accounts: Box<[String]>,
-    /// The imports of each account, by id.
-    pub(crate) imports: Box<[crate::imports::Imports]>,
-    /// The requests this server sent into each account through service
-    /// imports, by id.
-    pub(crate) responses: Box<[Arc<crate::imports::service::Responses>]>,
+    /// The accounts, by id, `$G` first.
+    pub(crate) accounts: Arc<crate::accounts::Accounts>,
     /// The system account, if there is one.
     pub(crate) system: Option<u32>,
-    /// The connections of users of JWTs, by account.
-    pub(crate) conns: Box<[std::sync::Mutex<std::collections::BTreeSet<u64>>]>,
     /// The hash of the server's name that replies tracked for latency end
     /// in, with a system account, as `nats-server` makes it.
     pub(crate) node: Option<[u8; 8]>,
@@ -52,8 +45,6 @@ pub(crate) struct Shared {
     ws_auth: Option<Auth>,
     /// The auth callouts clients log in through, if any.
     pub(crate) callouts: Option<crate::callout::Callouts>,
-    /// The loop detection subject of each account on leaf node links.
-    pub(crate) lds: Box<[String]>,
     /// Message counts of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
     /// Slow consumers and stale clients so far.
@@ -92,7 +83,7 @@ impl Shared {
     /// Counts client `id` among the connections of `account`, unless it
     /// has `limit` already; a negative limit is none.
     pub(crate) fn count(&self, account: u32, id: u64, limit: i64) -> bool {
-        let Some(Ok(mut ids)) = self.conns.get(account as usize).map(|c| c.lock()) else {
+        let Some(Ok(mut ids)) = self.accounts.get(account).map(|a| a.conns.lock()) else {
             return false;
         };
         if usize::try_from(limit).is_ok_and(|l| ids.len() >= l) {
@@ -104,7 +95,7 @@ impl Shared {
 
     /// Lets client `id` of `account` that [`Shared::count`] counted go.
     pub(crate) fn uncount(&self, account: u32, id: u64) {
-        if let Some(Ok(mut ids)) = self.conns.get(account as usize).map(|c| c.lock()) {
+        if let Some(Ok(mut ids)) = self.accounts.get(account).map(|a| a.conns.lock()) {
             ids.remove(&id);
         }
     }
@@ -115,7 +106,7 @@ impl Shared {
         let Ok(limit) = usize::try_from(limit) else {
             return true;
         };
-        let Some(Ok(ids)) = self.conns.get(account as usize).map(|c| c.lock()) else {
+        let Some(Ok(ids)) = self.accounts.get(account).map(|a| a.conns.lock()) else {
             return true;
         };
         ids.range(..id).count() < limit
@@ -183,11 +174,12 @@ impl Server {
             server_id: keys.server.public_key(),
             keys,
             lanes: txs.into_boxed_slice(),
-            lds: accounts.iter().map(|_| crate::leaf::lds()).collect(),
-            conns: std::iter::repeat_with(Default::default)
-                .take(accounts.len())
-                .collect(),
-            accounts,
+            accounts: Arc::new(crate::accounts::Accounts::new(
+                &accounts,
+                setup.imports,
+                false,
+                || crate::imports::service::Responses::new(random()),
+            )),
             ws_auth: Auth::websocket(opts, auth.as_ref()),
             auth,
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
@@ -197,8 +189,6 @@ impl Server {
             tls: setup.tls,
             ws: door(opts, at.ws, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
-            responses: responses(setup.imports.len()),
-            imports: setup.imports,
             system,
             node: system.map(|_| node(&opts.server_name)),
             connect_urls: std::sync::Mutex::default(),
@@ -527,15 +517,6 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
             Door::Websocket => lane.spawn(move || crate::ws::run(s, index, stream)),
         };
     }
-}
-
-/// 22 random-looking characters, as `nats-server` IDs have.
-/// The requests sent into each of `n` accounts, each with a reply prefix
-/// of its own.
-fn responses(n: usize) -> Box<[Arc<crate::imports::service::Responses>]> {
-    (0..n)
-        .map(|_| Arc::new(crate::imports::service::Responses::new(random())))
-        .collect()
 }
 
 /// The hash of server name `name`: eight letters or digits from its

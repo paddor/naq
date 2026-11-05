@@ -195,19 +195,22 @@ pub(crate) const fn base62(n: u64) -> u8 {
 /// `lane`.
 pub(crate) fn install(lane: &Lane) {
     let shared = &lane.shared;
-    let mut answers = vec![false; shared.imports.len()];
-    for (a, imports) in shared.imports.iter().enumerate() {
-        for si in &imports.services {
-            lane.index(a as u32)
+    let mut answers = vec![false; shared.accounts.len() as usize];
+    for (a, account) in shared.accounts.iter() {
+        for si in &account.imports().services {
+            lane.index(a)
                 .borrow_mut()
                 .tap(&si.from, Tap::Service(si.clone()));
-            answers[a] = true;
-            answers[si.to as usize] = true;
+            answers[a as usize] = true;
+            if let Some(to) = answers.get_mut(si.to as usize) {
+                *to = true;
+            }
         }
     }
-    for (a, r) in shared.responses.iter().enumerate() {
-        if answers[a] {
-            lane.index(a as u32)
+    for (a, account) in shared.accounts.iter() {
+        if answers.get(a as usize) == Some(&true) {
+            let r = &account.responses;
+            lane.index(a)
                 .borrow_mut()
                 .tap(&r.filter(), Tap::Responses(r.clone()));
         }
@@ -227,7 +230,11 @@ async fn sweep(shared: std::sync::Weak<crate::server::Shared>) {
             return;
         };
         let now = Instant::now();
-        let expired: Vec<Track> = s.responses.iter().flat_map(|r| r.expire(now)).collect();
+        let expired: Vec<Track> = s
+            .accounts
+            .iter()
+            .flat_map(|(_, a)| a.responses.expire(now))
+            .collect();
         if expired.is_empty() {
             continue;
         }
@@ -403,7 +410,7 @@ impl Run<'_, '_> {
         if w.msg.is_some() || self.from.skips & crate::lane::bit(slot) != 0 {
             return false;
         }
-        let streams = &lane.shared.imports[owner as usize].streams;
+        let streams = &lane.shared.accounts.imports(owner).streams;
         let Some(im) = streams.get(import as usize) else {
             return false;
         };
@@ -432,6 +439,9 @@ impl Run<'_, '_> {
             return false;
         };
         let (lane, m) = (self.lane, self.m);
+        let Some(responses) = lane.shared.accounts.get(si.to).map(|a| &a.responses) else {
+            return false;
+        };
         let imported = self.out.imported(lane);
         let src = message(m, &imported.arena, w.msg);
         let mut subject = std::mem::take(&mut imported.subject);
@@ -453,7 +463,6 @@ impl Run<'_, '_> {
             Some(r) => {
                 let waiting = waiting(si, w.account, r, track);
                 let node = lane.shared.node.as_ref();
-                let responses = &lane.shared.responses[si.to as usize];
                 let Some(t) = responses.wait(waiting, |n| lane.below(n), node, &mut reply) else {
                     imported.subject = subject;
                     imported.headers = headers;
@@ -476,7 +485,6 @@ impl Run<'_, '_> {
         if let Some(t) = bad {
             self.sample(&t, Outcome::BadRequest, None);
         }
-        let responses = &lane.shared.responses[si.to as usize];
         if !delivered
             && let Some(t) = token
             && let Some(t) = responses.answered(t, false).and_then(|r| r.track)
@@ -544,9 +552,9 @@ impl Run<'_, '_> {
                     track: None,
                     ..wait.clone()
                 };
-                let waits = &lane.shared.responses[wait.to as usize];
+                let waits = lane.shared.accounts.get(wait.to).map(|a| &a.responses);
                 if waits
-                    .wait(back, |n| lane.below(n), None, &mut reply)
+                    .and_then(|w| w.wait(back, |n| lane.below(n), None, &mut reply))
                     .is_none()
                 {
                     return false;
@@ -637,7 +645,7 @@ fn client_info(
     from: From<'_>,
 ) -> ClientInfo {
     let shared = &lane.shared;
-    let name = shared.accounts[w.account as usize].clone();
+    let name = shared.accounts.name(w.account).to_owned();
     let before = headers
         .and_then(|h| info::header(h, info::HEADER))
         .and_then(|v| serde_json::from_slice::<ClientInfo>(v).ok());
@@ -669,7 +677,7 @@ fn client_info(
 fn details(lane: &Lane, c: &Client) -> ClientInfo {
     let meta = c.meta.borrow();
     let mut ci = ClientInfo {
-        account: lane.shared.accounts[c.account.get() as usize].clone(),
+        account: lane.shared.accounts.name(c.account.get()).to_owned(),
         rtt: u64::try_from(c.rtt.get().as_nanos()).unwrap_or(u64::MAX),
         start: Some(crate::monitor::rfc3339(meta.start)),
         host: meta.ip.clone(),

@@ -257,7 +257,11 @@ mod tests {
     fn other() -> Other {
         let ctx = omq_tokio::Context::current();
         let s = ctx.socket(omq_tokio::SocketType::Dealer, omq_tokio::Options::default());
-        let told = Told::new(1, Box::default(), Rc::default());
+        let told = Told::new(
+            1,
+            std::sync::Arc::new(crate::accounts::Accounts::of(&[])),
+            Rc::default(),
+        );
         Other::new(Sink::Dealer(s), Rc::new(told))
     }
 

@@ -12,7 +12,7 @@ mod publish;
 mod route;
 mod slots;
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ pub(crate) use route::{Queue, Queued};
 pub(crate) use slots::Linked;
 pub(crate) use slots::{SLOTS, Slots, bit};
 
+use crate::accounts::CHUNK;
 use crate::conn::{Client, SpentReads};
 use crate::index::Index;
 use crate::mailbox::{self, Mailbox, Receiver};
@@ -149,13 +150,19 @@ pub(crate) fn mailboxes() -> (LaneTx, LaneRx) {
 /// A subscription that got its maximum of messages: client and SID.
 type Spent = (Rc<Client>, Box<[u8]>);
 
+/// The indexes of one chunk of accounts.
+type Indexes = Box<[RefCell<Index>]>;
+
 /// State of one lane. Only its own thread touches it.
 #[derive(Debug)]
 pub(crate) struct Lane {
     pub(crate) id: usize,
     pub(crate) shared: Arc<Shared>,
-    /// Interest of every client of the server, by account.
-    indexes: Box<[RefCell<Index>]>,
+    /// Interest of every client of the server, by account: those of the
+    /// first chunk of accounts here, those of the later ones in chunks made
+    /// on first use.
+    first: Box<[RefCell<Index>; CHUNK]>,
+    later: Box<[OnceCell<Indexes>]>,
     /// Clients with output their writers have not been woken for.
     dirty: RefCell<Vec<Rc<Client>>>,
     /// Subscriptions that got their maximum of messages, by client and SID.
@@ -190,13 +197,37 @@ pub(crate) struct Lane {
     /// The message being delivered came through a service import: shadows
     /// do not get it.
     pub(crate) imported: Cell<bool>,
+    /// Account ids by name, as this lane met them.
+    account_ids: RefCell<FxHashMap<Box<[u8]>, u32>>,
 }
 
 impl Lane {
     /// The interest in `account`, an id of the server's.
     #[inline]
     pub(crate) fn index(&self, account: u32) -> &RefCell<Index> {
-        &self.indexes[account as usize]
+        match self.first.get(account as usize) {
+            Some(i) => i,
+            None => self.later_index(account),
+        }
+    }
+
+    /// The interest in `account`, past the first chunk of accounts.
+    #[cold]
+    #[inline(never)]
+    fn later_index(&self, account: u32) -> &RefCell<Index> {
+        let (chunk, at) = crate::accounts::place(account);
+        &self.later[chunk - 1].get_or_init(indexes)[at]
+    }
+
+    /// The id of account `name`, if the server has it: kept, as ids are
+    /// never reused.
+    pub(crate) fn account_id(&self, name: &[u8]) -> Option<u32> {
+        if let Some(&id) = self.account_ids.borrow().get(name) {
+            return Some(id);
+        }
+        let id = self.shared.accounts.id_of(name)?;
+        self.account_ids.borrow_mut().insert(name.into(), id);
+        Some(id)
     }
 
     /// Notes the taps of interest the message being routed met.
@@ -404,6 +435,12 @@ impl Lane {
     }
 }
 
+/// A chunk of indexes, of accounts with no interest yet.
+#[cold]
+fn indexes() -> Indexes {
+    (0..CHUNK).map(|_| RefCell::default()).collect()
+}
+
 /// Sets up lane `id` of the server on the calling lane thread, with the
 /// tasks that take its mailboxes.
 pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
@@ -412,8 +449,9 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
     let hubs = crate::mesh::hubs(&shared.opts);
     let lane = Rc::new(Lane {
         id,
-        indexes: (0..shared.accounts.len())
-            .map(|_| RefCell::default())
+        first: Box::new(std::array::from_fn(|_| RefCell::default())),
+        later: (1..shared.accounts.room())
+            .map(|_| OnceCell::new())
             .collect(),
         shared,
         dirty: RefCell::default(),
@@ -432,6 +470,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         shadow_subject: RefCell::default(),
         taps: RefCell::default(),
         imported: Cell::new(false),
+        account_ids: RefCell::default(),
     });
     crate::imports::service::install(&lane);
     if let Some(c) = &lane.shared.callouts {

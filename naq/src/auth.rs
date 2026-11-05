@@ -439,7 +439,7 @@ impl Auth {
     /// `general`. `None`: any leaf links.
     pub(crate) fn leafnodes(
         opts: &Options,
-        accounts: &[String],
+        accounts: &crate::accounts::Accounts,
         general: Option<&Auth>,
     ) -> Option<Auth> {
         let l = opts.leafnodes.as_ref()?;
@@ -452,7 +452,11 @@ impl Auth {
         for u in &l.users {
             let listed = Listed {
                 grant: Grant {
-                    account: id(accounts, u.account.as_ref()),
+                    account: u
+                        .account
+                        .as_deref()
+                        .and_then(|n| accounts.id(n))
+                        .unwrap_or(GLOBAL),
                     perms: None,
                 },
                 kinds: Kinds::default(),
