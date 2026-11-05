@@ -13,6 +13,37 @@ use crate::auth::{Auth, Check, Creds, Grant, Origin, Pending};
 use crate::callout::{self, Call, Hook, Plan};
 use crate::perms::Held;
 
+/// When a connection of subscription limit `limit`, with `subs` of them,
+/// is closed, and why: at once if it is at its limit, as `nats-server`
+/// tells it and closes it; else at `expires`, its account's if `.1`.
+fn deadline(
+    limit: i64,
+    subs: usize,
+    expires: Option<(std::time::SystemTime, bool)>,
+) -> Option<(Instant, Close)> {
+    if usize::try_from(limit).is_ok_and(|l| subs >= l) {
+        return Some((
+            Instant::now() + std::time::Duration::from_millis(20),
+            Close::MaxSubs,
+        ));
+    }
+    expires.map(|(t, account)| {
+        let left = t
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_default();
+        let why = if account {
+            Close::AccountExpired
+        } else {
+            Close::UserExpired
+        };
+        (Instant::now() + left, why)
+    })
+}
+
+/// A subscription its permissions no longer allow: its SID, subject and
+/// queue group.
+type Forbidden = (Box<[u8]>, Box<[u8]>, Option<Box<[u8]>>);
+
 /// A login that finishes off the parse loop.
 #[derive(Debug)]
 pub(super) enum Later {
@@ -201,11 +232,18 @@ impl Conn {
         self.lane.ship_imported(&mut self.out).await;
         // Cancel-safe: a dropped wait loses nothing; the ticket keeps the
         // request until it goes.
-        let answer = tokio::select! {
-            biased;
-            () = self.client.stop.notified() => return Err(Close::Kicked),
-            a = &mut ticket.answer => a.ok(),
-            () = tokio::time::sleep(shared.opts.auth_timeout) => None,
+        let timeout = tokio::time::sleep(shared.opts.auth_timeout);
+        tokio::pin!(timeout);
+        let answer = loop {
+            tokio::select! {
+                biased;
+                // Not logged in yet: a change of its account is nothing to it.
+                () = self.client.stop.notified() => if self.client.is_closed() {
+                    return Err(Close::Kicked);
+                },
+                a = &mut ticket.answer => break a.ok(),
+                () = &mut timeout => break None,
+            }
         };
         drop(ticket);
         let payload = answer.ok_or(Close::Auth)?;
@@ -243,11 +281,11 @@ impl Conn {
     fn bind_user(&mut self, u: &crate::jwt::trust::User) -> Result<(), Close> {
         let shared = self.lane.shared.clone();
         if self.bounds.counted != Some(u.account) {
-            if !shared.count(u.account, u.conns) {
+            if !shared.count(u.account, self.client.id, u.conns) {
                 return Err(Close::AccountConns);
             }
             if let Some(a) = self.bounds.counted.replace(u.account) {
-                shared.uncount(a);
+                shared.uncount(a, self.client.id);
             }
         }
         self.bind(Grant {
@@ -258,22 +296,90 @@ impl Conn {
         self.bounds.limits.max_payload =
             usize::try_from(u.payload).map_or(server, |p| p.min(server));
         self.bounds.subs = u.subs;
-        self.bounds.deadline = if u.subs == 0 {
-            // As `nats-server` does: once it is in, it is told and closed.
-            Some((
-                Instant::now() + std::time::Duration::from_millis(20),
-                Close::MaxSubs,
-            ))
-        } else {
-            u.expires.map(|t| {
-                let left = t
-                    .duration_since(std::time::SystemTime::now())
-                    .unwrap_or_default();
-                (Instant::now() + left, Close::UserExpired)
-            })
-        };
+        let user = u.expires.map(|t| (t, false));
+        let account = u.account_expires.map(|t| (t, true));
+        self.bounds.deadline = deadline(u.subs, 0, [user, account].into_iter().flatten().min());
+        self.bounds.kept.clone_from(&u.kept);
         self.client.meta.borrow_mut().user = Some(u.key.clone());
         Ok(())
+    }
+
+    /// Checks the login again once its account changed, as `nats-server`
+    /// checks its clients after an update: the client may stay with new
+    /// limits and permissions, or go.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn refresh(&mut self) -> Result<(), Close> {
+        use crate::jwt::trust::live::{Gone, Refresh};
+        let shared = self.lane.shared.clone();
+        let trust = shared.auth.as_ref().and_then(Auth::trust);
+        let (Some(trust), Some(kept)) = (trust, self.bounds.kept.as_deref_mut()) else {
+            return Ok(());
+        };
+        let s = match trust.refresh(kept) {
+            Refresh::Stays(s) => s,
+            Refresh::Goes(Gone::Expired) => return Err(Close::AccountExpired),
+            Refresh::Goes(Gone::Revoked) => return Err(Close::Revoked),
+            Refresh::Goes(Gone::Bearer) => return Err(Close::Auth),
+            Refresh::Goes(Gone::Unsigned) => return Err(Close::Unsigned),
+        };
+        let account = self.client.account.get();
+        // The newest connections past the limit go first.
+        if !shared.kept(account, self.client.id, s.conns) {
+            return Err(Close::AccountConns);
+        }
+        if let Some(defaults) = &s.defaults {
+            kept.defaults = Some(defaults.clone());
+        }
+        let server = shared.opts.max_payload;
+        self.bounds.limits.max_payload =
+            usize::try_from(s.payload).map_or(server, |p| p.min(server));
+        self.bounds.subs = s.subs;
+        let subs = self.client.subs.borrow().len();
+        self.bounds.deadline = deadline(s.subs, subs, s.expires);
+        if let Some(defaults) = s.defaults {
+            self.bind(Grant {
+                account,
+                perms: defaults.0,
+            });
+            self.drop_forbidden();
+        }
+        self.lane.flush();
+        Ok(())
+    }
+
+    /// Ends the subscriptions its permissions no longer allow, and tells it.
+    fn drop_forbidden(&mut self) {
+        let held = self.client.held.borrow().clone();
+        let Some(held) = held else {
+            return;
+        };
+        let forbidden: Vec<Forbidden> = self
+            .client
+            .subs
+            .borrow()
+            .iter()
+            .filter(|(_, s)| !held.perms.subscribe(&s.subject, s.queue.as_deref()))
+            .map(|(sid, s)| (sid.clone(), s.subject.clone(), s.queue.clone()))
+            .collect();
+        for (sid, subject, queue) in forbidden {
+            self.client.unsubscribe(&self.lane, &sid);
+            let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+            let why = match queue {
+                Some(q) => format!(
+                    "Permissions Violation for Subscription to {:?} using queue {:?} (sid {:?})",
+                    text(&subject),
+                    text(&q),
+                    text(&sid)
+                ),
+                None => format!(
+                    "Permissions Violation for Subscription to {:?} (sid {:?})",
+                    text(&subject),
+                    text(&sid)
+                ),
+            };
+            self.error(&why);
+        }
     }
 
     /// The rest of a `CONNECT`, from a client that is who it says.

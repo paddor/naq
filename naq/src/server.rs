@@ -42,7 +42,7 @@ pub(crate) struct Shared {
     /// The system account, if there is one.
     pub(crate) system: Option<u32>,
     /// The connections of users of JWTs, by account.
-    pub(crate) conns: Box<[std::sync::atomic::AtomicI64]>,
+    pub(crate) conns: Box<[std::sync::Mutex<std::collections::BTreeSet<u64>>]>,
     /// The hash of the server's name that replies tracked for latency end
     /// in, with a system account, as `nats-server` makes it.
     pub(crate) node: Option<[u8; 8]>,
@@ -89,31 +89,36 @@ impl Shared {
         self.next_client.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Counts a connection of `account`, unless it has `limit` already,
-    /// -1 for none. Returns whether it did.
-    pub(crate) fn count(&self, account: u32, limit: i64) -> bool {
-        let Some(n) = self.conns.get(account as usize) else {
+    /// Counts client `id` among the connections of `account`, unless it
+    /// has `limit` already; a negative limit is none.
+    pub(crate) fn count(&self, account: u32, id: u64, limit: i64) -> bool {
+        let Some(Ok(mut ids)) = self.conns.get(account as usize).map(|c| c.lock()) else {
             return false;
         };
-        // Relaxed: the count alone decides, and its updates are ordered.
-        let mut now = n.load(Ordering::Relaxed);
-        loop {
-            if limit >= 0 && now >= limit {
-                return false;
-            }
-            match n.compare_exchange_weak(now, now + 1, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => return true,
-                Err(was) => now = was,
-            }
+        if usize::try_from(limit).is_ok_and(|l| ids.len() >= l) {
+            return false;
+        }
+        ids.insert(id);
+        true
+    }
+
+    /// Lets client `id` of `account` that [`Shared::count`] counted go.
+    pub(crate) fn uncount(&self, account: u32, id: u64) {
+        if let Some(Ok(mut ids)) = self.conns.get(account as usize).map(|c| c.lock()) {
+            ids.remove(&id);
         }
     }
 
-    /// Lets a connection of `account` that [`Shared::count`] counted go.
-    pub(crate) fn uncount(&self, account: u32) {
-        if let Some(n) = self.conns.get(account as usize) {
-            // Relaxed: as in `count`.
-            n.fetch_sub(1, Ordering::Relaxed);
-        }
+    /// Whether client `id` of `account` is among the oldest `limit`
+    /// connections, those an account of that many keeps.
+    pub(crate) fn kept(&self, account: u32, id: u64, limit: i64) -> bool {
+        let Ok(limit) = usize::try_from(limit) else {
+            return true;
+        };
+        let Some(Ok(ids)) = self.conns.get(account as usize).map(|c| c.lock()) else {
+            return true;
+        };
+        ids.range(..id).count() < limit
     }
 
     /// Notes that a client went away.

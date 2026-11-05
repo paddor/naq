@@ -173,6 +173,8 @@ fn placed(
         payload: NO_LIMIT,
         conns: NO_LIMIT,
         expires: [exp, end].into_iter().flatten().min(),
+        account_expires: None,
+        kept: None,
     })
 }
 

@@ -224,11 +224,14 @@ pub(super) fn closing(why: Option<Close>) -> (u16, &'static str) {
         }
         Some(Close::Refused(_)) => (frame::INTERNAL, "No Responders Requires Headers"),
         Some(Close::Stale) => (frame::GOING_AWAY, "Stale Connection"),
-        Some(Close::Auth) => (frame::POLICY, "Authentication Failure"),
+        Some(Close::Auth | Close::Unsigned) => (frame::POLICY, "Authentication Failure"),
         Some(Close::AuthTimeout) => (frame::POLICY, "Authentication Timeout"),
         Some(Close::AccountConns) => (frame::POLICY, "Maximum Account Connections Exceeded"),
-        Some(Close::UserExpired) => (frame::POLICY, "Authentication Expired"),
+        Some(Close::UserExpired | Close::AccountExpired) => {
+            (frame::POLICY, "Authentication Expired")
+        }
         Some(Close::MaxSubs) => (frame::POLICY, "Maximum Subscriptions Exceeded"),
+        Some(Close::Revoked) => (frame::POLICY, "Credentials Revoked"),
         None => (frame::GOING_AWAY, "Server Shutdown"),
     }
 }

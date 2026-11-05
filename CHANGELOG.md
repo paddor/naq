@@ -367,6 +367,17 @@ Notable changes to naq. The format follows
   `CONNECT`, or fails its own checks in operator mode, is refused without
   a callout; naq links never call out. A callout without a system
   account, or naming unknown accounts or auth users, is refused at start.
+- `naq`: account JWT updates in operator mode, on
+  `$SYS.REQ.ACCOUNT.<id>.CLAIMS.UPDATE` and `$SYS.ACCOUNT.<id>.CLAIMS.UPDATE`
+  in the system account, answered as `nats-server` answers them with a
+  memory resolver: an account a client used takes the update, others skip
+  it. The account's clients, at any server of the cluster, check
+  themselves again: the newest past a lower connection limit go, new
+  subscription and payload limits hold, users of default permissions take
+  the new ones and lose the subscriptions they forbid, and revoked users,
+  bearer users the account refuses and users of a signing key it dropped
+  or changed go. Clients go when their account expires. Imports and
+  exports of an account stay as they were at start.
 - `naq`: the server ID is the server's NKey, and `INFO` tells its curve
   key (`xkey`), as in `nats-server`. With TLS, clients have the TLS
   timeout and a second to log in, unless `authorization { timeout }` says

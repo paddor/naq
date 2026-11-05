@@ -27,6 +27,8 @@ pub(crate) enum Tap {
     Responses(Arc<Responses>),
     /// The answers to auth callout requests, on `$SYS._INBOX.<hash>.*`.
     Callout(Arc<crate::callout::Waiting>),
+    /// A service of the server in the system account.
+    Sys(crate::sys::Service),
     /// A shadow of the plain interest of a naq hub or leaf in `slot`, bound
     /// to account `importer`, for its stream import `import`.
     Shadow {
@@ -369,6 +371,7 @@ impl Run<'_, '_> {
                 Tap::Service(ref si) => self.request(w, si),
                 Tap::Responses(ref r) => self.response(w, r),
                 Tap::Callout(ref c) => self.callout(w, c),
+                Tap::Sys(s) => self.sys(w, s),
                 Tap::Shadow {
                     slot,
                     importer,
@@ -486,6 +489,26 @@ impl Run<'_, '_> {
     /// Sends the response `w` holds back to the requester, by the reply it
     /// came on. The first one sends the latency sample of a sampled
     /// request.
+    /// Has the server answer the request `w` holds, for service `s`.
+    fn sys(&mut self, w: Work, s: crate::sys::Service) -> bool {
+        let (lane, m) = (self.lane, self.m);
+        let imported = self.out.imported(lane);
+        let src = message(m, &imported.arena, w.msg);
+        // Copied out: the answer goes into the arena it lies in.
+        let (subject, reply, payload) = (
+            src.subject.to_vec(),
+            src.reply.map(<[u8]>::to_vec),
+            src.payload.to_vec(),
+        );
+        let m = Pub {
+            subject: &subject,
+            reply: reply.as_deref(),
+            headers: None,
+            payload: &payload,
+        };
+        crate::sys::answer(lane, self.out, s, &m)
+    }
+
     /// Hands the answer `w` holds to the auth callout request it names.
     fn callout(&mut self, w: Work, c: &crate::callout::Waiting) -> bool {
         let (lane, m) = (self.lane, self.m);

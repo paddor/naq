@@ -58,6 +58,8 @@ pub(crate) struct Client {
     /// Who it is, for monitoring.
     pub(crate) meta: RefCell<Meta>,
     closed: Cell<bool>,
+    /// Its account changed: the read loop checks it again.
+    refresh: Cell<bool>,
     /// Why the server ended it, once it did.
     ended: Cell<Option<Close>>,
     /// Wakes the writer.
@@ -92,6 +94,7 @@ impl Client {
                 version: None,
             }),
             closed: Cell::new(false),
+            refresh: Cell::new(false),
             ended: Cell::new(None),
             wake: Notify::new(),
             drained: Notify::new(),
@@ -105,6 +108,17 @@ impl Client {
 
     pub(crate) const fn is_closed(&self) -> bool {
         self.closed.get()
+    }
+
+    /// Tells the read loop its account changed: it checks the login again.
+    pub(crate) fn refresh(&self) {
+        self.refresh.set(true);
+        self.stop.notify_one();
+    }
+
+    /// Whether its account changed since it last looked.
+    pub(crate) const fn take_refresh(&self) -> bool {
+        self.refresh.replace(false)
     }
 
     /// Why the server ended the connection, once it did.
@@ -221,6 +235,12 @@ pub(crate) enum Close {
     UserExpired,
     /// It may have no subscriptions at all.
     MaxSubs,
+    /// Its account revoked its user.
+    Revoked,
+    /// Its account expired, or is gone.
+    AccountExpired,
+    /// The key that signed its user no longer may: closed without a word.
+    Unsigned,
 }
 
 /// The refusal of a `CONNECT` with a protocol other than 0 and 1.
@@ -281,6 +301,9 @@ struct Bounds {
     deadline: Option<(tokio::time::Instant, Close)>,
     /// The account whose connection count holds it.
     counted: Option<u32>,
+    /// How it logged in to a JWT account, to check itself again once the
+    /// account changes.
+    kept: Option<Box<crate::jwt::trust::live::Kept>>,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -413,6 +436,7 @@ where
             subs: -1,
             deadline: None,
             counted: None,
+            kept: None,
         },
     };
     let close = conn.read_loop(&mut r).await;
@@ -477,7 +501,7 @@ impl Conn {
         }
         self.lane.clients.borrow_mut().remove(&self.client.id);
         if let Some(a) = self.bounds.counted.take() {
-            self.lane.shared.uncount(a);
+            self.lane.shared.uncount(a, self.client.id);
         }
         self.lane.shared.client_gone();
         self.lane.flush();
@@ -505,10 +529,13 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::AccountConns => Some("maximum account active connections exceeded"),
         Close::UserExpired => Some("User Authentication Expired"),
         Close::MaxSubs => Some("maximum subscriptions exceeded"),
+        Close::Revoked => Some("User Authentication Revoked"),
+        Close::AccountExpired => Some("Account Authentication Expired"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked
         | Close::Connect
+        | Close::Unsigned
         | Close::NoHeaders => None,
         Close::Parse(_) => Some("Unknown Protocol Operation"),
     }

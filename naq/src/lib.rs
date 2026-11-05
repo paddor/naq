@@ -51,6 +51,7 @@ mod options;
 mod perms;
 mod server;
 mod stats;
+mod sys;
 mod tls;
 mod ws;
 

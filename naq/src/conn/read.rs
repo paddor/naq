@@ -90,7 +90,14 @@ impl Conn {
             // passes its wake on, and the timer keeps its deadline.
             tokio::select! {
                 biased;
-                () = self.client.stop.notified() => return Close::Kicked,
+                () = self.client.stop.notified() => {
+                    if !self.client.take_refresh() || self.client.is_closed() {
+                        return Close::Kicked;
+                    }
+                    if let Err(close) = self.refresh() {
+                        return close;
+                    }
+                }
                 () = &mut timer => {
                     if let Some(close) = self.timer_fired() {
                         return close;

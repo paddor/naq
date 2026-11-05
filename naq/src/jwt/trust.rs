@@ -3,7 +3,7 @@
 //! `nats-server` checks them.
 
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustc_hash::FxHashMap;
@@ -22,8 +22,8 @@ pub(crate) struct Trust {
     /// Accounts must be signed by an operator's signing key, and users by
     /// an account's signing key.
     strict: bool,
-    /// The accounts of JWTs, by public key.
-    accounts: FxHashMap<String, Arc<JwtAccount>>,
+    /// The accounts of JWTs, by public key. Updates replace them.
+    accounts: RwLock<FxHashMap<String, Arc<JwtAccount>>>,
 }
 
 /// An account of a JWT.
@@ -32,6 +32,11 @@ pub(crate) struct JwtAccount {
     /// Its id among the server's accounts.
     pub(crate) id: u32,
     pub(crate) claims: Claims<claims::Account>,
+    /// The JWT, as given.
+    pub(crate) jwt: String,
+    /// A client looked it up: as `nats-server` loads accounts on first use,
+    /// only these take updates.
+    loaded: std::sync::atomic::AtomicBool,
     /// The permissions of its users that have none of their own.
     defaults: Option<Arc<Perms>>,
 }
@@ -51,6 +56,10 @@ pub(crate) struct User {
     pub(crate) conns: i64,
     /// When it may no longer be connected.
     pub(crate) expires: Option<SystemTime>,
+    /// When its account expires, if it does.
+    pub(crate) account_expires: Option<SystemTime>,
+    /// What it keeps to check itself again once its account changes.
+    pub(crate) kept: Option<Box<live::Kept>>,
 }
 
 impl PartialEq for User {
@@ -68,6 +77,32 @@ impl PartialEq for User {
 }
 
 impl Eq for User {}
+
+impl JwtAccount {
+    /// Account `id` of `claims`, decoded from `jwt`.
+    pub(crate) fn new(id: u32, claims: Claims<claims::Account>, jwt: String) -> JwtAccount {
+        JwtAccount {
+            id,
+            defaults: defaults(&claims.nats.default_permissions),
+            claims,
+            jwt,
+            loaded: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Marks it used.
+    pub(crate) fn load(&self) {
+        // Relaxed: a flag on its own, read under the accounts' lock.
+        self.loaded
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether it was used.
+    pub(crate) fn is_loaded(&self) -> bool {
+        // Relaxed: as in `load`.
+        self.loaded.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
 
 /// The startup rules of `nats-server` for operator mode.
 pub(crate) fn validate(opts: &Options) -> Result<(), String> {
@@ -148,11 +183,12 @@ impl Trust {
             }
             signers.extend(c.nats.signing_keys);
         }
-        let mut t = Trust {
+        let t = Trust {
             signers,
             strict,
-            accounts: FxHashMap::default(),
+            accounts: RwLock::default(),
         };
+        let system = opts.system_account.clone().or_else(|| system_account(opts));
         for (key, jwt) in &opts.resolver_preload {
             // One that fails the checks of nats-io/jwt is no account.
             let Some(claims) = decode::<claims::Account>(jwt)
@@ -165,24 +201,26 @@ impl Trust {
             let Some(id) = names.iter().position(|n| n == key) else {
                 continue;
             };
-            let defaults = defaults(&claims.nats.default_permissions);
-            let account = JwtAccount {
-                // Accounts are few: their count fits.
-                id: id as u32,
-                claims,
-                defaults,
-            };
-            t.accounts.insert(key.clone(), Arc::new(account));
+            // Accounts are few: their count fits.
+            let account = JwtAccount::new(id as u32, claims, jwt.clone());
+            // As in `nats-server`, the system account is there from the start.
+            if Some(key) == system.as_ref() {
+                account.load();
+            }
+            if let Ok(mut all) = t.accounts.write() {
+                all.insert(key.clone(), Arc::new(account));
+            }
         }
         Some(t)
     }
 
     /// The account of public key `key`, if its JWT holds: signed by a key
     /// this server trusts.
-    pub(crate) fn account(&self, key: &str) -> Option<&Arc<JwtAccount>> {
-        self.accounts
-            .get(key)
+    pub(crate) fn account(&self, key: &str) -> Option<Arc<JwtAccount>> {
+        let all = self.accounts.read().ok()?;
+        all.get(key)
             .filter(|a| self.signers.contains(&a.claims.iss))
+            .cloned()
     }
 
     /// The user of JWT `jwt`, with `sig` the signature of `nonce`, that
@@ -197,15 +235,13 @@ impl Trust {
     ) -> Option<User> {
         let user = decode::<claims::User>(jwt).ok()?;
         let at = now();
-        if user.out_of_time(at) {
-            return None;
-        }
         let issuer = &user.nats.issuer_account;
-        if !issuer.is_empty() && !super::is_key(issuer, 'A') {
+        if user.out_of_time(at) || (!issuer.is_empty() && !super::is_key(issuer, 'A')) {
             return None;
         }
         let key = if issuer.is_empty() { &user.iss } else { issuer };
         let account = self.account(key)?;
+        account.load();
         let a = &account.claims;
         if a.out_of_time(at) {
             return None;
@@ -226,19 +262,23 @@ impl Trust {
         if !from_allowed(&limits.src, origin.ip) {
             return None;
         }
-        let window_end = match window(&limits.times, &limits.times_location, SystemTime::now()) {
-            Window::Always => None,
-            Window::Until(t) => Some(t),
-            Window::Outside => return None,
-        };
-        let exp =
-            (user.exp > 0).then(|| UNIX_EPOCH + Duration::from_secs(user.exp.cast_unsigned()));
-        let expires = [exp, window_end].into_iter().flatten().min();
+        let window_end = time_left(limits).ok()?;
+        let expires = [expiry(&user), window_end].into_iter().flatten().min();
         let own = &limits.permissions;
         let perms = if own.is_empty() {
             account.defaults.clone()
         } else {
             defaults(own)
+        };
+        let kept = live::Kept {
+            jwt: Some(jwt.to_owned()),
+            defaults: own
+                .is_empty()
+                .then(|| live::Defaults(account.defaults.clone())),
+            subs: limits.subs,
+            payload: limits.payload,
+            expires,
+            ..kept_of(&user, key, a)
         };
         Some(User {
             account: account.id,
@@ -248,8 +288,40 @@ impl Trust {
             payload: tighter(limits.payload, a.nats.limits.payload),
             conns: a.nats.limits.conn,
             expires,
+            account_expires: expiry(a),
+            kept: Some(Box::new(kept)),
         })
     }
+}
+
+/// What a user of user JWT claims `user` in account `key` of claims `a`
+/// keeps of its account: its key, issue time and signer.
+fn kept_of(user: &Claims<claims::User>, key: &str, a: &Claims<claims::Account>) -> live::Kept {
+    live::Kept {
+        signer: signer_of(user, key, a),
+        ..live::Kept::of_callout(key, user)
+    }
+}
+
+/// The signing key that issued `user` of account `key` of claims `a`, if
+/// not the account itself, with the template it has.
+fn signer_of(
+    user: &Claims<claims::User>,
+    key: &str,
+    a: &Claims<claims::Account>,
+) -> Option<(String, Option<claims::UserLimits>)> {
+    let scope = a
+        .nats
+        .signing_keys
+        .0
+        .get(&user.iss)
+        .filter(|_| user.iss != key)?;
+    Some((user.iss.clone(), scope.as_ref().map(|s| s.template.clone())))
+}
+
+/// When claims `c` expire, if they do.
+fn expiry<T>(c: &Claims<T>) -> Option<SystemTime> {
+    (c.exp > 0).then(|| UNIX_EPOCH + Duration::from_secs(c.exp.cast_unsigned()))
 }
 
 impl Trust {
@@ -284,11 +356,16 @@ impl Trust {
 }
 
 impl Trust {
-    /// The accounts whose users call out: those that name auth users.
-    pub(crate) fn callouts(&self) -> impl Iterator<Item = &Arc<JwtAccount>> {
-        self.accounts
-            .values()
+    /// The ids of the accounts whose users call out: those that name auth
+    /// users.
+    pub(crate) fn callouts(&self) -> Vec<u32> {
+        let Ok(all) = self.accounts.read() else {
+            return Vec::new();
+        };
+        all.values()
             .filter(|a| !a.claims.nats.authorization.auth_users.is_empty())
+            .map(|a| a.id)
+            .collect()
     }
 
     /// The user an answer of the callout of account `callout` lets in
@@ -324,6 +401,10 @@ impl Trust {
         let exp =
             (user.exp > 0).then(|| UNIX_EPOCH + Duration::from_secs(user.exp.cast_unsigned()));
         let own = &limits.permissions;
+        let mut kept = live::Kept::of_callout(key, user);
+        kept.defaults = own
+            .is_empty()
+            .then(|| live::Defaults(account.defaults.clone()));
         Ok(User {
             account: account.id,
             perms: if own.is_empty() {
@@ -336,6 +417,8 @@ impl Trust {
             payload: a.nats.limits.payload,
             conns: a.nats.limits.conn,
             expires: [exp, end].into_iter().flatten().min(),
+            account_expires: expiry(a),
+            kept: Some(Box::new(kept)),
         })
     }
 }
@@ -484,6 +567,8 @@ fn clock(t: &str) -> Option<u64> {
     let (h, m, s) = (parts.next()??, parts.next()??, parts.next()??);
     (h < 24 && m < 60 && s < 60 && parts.next().is_none()).then_some(h * 3600 + m * 60 + s)
 }
+
+pub(crate) mod live;
 
 #[cfg(test)]
 mod tests;

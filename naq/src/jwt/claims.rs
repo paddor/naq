@@ -237,7 +237,7 @@ pub(crate) struct UserLimits {
 
 impl UserLimits {
     /// A scoped signing key's template left out: no limits.
-    fn unlimited() -> UserLimits {
+    pub(crate) fn unlimited() -> UserLimits {
         UserLimits {
             subs: NO_LIMIT,
             data: NO_LIMIT,

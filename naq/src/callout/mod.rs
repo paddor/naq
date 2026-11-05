@@ -144,7 +144,7 @@ impl Callouts {
         });
         let mut accounts: Vec<u32> = config.iter().map(|c| c.account).collect();
         if let Some(t) = auth.and_then(Auth::trust) {
-            accounts.extend(t.callouts().map(|a| a.id));
+            accounts.extend(t.callouts());
         }
         if accounts.is_empty() {
             return None;

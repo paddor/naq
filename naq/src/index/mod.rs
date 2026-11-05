@@ -225,6 +225,7 @@ impl Interest {
                     t,
                     Tap::Responses(_)
                         | Tap::Callout(_)
+                        | Tap::Sys(_)
                         | Tap::Shadow {
                             to_routes: true,
                             ..
