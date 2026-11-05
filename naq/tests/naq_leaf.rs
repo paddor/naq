@@ -1047,3 +1047,37 @@ fn an_isolated_naq_leaf_hears_of_no_interest_of_other_leafs() {
     told.sort();
     assert_eq!(told, ["here", "route"]);
 }
+
+#[test]
+fn leafz_counts_the_messages_of_naq_links() {
+    let (h, l) = linked();
+    let mut at_hub = client(&h, "SUB up 1\r\n");
+    let mut at_leaf = client(&l, "SUB down 1\r\n");
+    let mut up = client(&l, "");
+    let mut down = client(&h, "");
+    until_heard(&mut up, &mut at_hub, "up");
+    until_heard(&mut down, &mut at_leaf, "down");
+    let counts = |s: &Server| {
+        let leafz = get(s, "/leafz");
+        let n = |k: &str| leafz["leafs"][0][k].as_u64().unwrap();
+        [n("in_msgs"), n("in_bytes"), n("out_msgs"), n("out_bytes")]
+    };
+    let (hub0, leaf0) = (counts(&h), counts(&l));
+    for _ in 0..10 {
+        send(&mut up, "PUB up 5\r\nhello\r\n");
+    }
+    for _ in 0..3 {
+        send(&mut down, "PUB down 2\r\nhi\r\n");
+    }
+    for _ in 0..10 {
+        assert_eq!(line(&mut at_hub), "MSG up 1 5");
+        line(&mut at_hub);
+    }
+    for _ in 0..3 {
+        assert_eq!(line(&mut at_leaf), "MSG down 1 2");
+        line(&mut at_leaf);
+    }
+    let delta = |now: [u64; 4], was: [u64; 4]| [0, 1, 2, 3].map(|i| now[i] - was[i]);
+    assert_eq!(delta(counts(&h), hub0), [10, 50, 3, 6], "in, then out");
+    assert_eq!(delta(counts(&l), leaf0), [3, 6, 10, 50]);
+}

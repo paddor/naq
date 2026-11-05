@@ -250,6 +250,9 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
         };
         let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
         lane.tally.took(size);
+        if let Some(s) = link {
+            slots.tally(s).took(size);
+        }
         let Some(found) = index.matches(p.subject) else {
             continue;
         };

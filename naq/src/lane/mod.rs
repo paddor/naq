@@ -100,7 +100,7 @@ pub(crate) enum Control {
         endpoints: Vec<String>,
     },
     /// Answered with the lane's leaf node links, for monitoring.
-    Links(oneshot::Sender<Vec<crate::monitor::LeafInfo>>),
+    Links(oneshot::Sender<crate::monitor::Links>),
     /// Answered by lane 0 with the routes of the cluster, for monitoring.
     Routes(
         crate::monitor::Subs,

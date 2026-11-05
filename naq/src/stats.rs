@@ -46,6 +46,18 @@ impl Tally {
         self.out_bytes.set(self.out_bytes.get() + bytes as u64);
     }
 
+    /// Starts over from none.
+    pub(crate) fn reset(&self) {
+        for c in [
+            &self.in_msgs,
+            &self.in_bytes,
+            &self.out_msgs,
+            &self.out_bytes,
+        ] {
+            c.set(0);
+        }
+    }
+
     pub(crate) const fn totals(&self) -> Totals {
         Totals {
             in_msgs: self.in_msgs.get(),

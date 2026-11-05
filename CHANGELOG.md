@@ -288,6 +288,8 @@ Notable changes to naq. The format follows
   `request_isolation` (`peer::Connect::isolate`) hears of no interest of
   the hub's other leafs and hubs; `/leafz` shows it as isolated, and lists
   only the interest a link takes.
+- `naq`: `/leafz` counts the messages and bytes each naq link took and
+  sent since it linked, summed over the lanes.
 - `naq-bench`: cluster workloads in `naq_suite` (`cluster-one-to-one`,
   `cluster-fan-out-3`, `cluster-queue-3`): three servers of one cluster
   per run, from the same configuration file for `nats-server` and naq

@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::perms::LinkPerms;
+use crate::stats::{Tally, Totals};
 
 /// Slots in all: their bits fit a `u64`.
 pub(crate) const SLOTS: usize = 64;
@@ -45,6 +46,9 @@ pub(crate) struct Slots {
     guarded: Cell<u64>,
     /// The hub or leaf in each slot, by slot.
     by_slot: RefCell<Vec<Option<Linked>>>,
+    /// Messages to and from each slot's server on this lane, since it
+    /// linked.
+    tallies: Box<[Tally]>,
 }
 
 impl Slots {
@@ -57,6 +61,7 @@ impl Slots {
             leafs: Cell::new(0),
             guarded: Cell::new(0),
             by_slot: RefCell::default(),
+            tallies: (0..SLOTS).map(|_| Tally::default()).collect(),
         }
     }
 
@@ -72,6 +77,7 @@ impl Slots {
         if all.len() <= at {
             all.resize(at + 1, None);
         }
+        self.tally(s).reset();
         let guarded = self.guarded.get() & !bit(s);
         let with = if linked.perms.is_some() { bit(s) } else { 0 };
         self.guarded.set(guarded | with);
@@ -127,6 +133,22 @@ impl Slots {
             }
         }
         bits
+    }
+
+    /// Messages to and from the server in slot `s` on this lane.
+    #[inline]
+    pub(crate) fn tally(&self, s: u16) -> &Tally {
+        &self.tallies[usize::from(s) % SLOTS]
+    }
+
+    /// The counts of each slot with some, by slot.
+    pub(crate) fn totals(&self) -> Vec<(u16, Totals)> {
+        let some = |(s, t): (usize, &Tally)| {
+            let t = t.totals();
+            // Slots are below 64: they fit.
+            (t != Totals::default()).then_some((s as u16, t))
+        };
+        self.tallies.iter().enumerate().filter_map(some).collect()
     }
 
     /// The hub or leaf in slot `s`, if one.

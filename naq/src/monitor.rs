@@ -100,16 +100,31 @@ pub(crate) struct LeafInfo {
     compression: &'static str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     websocket: bool,
+    /// The slot of a naq link, whose messages every lane counts.
+    #[serde(skip)]
+    slot: Option<u16>,
+}
+
+/// What a lane tells of leaf node links.
+#[derive(Debug, Default)]
+pub(crate) struct Links {
+    links: Vec<LeafInfo>,
+    /// Messages of naq hubs and leafs on the lane, by slot.
+    slots: Vec<(u16, Totals)>,
 }
 
 /// The leaf node links of `lane`, with the subjects of their hubs'
-/// interest; on lane 0, the naq leafs and naq hubs too.
-pub(crate) fn links(lane: &Lane) -> Vec<LeafInfo> {
+/// interest, and its counts of naq links; on lane 0, the naq leafs and
+/// naq hubs too.
+pub(crate) fn links(lane: &Lane) -> Links {
     let mut all = go_links(lane);
     if let Some(mesh) = lane.mesh.borrow().as_ref() {
         naq_links(lane, mesh, &mut all);
     }
-    all
+    Links {
+        links: all,
+        slots: lane.slots.totals(),
+    }
 }
 
 /// The links of `lane` to Go hubs.
@@ -137,6 +152,7 @@ fn go_links(lane: &Lane) -> Vec<LeafInfo> {
                 subscriptions_list: Some(subs),
                 compression: "off",
                 websocket: f.websocket,
+                slot: None,
             }
         })
         .collect()
@@ -175,12 +191,14 @@ fn naq_links(lane: &Lane, mesh: &crate::mesh::Mesh, all: &mut Vec<LeafInfo>) {
             subscriptions_list: Some(subs),
             compression: "off",
             websocket: false,
+            slot: None,
         }
     };
     for l in mesh.leafs.borrow().iter() {
         let perms = l.carries.perms.as_deref();
         let mut i = info(l.link, &l.name, false, l.account, &l.heard, perms);
         i.is_isolated = l.carries.isolated;
+        i.slot = Some(l.slot);
         all.push(i);
     }
     for h in mesh.hubs.borrow().iter().filter(|h| h.up) {
@@ -195,6 +213,7 @@ fn naq_links(lane: &Lane, mesh: &crate::mesh::Mesh, all: &mut Vec<LeafInfo>) {
         i.ip.clone_from(&h.host);
         i.port = h.port;
         i.is_isolated = h.isolated;
+        i.slot = Some(h.slot);
         all.push(i);
     }
 }
@@ -506,10 +525,22 @@ async fn leafz(shared: &Shared, subs: bool) -> serde_json::Value {
         tx.control(Control::Links(answer));
         waits.push(wait);
     }
-    let mut leafs = Vec::new();
+    let (mut leafs, mut slots) = (Vec::new(), Vec::new());
     for w in waits {
         // A lane that stopped has no links to show.
-        leafs.extend(w.await.unwrap_or_default());
+        let lane = w.await.unwrap_or_default();
+        leafs.extend(lane.links);
+        slots.extend(lane.slots);
+    }
+    // Every lane counts the messages of naq links.
+    for l in &mut leafs {
+        let Some(s) = l.slot else { continue };
+        for &(_, t) in slots.iter().filter(|&&(at, _)| at == s) {
+            l.in_msgs += t.in_msgs;
+            l.in_bytes += t.in_bytes;
+            l.out_msgs += t.out_msgs;
+            l.out_bytes += t.out_bytes;
+        }
     }
     leafs.sort_by_key(|l| l.id);
     if !subs {

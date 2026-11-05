@@ -174,6 +174,8 @@ impl Outs {
             queue,
         }
         .encode(&mut batch.buf);
+        let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
+        lane.slots.tally(s).gave(size);
     }
 }
 
