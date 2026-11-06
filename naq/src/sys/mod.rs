@@ -1,22 +1,55 @@
 //! The server's own services in the system account: requests on `$SYS`
-//! subjects it answers, as `nats-server` answers them. So far, those of
-//! account JWTs.
+//! subjects it answers, as `nats-server` answers them.
 
 mod claims;
 mod directory;
+mod encode;
+mod later;
+mod reply;
+mod server;
+mod unmarshal;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use naq_proto::client::Pub;
-use serde_json::{Value, json};
+use serde_json::Value;
+
+pub(crate) use server::Z;
 
 use crate::imports::service::Tap;
 use crate::lane::{Lane, Outs};
 use crate::server::Shared;
 
+/// What a server keeps for its services.
+#[derive(Debug)]
+pub(crate) struct State {
+    /// The hash of the server's name that its inboxes on `$SYS` end in,
+    /// as `nats-server` makes it, with a system account.
+    pub(crate) node: Option<[u8; 8]>,
+    /// The number of the last message it sent on `$SYS`.
+    seq: AtomicU64,
+    /// The requests it answers now.
+    busy: later::Busy,
+}
+
+impl State {
+    /// The state of a server whose name hashes to `node`.
+    pub(crate) fn new(node: Option<[u8; 8]>) -> State {
+        State {
+            node,
+            seq: AtomicU64::new(0),
+            busy: later::Busy::default(),
+        }
+    }
+}
+
 /// A request the server answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Service {
+    /// A request to the server, for what its last token names.
+    Server(Z),
+    /// `$SYS.REQ.SERVER.PING`: `STATSZ` by its old subject.
+    Ping,
     /// An account JWT to take in place of the account's.
     ClaimsUpdate,
     /// An account JWT for a directory resolver to store.
@@ -36,15 +69,32 @@ pub(crate) enum Service {
     Lookups,
 }
 
+/// Reads `data` as the body of each server request, as Go reads it.
+///
+/// # Panics
+///
+/// When Go's check and `serde_json` disagree on whether it is JSON.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz(data: &[u8]) {
+    unmarshal::fuzz(data);
+    for z in Z::ALL {
+        let _ = unmarshal::decode(data, &z.fields());
+    }
+}
+
 /// Puts the interest of the server's services into the index of the
-/// system account on `lane`: in operator mode, where it has one.
+/// system account on `lane`, if it has one: those of JWTs in operator
+/// mode only.
 pub(crate) fn install(lane: &Lane) {
     let shared = &lane.shared;
-    let trusting = shared.auth.as_ref().and_then(crate::auth::Auth::trust);
-    let (Some(sys), Some(_)) = (shared.system, trusting) else {
+    let Some(sys) = shared.system else {
         return;
     };
     let mut index = lane.index(sys).borrow_mut();
+    server::install(&mut index, &shared.server_id);
+    if trust(shared).is_none() {
+        return;
+    }
     for filter in claims::UPDATES {
         index.tap(filter, Tap::Sys(Service::ClaimsUpdate));
     }
@@ -72,6 +122,8 @@ fn trust(shared: &Shared) -> Option<&crate::jwt::trust::Trust> {
 /// `lane`; what goes on is held in `out`. Whether it took it.
 pub(crate) fn answer(lane: &Lane, out: &mut Outs, service: Service, m: &Pub<'_>) -> bool {
     match service {
+        Service::Server(z) => server::take(lane, out, z, m),
+        Service::Ping => server::take(lane, out, Z::Statsz, m),
         Service::ClaimsUpdate if lane.shared.resolver.is_some() => {
             let key = claims::account_of(m.subject);
             key.is_some_and(|k| directory::update(lane, out, m, Some(&k)))
@@ -91,42 +143,22 @@ pub(crate) fn answer(lane: &Lane, out: &mut Outs, service: Service, m: &Pub<'_>)
     }
 }
 
-/// Sends `data` to `reply` in the system account, as `nats-server` sends
-/// its answers: with the server that sends it, and an empty reply.
-fn respond(lane: &Lane, out: &mut Outs, reply: &[u8], data: &Value) {
+/// Sends `answer`, which holds `data` or `error`, to `reply` in the
+/// system account, as `nats-server` sends its answers: with the server
+/// that sends it first, and an empty reply.
+fn respond(lane: &Lane, out: &mut Outs, reply: &[u8], answer: &Value) {
     let shared = &lane.shared;
     let Some(sys) = shared.system else {
         return;
     };
-    let mut body = data.clone();
-    body["server"] = server_info(shared);
-    let payload = body.to_string();
-    let m = Pub {
-        subject: reply,
-        reply: Some(b""),
-        headers: None,
-        payload: payload.as_bytes(),
-    };
-    crate::lane::inject(lane, out, sys, &m);
-}
-
-/// The server sending a message, as `nats-server` names itself in them.
-fn server_info(shared: &Shared) -> Value {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    // Relaxed: the numbers only need to be distinct.
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    let mut info = json!({
-        "name": shared.opts.server_name,
-        "host": shared.opts.host,
-        "id": shared.server_id,
-        "ver": env!("CARGO_PKG_VERSION"),
-        "jetstream": false,
-        "flags": 0,
-        "seq": seq,
-        "time": crate::times::rfc3339_nano(std::time::SystemTime::now()),
-    });
-    if let Some(c) = &shared.opts.cluster {
-        info["cluster"] = c.name.clone().into();
+    let info = crate::monitor::json::compact(&reply::ServerInfo::of(shared));
+    let mut payload = [&b"{\"server\":"[..], &info].concat();
+    for key in ["data", "error"] {
+        if let Some(v) = answer.get(key) {
+            payload.extend_from_slice(format!(",\"{key}\":{v}").as_bytes());
+        }
     }
-    info
+    payload.push(b'}');
+    let a = later::Answer::new(reply.to_vec(), payload);
+    later::send_now(lane, out, sys, &a);
 }

@@ -85,6 +85,35 @@ fn text_parses_as_options() {
 }
 
 #[test]
+fn server_tags_are_kept_as_nats_server_keeps_them() {
+    let o: Options = "server_tags: [\" AZ:1 \", \"az:1\", \"\", \"Probe\"]\nserver_metadata: {rack: r1, row: \"2\"}\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.server_tags, ["az:1", "probe"]);
+    let pairs: Vec<(&str, &str)> = o
+        .server_metadata
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(pairs, [("rack", "r1"), ("row", "2")]);
+    let one: Options = "server_tags: Solo\n".parse().unwrap();
+    assert_eq!(one.server_tags, ["solo"]);
+    for (text, reason) in [
+        ("server_tags: 1\n", "line 1: server_tags: expected strings"),
+        (
+            "server_metadata: [a]\n",
+            "line 1: server_metadata: expected a map of strings",
+        ),
+        (
+            "server_metadata: {a: 1}\n",
+            "line 1: server_metadata: expected a map of strings",
+        ),
+    ] {
+        assert_eq!(text.parse::<Options>().unwrap_err().to_string(), reason);
+    }
+}
+
+#[test]
 fn what_naq_cannot_use_is_an_error_with_its_line() {
     for (text, at, reason) in [
         ("port: 1\ngateway {}\n", "line 2", "gateway: not supported"),

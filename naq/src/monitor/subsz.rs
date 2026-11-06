@@ -153,7 +153,7 @@ struct Subsz<'a> {
 /// clients, paged by `offset` and `limit`, and only those that take a
 /// message on `test`; `acc` takes one account.
 pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refused> {
-    shared.monitor.count(Counted::Subsz);
+    shared.monitor.asked(q, Counted::Subsz);
     let list = q.bool("subs")?;
     let offset = q.int("offset")?.max(0);
     let limit = match q.int("limit")? {

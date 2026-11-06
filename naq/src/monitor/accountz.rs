@@ -228,7 +228,7 @@ struct Accountz<'a> {
 
 /// `/accountz`: the names of the accounts, or account `acc` in detail.
 pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refused> {
-    shared.monitor.count(Counted::Accountz);
+    shared.monitor.asked(q, Counted::Accountz);
     let mut page = Accountz {
         server_id: &shared.server_id,
         now: now(),

@@ -94,6 +94,42 @@ struct Found {
     routes: Option<Vec<Route>>,
 }
 
+/// The routes to servers that are up, each with what it passed over
+/// every lane, and with its subscriptions as `subs` asks.
+async fn gather(shared: &Shared, subs: Subs) -> Vec<(Route, Totals)> {
+    let mut lanes = ask_all(shared, move |lane| Found {
+        counts: lane.slots.totals(),
+        routes: (lane.id == 0).then(|| routes(lane, subs)),
+    })
+    .await;
+    let routes = lanes
+        .iter_mut()
+        .find_map(|f| f.routes.take())
+        .unwrap_or_default();
+    routes
+        .into_iter()
+        .map(|r| {
+            let mut t = Totals::default();
+            for f in &lanes {
+                for &(_, c) in f.counts.iter().filter(|(s, _)| *s == r.slot) {
+                    t += c;
+                }
+            }
+            (r, t)
+        })
+        .collect()
+}
+
+/// The routes to servers that are up: the ID of each, the name of its
+/// server, and what it passed.
+pub(super) async fn totals(shared: &Shared) -> Vec<(u64, String, Totals)> {
+    gather(shared, Subs::None)
+        .await
+        .into_iter()
+        .map(|(r, t)| (u64::from(r.slot) + 1, r.remote_name, t))
+        .collect()
+}
+
 /// One route, as `/routez` shows it.
 #[derive(Debug, Serialize)]
 struct RouteInfo<'a> {
@@ -203,28 +239,12 @@ struct Routez<'a> {
 /// details.
 pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refused> {
     let subs = q.subs()?;
-    shared.monitor.count(Counted::Routez);
-    let mut lanes = ask_all(shared, move |lane| Found {
-        counts: lane.slots.totals(),
-        routes: (lane.id == 0).then(|| routes(lane, subs)),
-    })
-    .await;
-    let routes = lanes
-        .iter_mut()
-        .find_map(|f| f.routes.take())
-        .unwrap_or_default();
+    shared.monitor.asked(q, Counted::Routez);
+    let routes = gather(shared, subs).await;
     let now = SystemTime::now();
     let infos = routes
         .iter()
-        .map(|r| {
-            let mut t = Totals::default();
-            for f in &lanes {
-                for &(_, c) in f.counts.iter().filter(|(s, _)| *s == r.slot) {
-                    t += c;
-                }
-            }
-            RouteInfo::of(r, t, subs, now)
-        })
+        .map(|(r, t)| RouteInfo::of(r, *t, subs, now))
         .collect::<Vec<_>>();
     let name = Some(shared.opts.server_name.as_str())
         .filter(|n| !n.is_empty())

@@ -38,9 +38,8 @@ pub(crate) struct Shared {
     pub(crate) system: Option<u32>,
     /// The directory resolver, if there is one.
     pub(crate) resolver: Option<crate::resolver::Dir>,
-    /// The hash of the server's name that replies tracked for latency end
-    /// in, with a system account, as `nats-server` makes it.
-    pub(crate) node: Option<[u8; 8]>,
+    /// What the server keeps for its services on `$SYS`.
+    pub(crate) sys: crate::sys::State,
     /// What clients must authenticate with, if anything.
     pub(crate) auth: Option<Auth>,
     /// What WebSocket clients authenticate with, where it is not `auth`.
@@ -206,7 +205,7 @@ impl Server {
             ws: door(opts, at.ws, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
             system,
-            node: system.map(|_| node(&opts.server_name)),
+            sys: crate::sys::State::new(system.map(|_| node(&opts.server_name))),
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });

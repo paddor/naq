@@ -6,7 +6,12 @@ use std::fmt::Write as _;
 
 /// The keys and values of a query, decoded, in order.
 #[derive(Debug, Default)]
-pub(crate) struct Query(Vec<(String, String)>);
+pub(crate) struct Query {
+    pairs: Vec<(String, String)>,
+    /// It came over HTTP, not in a `$SYS` request: `http_req_stats`
+    /// counts it.
+    pub(super) http: bool,
+}
 
 /// A value the request cannot have: the 400 body.
 pub(crate) type Refused = String;
@@ -23,12 +28,21 @@ impl Query {
                 Some((unescape(k)?, unescape(v)?))
             })
             .collect();
-        Query(pairs)
+        Query { pairs, http: true }
+    }
+
+    /// The options of a `$SYS` request, as the keys and values of the
+    /// HTTP endpoint that shows the same.
+    pub(crate) const fn of_pairs(pairs: Vec<(String, String)>) -> Query {
+        Query { pairs, http: false }
     }
 
     /// The first value of `key`, or `""`.
     pub(crate) fn get(&self, key: &str) -> &str {
-        self.0.iter().find(|(k, _)| k == key).map_or("", |(_, v)| v)
+        self.pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map_or("", |(_, v)| v)
     }
 
     /// `key` as a bool, as `strconv.ParseBool` takes it; empty is false.
@@ -138,7 +152,7 @@ pub(crate) fn percent(s: &str, plus: bool) -> Option<String> {
 }
 
 /// `s` quoted as Go's `strconv.Quote` does it, for printable text.
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -180,7 +194,7 @@ mod tests {
         assert_eq!(q.get("d"), "");
         assert_eq!(q.get("e"), "");
         assert_eq!(q.get("nope"), "");
-        assert_eq!(q.0.len(), 5);
+        assert_eq!(q.pairs.len(), 5);
     }
 
     #[test]

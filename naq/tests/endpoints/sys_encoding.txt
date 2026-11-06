@@ -1,0 +1,224 @@
+# $SYS answers compressed as the request's Accept-Encoding asks: gzip, or
+# snappy for snappy or s2; identity for what the server does not know.
+# Errors, IDZ and STATSZ are never compressed.
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#! }
+#! system_account: SYS
+#~ id
+#~ name
+#~ time
+#~ seq
+#~ ver
+#~ subscriptions
+#~ total_connections
+#~ cpu
+#~ bytes
+#~ mem
+s> CONNECT {"user":"sys","pass":"p","headers":true}
+s> SUB _R.> 1
+s> HPUB $SYS.REQ.SERVER.PING.HEALTHZ _R.1 35 35
+s> NATS/1.0\r\nAccept-Encoding: gzip\r\n\r\n
+s< 1
+< HMSG _R.1 1
+< NATS/1.0
+< Content-Encoding: gzip
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "ok",
+<     "status_code": 200
+<   }
+< }
+s> HPUB $SYS.REQ.SERVER.PING.HEALTHZ _R.2 37 37
+s> NATS/1.0\r\nAccept-Encoding: snappy\r\n\r\n
+s< 1
+< HMSG _R.2 1
+< NATS/1.0
+< Content-Encoding: snappy
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "ok",
+<     "status_code": 200
+<   }
+< }
+s> HPUB $SYS.REQ.SERVER.PING.HEALTHZ _R.3 39 39
+s> NATS/1.0\r\nAccept-Encoding: GZIP, S2\r\n\r\n
+s< 1
+< HMSG _R.3 1
+< NATS/1.0
+< Content-Encoding: snappy
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "ok",
+<     "status_code": 200
+<   }
+< }
+s> HPUB $SYS.REQ.SERVER.PING.HEALTHZ _R.4 33 33
+s> NATS/1.0\r\nAccept-Encoding: br\r\n\r\n
+s< 1
+< HMSG _R.4 1
+< NATS/1.0
+< Content-Encoding: identity
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "ok",
+<     "status_code": 200
+<   }
+< }
+s> HPUB $SYS.REQ.SERVER.PING.HEALTHZ _R.5 24 24
+s> NATS/1.0\r\nX-Other: 1\r\n\r\n
+s< 1
+< MSG _R.5 1
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "ok",
+<     "status_code": 200
+<   }
+< }
+s> HPUB $SYS.REQ.SERVER.PING.HEALTHZ _R.6 35 51
+s> NATS/1.0\r\nAccept-Encoding: gzip\r\n\r\n{"details":true}
+s< 1
+< HMSG _R.6 1
+< NATS/1.0
+< Content-Encoding: gzip
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "ok",
+<     "status_code": 200
+<   }
+< }
+s> HPUB $SYS.REQ.SERVER.PING.CONNZ _R.7 35 50
+s> NATS/1.0\r\nAccept-Encoding: gzip\r\n\r\n{"sort":"nope"}
+s< 1
+< MSG _R.7 1
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": null,
+<   "error": {
+<     "code": 500,
+<     "description": "invalid sorting option: nope"
+<   }
+< }
+s> HPUB $SYS.REQ.SERVER.PING.IDZ _R.8 35 35
+s> NATS/1.0\r\nAccept-Encoding: gzip\r\n\r\n
+s< 1
+< MSG _R.8 1
+< {
+<   "name": ~,
+<   "host": "127.0.0.1",
+<   "id": ~
+< }
+s> HPUB $SYS.REQ.SERVER.PING.STATSZ _R.9 35 35
+s> NATS/1.0\r\nAccept-Encoding: gzip\r\n\r\n
+s< 1
+< MSG _R.9 1
+< {
+<   "server": {
+<     "name": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "statsz": {
+<     "start": ~,
+<     "mem": ~,
+<     "cores": ~,
+<     "cpu": ~,
+<     "connections": 1,
+<     "total_connections": ~,
+<     "active_accounts": 1,
+<     "subscriptions": ~,
+<     "sent": {
+<       "msgs": 8,
+<       "bytes": ~
+<     },
+<     "sent_to_clients": {
+<       "msgs": 8,
+<       "bytes": ~
+<     },
+<     "received": {
+<       "msgs": 9,
+<       "bytes": ~
+<     },
+<     "received_from_clients": {
+<       "msgs": 9,
+<       "bytes": ~
+<     },
+<     "slow_consumers": 0,
+<     "active_servers": 1,
+<     "gomaxprocs": ~
+<   }
+< }

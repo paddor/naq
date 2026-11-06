@@ -84,6 +84,7 @@ fn a_server_of_another_cluster_is_not_met() {
                 port: me,
                 routes: others.iter().map(|p| format!("127.0.0.1:{p}")).collect(),
             }),
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -112,6 +113,7 @@ fn a_cluster_that_cannot_listen_or_route_stops_the_start() {
                 port,
                 routes,
             }),
+            no_system_account: true,
             ..Options::default()
         })
     };
@@ -210,6 +212,7 @@ fn a_server_that_starts_late_hears_of_what_was_there() {
                 port: ports[i],
                 routes: vec![format!("127.0.0.1:{}", ports[1 - i])],
             }),
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -372,6 +375,7 @@ fn a_message_of_a_hub_stays_with_the_server_linked_to_it() {
             } else {
                 Vec::new()
             },
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -426,6 +430,7 @@ fn a_message_of_another_server_is_not_sent_to_a_hub() {
             } else {
                 Vec::new()
             },
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -827,6 +832,7 @@ fn importing_cluster() -> Vec<Server> {
                 }),
                 accounts: accounts.accounts.clone(),
                 users: accounts.users.clone(),
+                no_system_account: true,
                 ..Options::default()
             })
             .unwrap()

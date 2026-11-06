@@ -4,6 +4,7 @@ mod log;
 
 pub use log::{LogTo, Logging, Trace};
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Server settings. The defaults are those of `nats-server`.
@@ -18,6 +19,11 @@ pub struct Options {
     pub lanes: usize,
     /// Name in `INFO`.
     pub server_name: String,
+    /// Tags of the server, trimmed and lowercase (`server_tags`):
+    /// requests on `$SYS` pick servers by them.
+    pub server_tags: Vec<String>,
+    /// What the server tells of itself on `$SYS` (`server_metadata`).
+    pub server_metadata: BTreeMap<String, String>,
     /// Largest message a client may publish, headers included
     /// (`max_payload`).
     pub max_payload: usize,
@@ -527,6 +533,8 @@ impl Default for Options {
             port: 4222,
             lanes: 0,
             server_name: "naq".into(),
+            server_tags: Vec::new(),
+            server_metadata: BTreeMap::new(),
             max_payload: 1 << 20,
             max_control_line: 4096,
             max_pending: 64 << 20,

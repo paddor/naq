@@ -116,6 +116,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 }
                 o.server_name = name;
             }
+            "server_tags" | "server_metadata" => facts(o, &key, item)?,
             "max_payload" => {
                 o.max_payload = size(item, i32::MAX).ok_or_else(|| bad("expected a size"))?;
             }
@@ -152,6 +153,44 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
         }
     }
     Ok(())
+}
+
+/// `server_tags` and `server_metadata`: what the server tells of itself.
+fn facts(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    if key == "server_tags" {
+        let tags = strings(item).ok_or_else(|| (item.line, format!("{key}: expected strings")))?;
+        tags_of(&mut o.server_tags, &tags);
+    } else {
+        o.server_metadata = metadata(item)?;
+    }
+    Ok(())
+}
+
+/// Adds `tags` to `all` as `nats-server` keeps server tags: trimmed,
+/// lowercase, once each, none empty.
+fn tags_of(all: &mut Vec<String>, tags: &[String]) {
+    for t in tags {
+        let t = t.trim().to_lowercase();
+        if !t.is_empty() && !all.contains(&t) {
+            all.push(t);
+        }
+    }
+}
+
+/// `server_metadata`: a map of strings.
+fn metadata(item: &Item) -> Result<std::collections::BTreeMap<String, String>, Bad> {
+    let bad = |line| {
+        (
+            line,
+            "server_metadata: expected a map of strings".to_owned(),
+        )
+    };
+    let Value::Map(m) = &item.value else {
+        return Err(bad(item.line));
+    };
+    m.iter()
+        .map(|(k, v)| Ok((k.clone(), string(v).ok_or_else(|| bad(v.line))?)))
+        .collect()
 }
 
 /// `tls { cert_file, key_file, ca_file, verify, verify_and_map, timeout,

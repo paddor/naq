@@ -6,9 +6,14 @@
 //! A script line is one of:
 //!
 //! - `a> text`: client `a` sends `text`, with `\r`, `\n` and `\\` escapes,
-//!   and CRLF. It connects on first use.
+//!   and CRLF; `a>` sends an empty line. It connects on first use.
 //!   Before the next request, every client's lines go out with a `PING`,
 //!   and its replies are read up to the `PONG` and dropped.
+//! - `a< n`: client `a` sends what it has with a `PING` and waits until it
+//!   got `n` messages, or for a moment if `n` is 0, and every message it
+//!   got shows: its control line without the sizes, its headers, and its
+//!   payload, as an answer body is shown, decoded if compressed.
+//!   `$SERVER_ID` in a client's line is the ID of the server.
 //! - `a.`: client `a` sends what it has, then closes its connection, and
 //!   the harness waits until `/connz?state=closed` lists it. Before the
 //!   next request,
@@ -39,7 +44,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -237,24 +242,7 @@ impl Script {
         for step in &self.steps {
             out += step;
             out.push('\n');
-            if let Some((name, sent)) = step.split_once("> ")
-                && !name.is_empty()
-                && name.bytes().all(|b| b.is_ascii_alphanumeric())
-            {
-                let c = clients
-                    .entry(name.to_owned())
-                    .or_insert_with(|| Client::new(client));
-                c.pending += &unescape(sent);
-                c.pending += "\r\n";
-                continue;
-            }
-            if let Some(name) = step.strip_suffix('.')
-                && let Some(c) = clients.get_mut(name)
-            {
-                c.sync();
-                c.close();
-                until_closed(monitor, c.cid);
-                c.listed = true;
+            if self.client_step(step, &mut clients, (client, monitor), &mut out) {
                 continue;
             }
             let request = match step.split_once(' ') {
@@ -281,6 +269,52 @@ impl Script {
             }
         }
         out
+    }
+
+    /// Acts on `step` if it is a client's, with clients at `at.0` and
+    /// monitoring at `at.1`, and adds what it shows to `out`. Whether it
+    /// was.
+    fn client_step(
+        &self,
+        step: &str,
+        clients: &mut BTreeMap<String, Client>,
+        at: (SocketAddr, SocketAddr),
+        out: &mut String,
+    ) -> bool {
+        // `a>` alone sends an empty line.
+        let line = step
+            .strip_suffix(">")
+            .map_or(step.split_once("> "), |n| Some((n, "")));
+        if let Some((name, sent)) = line
+            && !name.is_empty()
+            && name.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            let c = clients
+                .entry(name.to_owned())
+                .or_insert_with(|| Client::new(at.0));
+            c.pending += &unescape(&sent.replace("$SERVER_ID", &c.server_id));
+            c.pending += "\r\n";
+            return true;
+        }
+        if let Some((name, n)) = step.split_once("< ")
+            && let Some(c) = clients.get_mut(name)
+            && let Ok(n) = n.parse()
+        {
+            for g in c.take(n) {
+                *out += &self.shown(&g);
+            }
+            return true;
+        }
+        if let Some(name) = step.strip_suffix('.')
+            && let Some(c) = clients.get_mut(name)
+        {
+            c.sync();
+            c.close();
+            until_closed(at.1, c.cid);
+            c.listed = true;
+            return true;
+        }
+        false
     }
 
     /// What monitoring at `at` answers to `request` with `method`, for a
@@ -333,6 +367,25 @@ impl Script {
         out.push('\n');
         if !head {
             out += &self.mask(&body);
+        }
+        out
+    }
+
+    /// Message `g`, for a transcript.
+    fn shown(&self, g: &Got) -> String {
+        let mut out = format!("< {}\n", g.line.trim_end());
+        let headers = String::from_utf8_lossy(&g.headers);
+        for h in headers.split("\r\n").filter(|h| !h.is_empty()) {
+            let _ = writeln!(out, "< {h}");
+        }
+        let body = String::from_utf8_lossy(&decoded(&g.headers, &g.payload)).into_owned();
+        let body = if body.starts_with('{') {
+            self.mask(&indent(&body))
+        } else {
+            body
+        };
+        for line in body.lines() {
+            let _ = writeln!(out, "< {}", line.trim_end());
         }
         out
     }
@@ -482,6 +535,10 @@ struct Client {
     pending: String,
     /// Its ID, from its `INFO`.
     cid: u64,
+    /// The server's ID, from its `INFO`.
+    server_id: String,
+    /// The messages it got that no step showed yet.
+    got: Vec<Got>,
     /// Its connection closed.
     gone: bool,
     /// Closed connections list it.
@@ -500,11 +557,18 @@ impl Client {
             .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
             .and_then(|n| n.parse().ok())
             .unwrap();
+        let server_id = info
+            .split_once("\"server_id\":\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(id, _)| id.to_owned())
+            .unwrap();
         Client {
             w,
             r,
             pending: String::new(),
             cid,
+            server_id,
+            got: Vec::new(),
             gone: false,
             listed: false,
         }
@@ -515,7 +579,8 @@ impl Client {
         self.gone = true;
     }
 
-    /// Sends what is pending with a `PING`, and reads up to the `PONG`.
+    /// Sends what is pending with a `PING`, and reads up to the `PONG`,
+    /// keeping the messages.
     fn sync(&mut self) {
         if self.pending.is_empty() {
             return;
@@ -525,18 +590,113 @@ impl Client {
             self.gone = true;
             return;
         }
-        let mut line = String::new();
         loop {
-            line.clear();
-            // Closed by the server, or reset.
-            if self.r.read_line(&mut line).unwrap_or(0) == 0 {
-                self.gone = true;
-                return;
-            }
-            if line == "PONG\r\n" {
-                return;
+            match self.frame() {
+                Frame::Pong => return,
+                Frame::Msg(g) => self.got.push(g),
+                Frame::Other => {}
+                // Closed by the server, or reset.
+                Frame::Quiet | Frame::Gone => {
+                    self.gone = true;
+                    return;
+                }
             }
         }
+    }
+
+    /// Reads the next frame.
+    fn frame(&mut self) -> Frame {
+        let mut line = String::new();
+        match self.r.read_line(&mut line) {
+            Ok(0) => return Frame::Gone,
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Frame::Quiet;
+            }
+            Err(_) => return Frame::Gone,
+        }
+        let line = line.trim_end_matches("\r\n");
+        if line == "PONG" {
+            return Frame::Pong;
+        }
+        let mut words: Vec<&str> = line.split(' ').collect();
+        let size = |w: Option<&str>| w.unwrap().parse::<usize>().unwrap();
+        let (head, total) = match words.first() {
+            Some(&"MSG") => (0, size(words.pop())),
+            Some(&"HMSG") => {
+                let total = size(words.pop());
+                (size(words.pop()), total)
+            }
+            _ => return Frame::Other,
+        };
+        let mut buf = vec![0; total + 2];
+        self.r.read_exact(&mut buf).unwrap();
+        buf.truncate(total);
+        let payload = buf.split_off(head);
+        Frame::Msg(Got {
+            line: words.join(" "),
+            headers: buf,
+            payload,
+        })
+    }
+
+    /// Waits until it got `n` messages, or for a moment for none if `n` is
+    /// 0, and hands over all it got.
+    fn take(&mut self, n: usize) -> Vec<Got> {
+        self.sync();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let wait = if n == 0 {
+                Duration::from_millis(300)
+            } else {
+                deadline.saturating_duration_since(Instant::now())
+            };
+            if (n > 0 && self.got.len() >= n) || wait.is_zero() {
+                break;
+            }
+            self.w.set_read_timeout(Some(wait)).unwrap();
+            match self.frame() {
+                Frame::Msg(g) => self.got.push(g),
+                Frame::Quiet | Frame::Gone => break,
+                Frame::Pong | Frame::Other => {}
+            }
+        }
+        self.w.set_read_timeout(Some(WAIT)).unwrap();
+        std::mem::take(&mut self.got)
+    }
+}
+
+/// A message a client got.
+struct Got {
+    /// Its control line, without its sizes.
+    line: String,
+    headers: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+/// What a client read.
+enum Frame {
+    Pong,
+    Msg(Got),
+    Other,
+    /// Nothing came in time.
+    Quiet,
+    Gone,
+}
+
+/// `body` decoded as its `Content-Encoding` in `headers` says.
+fn decoded(headers: &[u8], body: &[u8]) -> Vec<u8> {
+    let h = String::from_utf8_lossy(headers);
+    if h.contains("Content-Encoding: gzip") {
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(body)
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    } else if h.contains("Content-Encoding: snappy") {
+        unsnappy(body)
+    } else {
+        body.to_vec()
     }
 }
 
@@ -644,4 +804,128 @@ impl Drop for GoServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Compact JSON `json` indented as Go's `json.MarshalIndent` with two
+/// spaces indents it: empty objects and lists stay `{}` and `[]`.
+fn indent(json: &str) -> String {
+    let b = json.as_bytes();
+    let mut out = String::with_capacity(json.len() * 2);
+    let mut depth = 0usize;
+    let mut i = 0;
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.push_str(&"  ".repeat(depth));
+    };
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                out.push_str(&json[start..=i.min(b.len() - 1)]);
+            }
+            b'{' | b'[' => {
+                let close = if c == b'{' { b'}' } else { b']' };
+                if b.get(i + 1) == Some(&close) {
+                    out.push(c as char);
+                    out.push(close as char);
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    depth += 1;
+                    newline(&mut out, depth);
+                }
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                newline(&mut out, depth);
+                out.push(c as char);
+            }
+            b',' => {
+                out.push(',');
+                newline(&mut out, depth);
+            }
+            b':' => out.push_str(": "),
+            _ => out.push(c as char),
+        }
+        i += 1;
+    }
+    out.push('\n');
+    out
+}
+
+/// The data of the snappy framing format stream `b`.
+fn unsnappy(mut b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    while b.len() >= 4 {
+        let kind = b[0];
+        let len = usize::from(b[1]) | usize::from(b[2]) << 8 | usize::from(b[3]) << 16;
+        let chunk = &b[4..4 + len];
+        match kind {
+            0x00 => out.extend(unsnappy_block(&chunk[4..])),
+            0x01 => out.extend_from_slice(&chunk[4..]),
+            _ => {}
+        }
+        b = &b[4 + len..];
+    }
+    out
+}
+
+/// A snappy block decoded.
+fn unsnappy_block(b: &[u8]) -> Vec<u8> {
+    let mut i = 0;
+    let mut n = 0usize;
+    let mut shift = 0;
+    loop {
+        let c = b[i];
+        i += 1;
+        n |= usize::from(c & 0x7f) << shift;
+        shift += 7;
+        if c < 0x80 {
+            break;
+        }
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let le = |s: &[u8]| s.iter().rev().fold(0usize, |a, &x| a << 8 | usize::from(x));
+    while i < b.len() {
+        let tag = b[i];
+        i += 1;
+        let (len, offset) = match tag & 3 {
+            0 => {
+                let mut len = usize::from(tag >> 2);
+                if len >= 60 {
+                    let extra = len - 59;
+                    len = le(&b[i..i + extra]);
+                    i += extra;
+                }
+                out.extend_from_slice(&b[i..=i + len]);
+                i += len + 1;
+                continue;
+            }
+            1 => {
+                let off = usize::from(tag >> 5) << 8 | usize::from(b[i]);
+                i += 1;
+                (usize::from(tag >> 2 & 7) + 4, off)
+            }
+            2 => {
+                let off = le(&b[i..i + 2]);
+                i += 2;
+                (usize::from(tag >> 2) + 1, off)
+            }
+            _ => {
+                let off = le(&b[i..i + 4]);
+                i += 4;
+                (usize::from(tag >> 2) + 1, off)
+            }
+        };
+        let from = out.len() - offset;
+        for k in 0..len {
+            out.push(out[from + k]);
+        }
+    }
+    out
 }

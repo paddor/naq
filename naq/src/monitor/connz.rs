@@ -125,7 +125,7 @@ impl Ask {
         let limit = q.int("limit")?;
         let cid = q.uint("cid")?;
         let state = State::of(q)?;
-        shared.monitor.count(Counted::Connz);
+        shared.monitor.asked(q, Counted::Connz);
         let sort = Sort::of(q.get("sort"))?;
         for (by, name) in [(Sort::Stop, "stop"), (Sort::Reason, "reason")] {
             if sort == by && state != State::Closed {

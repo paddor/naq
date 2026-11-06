@@ -1,0 +1,1050 @@
+# Requests to the server on $SYS, from a user of the system account: the
+# monitoring data in Go's envelope, the filters, and Go's errors. Go's
+# own subscriptions in the system account are not naq's: their counts are
+# masked.
+#! server_name: s1
+#! server_tags: [" AZ:1", "probe"]
+#! server_metadata: {rack: r1}
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#!   A { users [{user: a, password: p}] }
+#! }
+#! system_account: SYS
+#~ id
+#~ time
+#~ seq
+#~ ver
+#~ version
+#~ go
+#~ subscriptions
+#~ total_connections
+#~ cpu
+#~ pending_bytes
+#~ mem
+#~ out_bytes
+#~ out_client_bytes
+#~ bytes
+#~ num_subscriptions
+#~ num_cache
+#~ num_inserts
+#~ num_removes
+#~ num_matches
+#~ cache_hit_rate
+#~ max_fanout
+#~ avg_fanout
+#= accounts
+#- memstats
+#- cmdline
+s> CONNECT {"user":"sys","pass":"p","headers":true,"no_responders":true}
+s> SUB _R.> 1
+s> PUB $SYS.REQ.SERVER.PING.IDZ _R.1 0
+s>
+s< 1
+< MSG _R.1 1
+< {
+<   "name": "s1",
+<   "host": "127.0.0.1",
+<   "id": ~
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.IDZ _R.2 3
+s> {x}
+s< 1
+< MSG _R.2 1
+< {
+<   "name": "s1",
+<   "host": "127.0.0.1",
+<   "id": ~
+< }
+s> PUB $SYS.REQ.SERVER.PING.VARZ _R.3 20
+s> {"server_name":"s1"}
+s< 1
+< MSG _R.3 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "server_name": "s1",
+<     "version": ~,
+<     "proto": 1,
+<     "go": ~,
+<     "host": "127.0.0.1",
+<     "port": ~,
+<     "auth_required": true,
+<     "max_connections": 65536,
+<     "ping_interval": 120000000000,
+<     "ping_max": 2,
+<     "http_host": "127.0.0.1",
+<     "http_port": ~,
+<     "http_base_path": "",
+<     "https_port": ~,
+<     "auth_timeout": 2,
+<     "max_control_line": 4096,
+<     "max_payload": 1048576,
+<     "max_pending": 67108864,
+<     "cluster": {},
+<     "gateway": {},
+<     "leaf": {},
+<     "mqtt": {},
+<     "websocket": {},
+<     "jetstream": {},
+<     "tls_timeout": 2,
+<     "write_deadline": 10000000000,
+<     "start": ~,
+<     "now": ~,
+<     "uptime": ~,
+<     "mem": ~,
+<     "cores": ~,
+<     "gomaxprocs": ~,
+<     "cpu": ~,
+<     "connections": 1,
+<     "total_connections": ~,
+<     "routes": 0,
+<     "remotes": 0,
+<     "leafnodes": 0,
+<     "in_msgs": 3,
+<     "in_bytes": 23,
+<     "in_client_msgs": 3,
+<     "in_client_bytes": 23,
+<     "out_msgs": 2,
+<     "out_bytes": ~,
+<     "out_client_msgs": 2,
+<     "out_client_bytes": ~,
+<     "slow_consumers": 0,
+<     "stale_connections": 0,
+<     "stalled_clients": 0,
+<     "subscriptions": ~,
+<     "http_req_stats": {},
+<     "config_load_time": ~,
+<     "config_digest": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "system_account": "SYS",
+<     "slow_consumer_stats": {
+<       "clients": 0,
+<       "routes": 0,
+<       "gateways": 0,
+<       "leafs": 0
+<     },
+<     "stale_connection_stats": {
+<       "clients": 0,
+<       "routes": 0,
+<       "gateways": 0,
+<       "leafs": 0
+<     },
+<     "disk_io_wait_stats": {
+<       "waiters": 0,
+<       "waits": 0,
+<       "wait_time": 0,
+<       "max_wait_time": 0
+<     }
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.VARZ _R.4 20
+s> {"server_name":"zz"}
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.VARZ _R.5 41
+s> {"tags":["az:1"],"cluster":"","host":"7"}
+s< 1
+< MSG _R.5 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "server_name": "s1",
+<     "version": ~,
+<     "proto": 1,
+<     "go": ~,
+<     "host": "127.0.0.1",
+<     "port": ~,
+<     "auth_required": true,
+<     "max_connections": 65536,
+<     "ping_interval": 120000000000,
+<     "ping_max": 2,
+<     "http_host": "127.0.0.1",
+<     "http_port": ~,
+<     "http_base_path": "",
+<     "https_port": ~,
+<     "auth_timeout": 2,
+<     "max_control_line": 4096,
+<     "max_payload": 1048576,
+<     "max_pending": 67108864,
+<     "cluster": {},
+<     "gateway": {},
+<     "leaf": {},
+<     "mqtt": {},
+<     "websocket": {},
+<     "jetstream": {},
+<     "tls_timeout": 2,
+<     "write_deadline": 10000000000,
+<     "start": ~,
+<     "now": ~,
+<     "uptime": ~,
+<     "mem": ~,
+<     "cores": ~,
+<     "gomaxprocs": ~,
+<     "cpu": ~,
+<     "connections": 1,
+<     "total_connections": ~,
+<     "routes": 0,
+<     "remotes": 0,
+<     "leafnodes": 0,
+<     "in_msgs": 5,
+<     "in_bytes": 84,
+<     "in_client_msgs": 5,
+<     "in_client_bytes": 84,
+<     "out_msgs": 3,
+<     "out_bytes": ~,
+<     "out_client_msgs": 3,
+<     "out_client_bytes": ~,
+<     "slow_consumers": 0,
+<     "stale_connections": 0,
+<     "stalled_clients": 0,
+<     "subscriptions": ~,
+<     "http_req_stats": {},
+<     "config_load_time": ~,
+<     "config_digest": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "system_account": "SYS",
+<     "slow_consumer_stats": {
+<       "clients": 0,
+<       "routes": 0,
+<       "gateways": 0,
+<       "leafs": 0
+<     },
+<     "stale_connection_stats": {
+<       "clients": 0,
+<       "routes": 0,
+<       "gateways": 0,
+<       "leafs": 0
+<     },
+<     "disk_io_wait_stats": {
+<       "waiters": 0,
+<       "waits": 0,
+<       "wait_time": 0,
+<       "max_wait_time": 0
+<     }
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.VARZ _R.6 37
+s> {"tags":["PROBE"],"exact_match":true}
+s< 1
+< MSG _R.6 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "server_name": "s1",
+<     "version": ~,
+<     "proto": 1,
+<     "go": ~,
+<     "host": "127.0.0.1",
+<     "port": ~,
+<     "auth_required": true,
+<     "max_connections": 65536,
+<     "ping_interval": 120000000000,
+<     "ping_max": 2,
+<     "http_host": "127.0.0.1",
+<     "http_port": ~,
+<     "http_base_path": "",
+<     "https_port": ~,
+<     "auth_timeout": 2,
+<     "max_control_line": 4096,
+<     "max_payload": 1048576,
+<     "max_pending": 67108864,
+<     "cluster": {},
+<     "gateway": {},
+<     "leaf": {},
+<     "mqtt": {},
+<     "websocket": {},
+<     "jetstream": {},
+<     "tls_timeout": 2,
+<     "write_deadline": 10000000000,
+<     "start": ~,
+<     "now": ~,
+<     "uptime": ~,
+<     "mem": ~,
+<     "cores": ~,
+<     "gomaxprocs": ~,
+<     "cpu": ~,
+<     "connections": 1,
+<     "total_connections": ~,
+<     "routes": 0,
+<     "remotes": 0,
+<     "leafnodes": 0,
+<     "in_msgs": 6,
+<     "in_bytes": 121,
+<     "in_client_msgs": 6,
+<     "in_client_bytes": 121,
+<     "out_msgs": 4,
+<     "out_bytes": ~,
+<     "out_client_msgs": 4,
+<     "out_client_bytes": ~,
+<     "slow_consumers": 0,
+<     "stale_connections": 0,
+<     "stalled_clients": 0,
+<     "subscriptions": ~,
+<     "http_req_stats": {},
+<     "config_load_time": ~,
+<     "config_digest": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "system_account": "SYS",
+<     "slow_consumer_stats": {
+<       "clients": 0,
+<       "routes": 0,
+<       "gateways": 0,
+<       "leafs": 0
+<     },
+<     "stale_connection_stats": {
+<       "clients": 0,
+<       "routes": 0,
+<       "gateways": 0,
+<       "leafs": 0
+<     },
+<     "disk_io_wait_stats": {
+<       "waiters": 0,
+<       "waits": 0,
+<       "wait_time": 0,
+<       "max_wait_time": 0
+<     }
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.VARZ _R.7 38
+s> {"server_name":"s","exact_match":true}
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.VARZ _R.8 14
+s> {"domain":"x"}
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.STATSZ _R.9 0
+s>
+s< 1
+< MSG _R.9 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "statsz": {
+<     "start": ~,
+<     "mem": ~,
+<     "cores": ~,
+<     "cpu": ~,
+<     "connections": 1,
+<     "total_connections": ~,
+<     "active_accounts": 1,
+<     "subscriptions": ~,
+<     "sent": {
+<       "msgs": 5,
+<       "bytes": ~
+<     },
+<     "sent_to_clients": {
+<       "msgs": 5,
+<       "bytes": ~
+<     },
+<     "received": {
+<       "msgs": 9,
+<       "bytes": ~
+<     },
+<     "received_from_clients": {
+<       "msgs": 9,
+<       "bytes": ~
+<     },
+<     "slow_consumers": 0,
+<     "active_servers": 1,
+<     "gomaxprocs": ~
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING _R.10 17
+s> {"server_name":5}
+s< 1
+< MSG _R.10 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 400,
+<     "description": "json: cannot unmarshal number into Go struct field StatszEventOptions.server_name of type string"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.CONNZ _R.11 26
+s> {"auth":true,"user":"sys"}
+s< 1
+< MSG _R.11 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_connections": 1,
+<     "total": 1,
+<     "offset": 0,
+<     "limit": 1024,
+<     "connections": [
+<       {
+<         "cid": ~,
+<         "kind": "Client",
+<         "type": "nats",
+<         "ip": "127.0.0.1",
+<         "port": ~,
+<         "start": ~,
+<         "last_activity": ~,
+<         "rtt": ~,
+<         "uptime": ~,
+<         "idle": ~,
+<         "pending_bytes": ~,
+<         "in_msgs": 11,
+<         "out_msgs": 7,
+<         "in_bytes": 216,
+<         "out_bytes": ~,
+<         "subscriptions": ~,
+<         "authorized_user": "sys",
+<         "account": "SYS",
+<         "name_tag": "SYS"
+<       }
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.CONNZ _R.12 15
+s> {"sort":"nope"}
+s< 1
+< MSG _R.12 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": null,
+<   "error": {
+<     "code": 500,
+<     "description": "invalid sorting option: nope"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.CONNZ _R.13 10
+s> {"cid":-1}
+s< 1
+< MSG _R.13 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 400,
+<     "description": "json: cannot unmarshal number -1 into Go struct field ConnzEventOptions.cid of type uint64"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.CONNZ _R.14 1
+s> {
+s< 1
+< MSG _R.14 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 400,
+<     "description": "unexpected end of JSON input"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.SUBSZ _R.15 16
+s> {"test":"foo.*"}
+s< 1
+< MSG _R.15 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": null,
+<   "error": {
+<     "code": 500,
+<     "description": "invalid test subject, must be valid publish subject: foo.*"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.SUBSZ _R.16 53
+s> {"subscriptions":true,"account":"SYS","test":"_R.16"}
+s< 1
+< MSG _R.16 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_subscriptions": ~,
+<     "num_cache": ~,
+<     "num_inserts": ~,
+<     "num_removes": ~,
+<     "num_matches": ~,
+<     "cache_hit_rate": ~,
+<     "max_fanout": ~,
+<     "avg_fanout": ~,
+<     "total": 1,
+<     "offset": 0,
+<     "limit": 1024,
+<     "subscriptions_list": [
+<       {
+<         "account": "SYS",
+<         "account_tag": "SYS",
+<         "subject": "_R.\u003e",
+<         "sid": "1",
+<         "msgs": 12,
+<         "cid": ~
+<       }
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.ACCOUNTZ _R.17 16
+s> {"account":"ZZ"}
+s< 1
+< MSG _R.17 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": null,
+<   "error": {
+<     "code": 500,
+<     "description": "Account ZZ does not exist"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.ACCOUNTZ _R.18 0
+s>
+s< 1
+< MSG _R.18 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "system_account": "SYS",
+<     "accounts": [
+<       "$G",
+<       "A",
+<       "SYS"
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.ROUTEZ _R.19 0
+s>
+s< 1
+< MSG _R.19 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "server_name": "s1",
+<     "now": ~,
+<     "num_routes": 0,
+<     "routes": []
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.GATEWAYZ _R.20 0
+s>
+s< 1
+< MSG _R.20 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "outbound_gateways": {},
+<     "inbound_gateways": {}
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.LEAFZ _R.21 0
+s>
+s< 1
+< MSG _R.21 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "leafnodes": 0,
+<     "leafs": []
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.HEALTHZ _R.22 0
+s>
+s< 1
+< MSG _R.22 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "ok",
+<     "status_code": 200
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.HEALTHZ _R.23 14
+s> {"stream":"x"}
+s< 1
+< MSG _R.23 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "status": "error",
+<     "status_code": 400,
+<     "error": "\"account\" must not be empty when checking stream health"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.JSZ _R.24 0
+s>
+s< 1
+< MSG _R.24 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "memory": 0,
+<     "storage": 0,
+<     "reserved_memory": 0,
+<     "reserved_storage": 0,
+<     "accounts": 0,
+<     "ha_assets": 0,
+<     "api": {
+<       "level": 0,
+<       "total": 0,
+<       "errors": 0
+<     },
+<     "server_id": ~,
+<     "now": ~,
+<     "disabled": true,
+<     "config": {
+<       "max_memory": 0,
+<       "max_storage": 0
+<     },
+<     "streams": 0,
+<     "consumers": 0,
+<     "messages": 0,
+<     "bytes": ~,
+<     "total": 0
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.JSZ _R.25 20
+s> {"leader_only":true}
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.PROFILEZ _R.26 0
+s>
+s< 1
+< MSG _R.26 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "profile": null,
+<     "error": "Profile name not specified"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.PROFILEZ _R.27 15
+s> {"name":"nope"}
+s< 1
+< MSG _R.27 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "profile": null,
+<     "error": "Profile \"nope\" not found"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.EXPVARZ _R.28 0
+s>
+s< 1
+< MSG _R.28 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.PING.RAFTZ _R.29 0
+s>
+s< 1
+< MSG _R.29 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "tags": [
+<       "az:1",
+<       "probe"
+<     ],
+<     "metadata": {
+<       "rack": "r1"
+<     },
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {}
+< }
+s> PUB $SYS.REQ.SERVER.PING.NOPE _R.30 0
+s>
+s< 1
+< HMSG _R.30 1
+< NATS/1.0 503
+< Nats-Subject: $SYS.REQ.SERVER.PING.NOPE
+s> PUB $SYS.REQ.SERVER.PING.VARZ 0
+s>
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.STATSZ _R.31 20
+s> {"server_name":"zz"}
+s< 0
+a> CONNECT {"user":"a","pass":"p","headers":true,"no_responders":true}
+a> SUB _R.> 1
+a> PUB $SYS.REQ.SERVER.PING.VARZ _R.1 0
+a>
+a< 1
+< HMSG _R.1 1
+< NATS/1.0 503
+< Nats-Subject: $SYS.REQ.SERVER.PING.VARZ

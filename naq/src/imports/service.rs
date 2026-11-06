@@ -515,7 +515,7 @@ impl Run<'_, '_> {
             }
             Some(r) => {
                 let waiting = waiting(si, w.account, r, track);
-                let node = lane.shared.node.as_ref();
+                let node = lane.shared.sys.node.as_ref();
                 let Some(t) = responses.wait(waiting, |n| lane.below(n), node, &mut reply) else {
                     imported.subject = subject;
                     imported.headers = headers;
@@ -556,15 +556,16 @@ impl Run<'_, '_> {
         let imported = self.out.imported(lane);
         let src = message(m, &imported.arena, w.msg);
         // Copied out: the answer goes into the arena it lies in.
-        let (subject, reply, payload) = (
+        let (subject, reply, headers, payload) = (
             src.subject.to_vec(),
             src.reply.map(<[u8]>::to_vec),
+            src.headers.map(<[u8]>::to_vec),
             src.payload.to_vec(),
         );
         let m = Pub {
             subject: &subject,
             reply: reply.as_deref(),
-            headers: None,
+            headers: headers.as_deref(),
             payload: &payload,
         };
         crate::sys::answer(lane, self.out, s, &m)

@@ -50,6 +50,15 @@ pub fn monitor(data: &[u8]) {
     crate::monitor::fuzz(data);
 }
 
+/// Reads a request body on `$SYS` as each request reads it.
+///
+/// # Panics
+///
+/// When Go's check and `serde_json` disagree on whether it is JSON.
+pub fn sys_body(data: &[u8]) {
+    crate::sys::fuzz(data);
+}
+
 /// Decodes a JWT as each kind of claims.
 pub fn jwt(data: &[u8]) {
     let Ok(token) = std::str::from_utf8(data) else {

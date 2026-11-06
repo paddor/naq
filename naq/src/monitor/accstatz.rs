@@ -204,9 +204,9 @@ pub(super) async fn uses(shared: &Shared, which: Which) -> Vec<Use> {
 
 /// Messages and their bytes.
 #[derive(Debug, Serialize)]
-struct MsgBytes {
-    msgs: u64,
-    bytes: u64,
+pub(super) struct MsgBytes {
+    pub(super) msgs: u64,
+    pub(super) bytes: u64,
 }
 
 /// Messages one way, in all and over each kind of peer.
@@ -278,7 +278,7 @@ struct AccountStatz<'a> {
 /// `/accstatz`: the accounts with connections here, every one if
 /// `unused`.
 pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refused> {
-    shared.monitor.count(Counted::Accstatz);
+    shared.monitor.asked(q, Counted::Accstatz);
     let unused = q.bool("unused")?;
     let all = uses(shared, Which::All(shared.accounts.len())).await;
     let stats = shared

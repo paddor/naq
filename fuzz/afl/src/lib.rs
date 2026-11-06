@@ -12,7 +12,7 @@ use naq_proto::peer;
 pub type Target = fn(&[u8]);
 
 /// Every target, by name.
-pub const TARGETS: [(&str, Target); 9] = [
+pub const TARGETS: [(&str, Target); 10] = [
     ("certs", certs),
     ("client_wire", client_wire),
     ("config", config),
@@ -21,6 +21,7 @@ pub const TARGETS: [(&str, Target); 9] = [
     ("monitor_http", monitor_http),
     ("peer_frames", peer_frames),
     ("subjects", subjects),
+    ("sys_body", sys_body),
     ("websocket", websocket),
 ];
 
@@ -176,6 +177,16 @@ pub fn websocket(data: &[u8]) {
 /// When it is not.
 pub fn monitor_http(data: &[u8]) {
     naq::fuzzing::monitor(data);
+}
+
+/// Reads the input as the body of each request on `$SYS`. Go's check of
+/// JSON agrees with `serde_json`.
+///
+/// # Panics
+///
+/// When they disagree.
+pub fn sys_body(data: &[u8]) {
+    naq::fuzzing::sys_body(data);
 }
 
 /// Decodes the input as a peer control message and as a batch. What

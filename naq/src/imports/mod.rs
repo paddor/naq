@@ -2,7 +2,7 @@
 //! linked and checked as `nats-server` checks them.
 
 pub(crate) mod defs;
-mod info;
+pub(crate) mod info;
 pub(crate) mod latency;
 pub(crate) mod link;
 pub(crate) mod service;

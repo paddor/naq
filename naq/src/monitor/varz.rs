@@ -74,6 +74,10 @@ struct Varz<'a> {
     http_req_stats: BTreeMap<&'static str, u64>,
     config_load_time: String,
     config_digest: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    tags: &'a [String],
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    metadata: &'a BTreeMap<String, String>,
     #[serde(flatten)]
     operators: Operators<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,24 +110,24 @@ impl Operators<'_> {
 
 /// The counts of `/varz`, in Go's order.
 #[derive(Debug, Default, Serialize)]
-struct Counts {
-    connections: u64,
-    total_connections: u64,
+pub(super) struct Counts {
+    pub(super) connections: u64,
+    pub(super) total_connections: u64,
     routes: usize,
     remotes: usize,
     leafnodes: usize,
-    in_msgs: u64,
-    in_bytes: u64,
-    in_client_msgs: u64,
-    in_client_bytes: u64,
-    out_msgs: u64,
-    out_bytes: u64,
-    out_client_msgs: u64,
-    out_client_bytes: u64,
-    slow_consumers: u64,
-    stale_connections: u64,
-    stalled_clients: u64,
-    subscriptions: usize,
+    pub(super) in_msgs: u64,
+    pub(super) in_bytes: u64,
+    pub(super) in_client_msgs: u64,
+    pub(super) in_client_bytes: u64,
+    pub(super) out_msgs: u64,
+    pub(super) out_bytes: u64,
+    pub(super) out_client_msgs: u64,
+    pub(super) out_client_bytes: u64,
+    pub(super) slow_consumers: u64,
+    pub(super) stale_connections: u64,
+    pub(super) stalled_clients: u64,
+    pub(super) subscriptions: usize,
 }
 
 /// `cluster` of `/varz`.
@@ -205,7 +209,7 @@ struct Websocket<'a> {
 
 /// Counts by kind of connection.
 #[derive(Debug, Default, Serialize)]
-struct Kinds {
+pub(super) struct Kinds {
     clients: u64,
     routes: u64,
     gateways: u64,
@@ -218,6 +222,25 @@ impl Kinds {
             clients,
             ..Kinds::default()
         }
+    }
+
+    /// The slow consumers of `s`, by kind.
+    pub(super) fn slow(s: &Shared) -> Kinds {
+        Kinds {
+            clients: s.events.slow_clients.get(),
+            leafs: s.events.slow_leafs.get(),
+            ..Kinds::default()
+        }
+    }
+
+    /// The stale connections of `s`, by kind.
+    pub(super) fn stale(s: &Shared) -> Kinds {
+        Kinds::of_clients(s.events.stale_clients.get())
+    }
+
+    /// Whether it counts none.
+    pub(super) const fn is_zero(&self) -> bool {
+        self.clients == 0 && self.routes == 0 && self.gateways == 0 && self.leafs == 0
     }
 }
 
@@ -232,7 +255,7 @@ struct DiskIo {
 
 /// What a lane counts for `/varz`.
 #[derive(Debug, Default)]
-struct OnLane {
+pub(super) struct OnLane {
     subscriptions: usize,
     leafs: usize,
     routes: usize,
@@ -240,7 +263,7 @@ struct OnLane {
 
 /// The counts of `lane`: the subscriptions of its clients, its links to
 /// Go hubs, and on lane 0, the naq links and routes that are up.
-fn on_lane(lane: &Lane) -> OnLane {
+pub(super) fn on_lane(lane: &Lane) -> OnLane {
     let subscriptions = lane
         .clients
         .borrow()
@@ -320,14 +343,12 @@ fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
         http_req_stats: s.monitor.stats(),
         config_load_time: rfc3339_nano(s.monitor.loaded),
         config_digest: &s.monitor.digest,
+        tags: &o.server_tags,
+        metadata: &o.server_metadata,
         operators: Operators::of(&o.operators),
         system_account: s.system.map(|a| s.accounts.name(a)),
-        slow_consumer_stats: Kinds {
-            clients: s.events.slow_clients.get(),
-            leafs: s.events.slow_leafs.get(),
-            ..Kinds::default()
-        },
-        stale_connection_stats: Kinds::of_clients(s.events.stale_clients.get()),
+        slow_consumer_stats: Kinds::slow(s),
+        stale_connection_stats: Kinds::stale(s),
         disk_io_wait_stats: DiskIo::default(),
         tls_cert_not_after: tls.and_then(|t| t.not_after).map(rfc3339_nano),
     }
@@ -338,7 +359,7 @@ fn nanos(d: Duration) -> u64 {
 }
 
 /// The counts of `s`, with what `lanes` found.
-fn counts(s: &Shared, lanes: &[OnLane]) -> Counts {
+pub(super) fn counts(s: &Shared, lanes: &[OnLane]) -> Counts {
     let (mut clients, mut all) = (Totals::default(), Totals::default());
     for (c, p) in s.counts.iter().zip(&*s.peer_counts) {
         clients += c.load();
@@ -488,7 +509,7 @@ const SAMPLE: Duration = Duration::from_secs(1);
 /// The resident memory of the process, in bytes, and its CPU use in
 /// percent of a core since the last sample, as `nats-server` reads them
 /// on Linux; zeros where `/proc` does not tell.
-fn usage(last: &std::sync::Mutex<Option<Cpu>>) -> (u64, f64) {
+pub(super) fn usage(last: &std::sync::Mutex<Option<Cpu>>) -> (u64, f64) {
     let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
         return (0, 0.0);
     };

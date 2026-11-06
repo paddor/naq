@@ -68,6 +68,15 @@ Notable changes to naq. The format follows
 - `naq`: `Options::https_port` (`https_port`, `https`, `-ms`): monitoring
   over HTTPS with the certificate of the client port, and
   `Options::http_base_path` (`http_base_path`).
+- `naq`: server requests on `$SYS`, as `nats-server` answers them, from
+  every server of a cluster: `$SYS.REQ.SERVER.PING`, and `PING.<Z>` or
+  `<id>.<Z>` for `IDZ`, `STATSZ`, `VARZ`, `SUBSZ`, `CONNZ`, `ROUTEZ`,
+  `GATEWAYZ`, `LEAFZ`, `ACCOUNTZ`, `HEALTHZ`, `JSZ`, `PROFILEZ`, `EXPVARZ`,
+  `IPQUEUESZ` and `RAFTZ`. Their options, server filters and errors are
+  Go's, and answers are compressed as `Accept-Encoding` asks.
+- `naq`: `Options::server_tags` (`server_tags`) and
+  `Options::server_metadata` (`server_metadata`), shown in `/varz` and on
+  `$SYS`.
 
 ### Changed
 

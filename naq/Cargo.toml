@@ -43,6 +43,8 @@ omq-tokio.workspace = true
 nix.workspace = true
 
 [dev-dependencies]
+# Reads answers on `$SYS` that are compressed.
+flate2.workspace = true
 rcgen.workspace = true
 # Paused time for tests of timeouts.
 tokio = { workspace = true, features = ["test-util"] }

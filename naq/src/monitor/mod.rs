@@ -9,8 +9,9 @@ mod http;
 pub(crate) mod json;
 mod links;
 mod pages;
-mod query;
+pub(crate) mod query;
 mod routes;
+mod statsz;
 mod subsz;
 mod varz;
 
@@ -26,12 +27,14 @@ use tokio::sync::oneshot;
 use zzq_tokio::transport::{Listener, Stream};
 
 pub(crate) use conns::{closed, link_closed};
+pub(crate) use pages::health;
+pub(crate) use statsz::{ServerStats, statsz};
 
 use crate::lane::{Control, Lane};
 use crate::server::Shared;
 use crate::{Error, Options};
 use http::{Request, Response};
-use query::Query;
+use query::{Query, Refused};
 
 /// How long a TLS handshake may take.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -138,6 +141,13 @@ impl State {
     fn count(&self, e: Counted) {
         // Relaxed: a counter, read now and then.
         self.requests[e as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts a request of `q` to `e`, if it came over HTTP.
+    fn asked(&self, q: &Query, e: Counted) {
+        if q.http {
+            self.count(e);
+        }
     }
 
     /// `http_req_stats`: the requests of each endpoint asked so far.
@@ -357,6 +367,37 @@ impl http::Handler for Pages {
 /// JSON of `v`, indented, as an answer.
 fn pretty<T: serde::Serialize>(v: &T) -> Response {
     Response::json(200, json::pretty(v))
+}
+
+/// An endpoint whose data a `$SYS` request may ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shown {
+    Varz,
+    Connz,
+    Routez,
+    Gatewayz,
+    Leafz,
+    Subsz,
+    Accountz,
+    Jsz,
+}
+
+/// What endpoint `e` shows for `q`, as `nats-server` puts it into a
+/// `$SYS` answer: compact, in the same order. Or why it cannot.
+pub(crate) async fn shown(shared: &Shared, e: Shown, q: &Query) -> Result<Vec<u8>, Refused> {
+    let r = match e {
+        Shown::Varz => varz::answer(shared).await,
+        Shown::Connz => connz::answer(shared, q).await?,
+        Shown::Routez => routes::answer(shared, q).await?,
+        Shown::Gatewayz => pages::gatewayz(shared, q)?,
+        Shown::Leafz => links::answer(shared, q).await?,
+        Shown::Subsz => subsz::answer(shared, q).await?,
+        Shown::Accountz => accountz::answer(shared, q).await?,
+        Shown::Jsz => pages::jsz(shared, q)?,
+    };
+    // The endpoints write JSON: it reads back.
+    let data: json::Ordered = serde_json::from_slice(&r.body).map_err(|e| e.to_string())?;
+    Ok(json::compact(&data))
 }
 
 /// What `f` finds on every lane, in lane order. A lane that stopped finds

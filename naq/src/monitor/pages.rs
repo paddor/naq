@@ -150,26 +150,58 @@ struct Failed {
     error: String,
 }
 
-/// What `/healthz` says.
+/// What `/healthz` says, as Go's `HealthStatus`.
 #[derive(Debug, Serialize)]
-struct Health {
+pub(crate) struct Health {
     status: &'static str,
+    /// The HTTP status it goes with; left out over HTTP.
+    #[serde(skip_serializing_if = "is_zero")]
+    status_code: u16,
     #[serde(skip_serializing_if = "String::is_empty")]
     error: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     errors: Vec<Failed>,
 }
 
-/// `/healthz`: whether the server takes connections. Without JetStream,
-/// that is all there is to check.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "the signature serde's skip_serializing_if calls"
+)]
+const fn is_zero(n: &u16) -> bool {
+    *n == 0
+}
+
+/// `/healthz`: whether the server takes connections, logged when not.
 pub(super) fn healthz(shared: &Shared, q: &Query) -> Result<Response, Refused> {
-    let js_enabled = q.bool("js-enabled")?;
-    if js_enabled {
+    if q.bool("js-enabled")? {
         shared.log.warn(format_args!(
             "Healthcheck: js-enabled deprecated, use js-enabled-only instead"
         ));
     }
-    for key in ["js-enabled-only", "js-server-only", "js-meta-only"] {
+    let mut h = health(shared, q)?;
+    if !h.error.is_empty() {
+        shared
+            .log
+            .warn(format_args!("Healthcheck failed: {}", go_quote(&h.error)));
+    } else if !h.errors.is_empty() {
+        shared.log.warn(format_args!(
+            "Healthcheck failed: {} errors",
+            h.errors.len()
+        ));
+    }
+    let status = std::mem::take(&mut h.status_code);
+    Ok(Response::json(status, super::json::compact(&h)))
+}
+
+/// What `/healthz` finds for `q`: whether the server takes connections.
+/// Without JetStream, that is all there is to check.
+pub(crate) fn health(shared: &Shared, q: &Query) -> Result<Health, Refused> {
+    for key in [
+        "js-enabled",
+        "js-enabled-only",
+        "js-server-only",
+        "js-meta-only",
+    ] {
         q.bool(key)?;
     }
     let details = q.bool("details")?;
@@ -194,32 +226,29 @@ pub(super) fn healthz(shared: &Shared, q: &Query) -> Result<Response, Refused> {
     } else {
         None
     };
-    let Some((status, kind, why)) = failed else {
-        return Ok(Response::json(200, br#"{"status":"ok"}"#.to_vec()));
-    };
-    let health = if details {
-        shared
-            .log
-            .warn(format_args!("Healthcheck failed: 1 errors"));
-        Health {
-            status: "error",
+    let Some((status_code, kind, why)) = failed else {
+        return Ok(Health {
+            status: "ok",
+            status_code: 200,
             error: String::new(),
-            errors: vec![Failed {
-                kind,
-                error: why.into(),
-            }],
-        }
-    } else {
-        shared
-            .log
-            .warn(format_args!("Healthcheck failed: {}", go_quote(why)));
-        Health {
-            status: "error",
-            error: why.into(),
             errors: Vec::new(),
-        }
+        });
     };
-    Ok(Response::json(status, super::json::compact(&health)))
+    let (error, errors) = if details {
+        let errors = vec![Failed {
+            kind,
+            error: why.into(),
+        }];
+        (String::new(), errors)
+    } else {
+        (why.to_owned(), Vec::new())
+    };
+    Ok(Health {
+        status: "error",
+        status_code,
+        error,
+        errors,
+    })
 }
 
 /// `s` as Go's `%q` writes text without control characters.
