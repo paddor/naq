@@ -2369,3 +2369,56 @@ fn global_statz(body: &str) -> serde_json::Value {
     g["num_subscriptions"] = serde_json::Value::Null;
     g
 }
+
+/// The next message `p` gets: its subject and its payload as JSON.
+fn message(p: &mut Peer) -> (String, serde_json::Value) {
+    let line = p.line();
+    let words: Vec<&str> = line.split(' ').collect();
+    assert_eq!(words[0], "MSG", "{line}");
+    let payload = p.line();
+    (words[1].to_owned(), serde_json::from_str(&payload).unwrap())
+}
+
+#[test]
+fn the_system_account_hears_of_links_as_they_come_and_go() {
+    let hub = Hub::new();
+    let conf = format!(
+        "server_name: naq-leaf\n\
+         accounts {{ SYS {{ users [{{user: sys, password: p}}] }} }}\n\
+         system_account: SYS\n\
+         leafnodes {{ remotes [{{ url: \"nats-leaf://127.0.0.1:{}\" }}] }}\n",
+        hub.port()
+    );
+    let opts: Options = conf.parse().unwrap();
+    let server = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        leaf_reconnect: Duration::from_secs(60),
+        ..opts
+    })
+    .unwrap();
+    let s = TcpStream::connect(server.addr()).unwrap();
+    s.set_read_timeout(Some(WAIT)).unwrap();
+    let mut c = Peer {
+        r: BufReader::new(s.try_clone().unwrap()),
+        w: s,
+    };
+    c.line();
+    // Its own CONNECT event goes before it subscribes.
+    c.send("CONNECT {\"user\":\"sys\",\"pass\":\"p\",\"verbose\":false}\r\nPING\r\n");
+    assert_eq!(c.line(), "PONG");
+    c.send("SUB $SYS.ACCOUNT.*.CONNECT 1\r\nSUB $SYS.ACCOUNT.*.DISCONNECT 2\r\nPING\r\n");
+    assert_eq!(c.line(), "PONG");
+    let p = linked(&hub);
+    let (subject, up) = message(&mut c);
+    assert_eq!(subject, "$SYS.ACCOUNT.$G.CONNECT");
+    assert_eq!(up["client"]["kind"], "Leafnode", "{up}");
+    assert!(up["client"].get("client_type").is_none(), "{up}");
+    assert_eq!(up["client"]["acc"], "$G");
+    drop(p);
+    let (subject, down) = message(&mut c);
+    assert_eq!(subject, "$SYS.ACCOUNT.$G.DISCONNECT");
+    assert_eq!(down["client"]["kind"], "Leafnode", "{down}");
+    assert_eq!(down["client"]["id"], up["client"]["id"]);
+    assert_eq!(down["reason"], "Client Closed");
+}

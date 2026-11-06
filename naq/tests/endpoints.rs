@@ -13,7 +13,8 @@
 //!   got `n` messages, or for a moment if `n` is 0, and every message it
 //!   got shows: its control line without the sizes, its headers, and its
 //!   payload, as an answer body is shown, decoded if compressed.
-//!   `$SERVER_ID` in a client's line is the ID of the server, `$CID_a`
+//!   `$SERVER_ID` in a client's line, and in what it got, is the ID of
+//!   the server, `$CID_a`
 //!   that of client `a`; a size `$LEN` at the end of a `PUB` is that of
 //!   the client's next line.
 //! - `a.`: client `a` sends what it has, then closes its connection, and
@@ -313,8 +314,9 @@ impl Script {
             && let Some(c) = clients.get_mut(name)
             && let Ok(n) = n.parse()
         {
+            let id = c.server_id.clone();
             for g in c.take(n) {
-                *out += &self.shown(&g);
+                *out += &self.shown(&g).replace(&id, "$SERVER_ID");
             }
             return true;
         }

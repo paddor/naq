@@ -427,6 +427,9 @@ struct Bounds {
     /// How it logged in to a JWT account, to check itself again once the
     /// account changes.
     kept: Option<Box<crate::jwt::trust::live::Kept>>,
+    /// The account it was in as its login was refused, which
+    /// `nats-server` tells of it; the auth callout's if that refused it.
+    refused: Option<u32>,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -565,6 +568,7 @@ where
             deadline: None,
             counted: None,
             kept: None,
+            refused: None,
         },
         watch: Watch {
             on: tracing || auth_by.is_some(),
@@ -653,6 +657,8 @@ impl Conn {
         if let Some(a) = self.bounds.counted.take() {
             self.lane.shared.uncount(a, self.client.id);
         }
+        let of = crate::sys::Of::Client(&self.client);
+        crate::sys::closed(&self.lane, of, close, self.bounds.refused);
         self.lane.shared.client_gone();
         self.lane.flush();
         self.client.ended.set(Some(close));

@@ -65,12 +65,25 @@ impl Conn {
     #[inline(never)]
     pub(super) fn connect(&mut self, json: &[u8]) -> Result<Step, Close> {
         self.client.seen.active();
+        // As `nats-server`: estimated at every `CONNECT`, before the login.
+        let rtt = self.ping.first_rtt(Instant::now());
+        self.client.rtt.set(rtt);
         let (mut creds, names) = self.opts.apply(json).map_err(|_| Close::Connect)?;
         if let Some(cookies) = &self.via.cookies {
             creds.fill(cookies);
         }
         self.client.headers.set(self.opts.headers);
-        self.login(creds, names, false)
+        let login = self.login(creds, names, false);
+        self.refused(login)
+    }
+
+    /// Notes the account the client was in if `login` was refused.
+    pub(super) fn refused<T>(&mut self, login: Result<T, Close>) -> Result<T, Close> {
+        if matches!(login, Err(Close::Auth)) {
+            let account = self.client.account.get();
+            self.bounds.refused.get_or_insert(account);
+        }
+        login
     }
 
     /// Logs the client in with `creds` and `names`: once more if
@@ -294,9 +307,14 @@ impl Conn {
             }
         };
         drop(ticket);
-        let payload = answer.ok_or(Close::Auth)?;
-        let mut user = callout::response::decide(&c.ask, &payload, &shared, self.kind())
-            .map_err(|_| Close::Auth)?;
+        let decided = answer.and_then(|payload| {
+            callout::response::decide(&c.ask, &payload, &shared, self.kind()).ok()
+        });
+        let Some(mut user) = decided else {
+            // A refusal goes to the callout's account.
+            self.bounds.refused = Some(account);
+            return Err(Close::Auth);
+        };
         if user.account == account {
             user.perms = Some(callout::guarded(user.perms.as_deref()));
         }
@@ -443,13 +461,13 @@ impl Conn {
 
     /// The rest of a `CONNECT`, from a client that is who it says.
     fn connected(&mut self) -> Result<(), Close> {
+        crate::sys::connected(&self.lane, crate::sys::Of::Client(&self.client));
         if self.stage == Stage::Fresh {
             self.stage = Stage::Connected;
         }
         let interval = self.ping.interval;
         let jitter = super::ping::jitter(interval, |n| self.lane.below(n));
-        let rtt = self.ping.connected(Instant::now(), interval, jitter);
-        self.client.rtt.set(rtt);
+        self.ping.connected(Instant::now(), interval, jitter);
         if !(0..=1).contains(&self.opts.protocol) {
             return Err(Close::Refused(super::BAD_PROTOCOL));
         }

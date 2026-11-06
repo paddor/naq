@@ -445,6 +445,34 @@ fn answers_that_do_not_hold_keep_clients_out() {
 }
 
 #[test]
+fn a_login_the_service_refuses_is_told_to_its_account() {
+    let issuer = Arc::new(KeyPair::new_account());
+    for (name, t) in targets(&conf(&issuer, "")) {
+        Service::new(&issuer).run(&t, &json!({"user": "auth", "pass": "pwd"}), "AUTH", None);
+        let mut w = Client::login(&t, &json!({"user": "auth", "pass": "pwd"}));
+        assert_eq!(w.outcome(), "AUTH", "{name}");
+        w.send("SUB $SYS.ACCOUNT.CLIENT.AUTH.ERR 1\r\nPING\r\n");
+        assert_eq!(w.line(), "PONG", "{name}");
+        let got = Client::login(&t, &json!({"user": "nope"})).outcome();
+        assert_eq!(got, DENIED, "{name}");
+        // Events have no reply.
+        let line = w.line();
+        let size: usize = line.split_whitespace().last().unwrap().parse().unwrap();
+        let mut payload = vec![0; size + 2];
+        w.r.read_exact(&mut payload).unwrap();
+        let event: Value = serde_json::from_slice(&payload[..size]).unwrap();
+        assert!(
+            line.starts_with("MSG $SYS.ACCOUNT.CLIENT.AUTH.ERR 1"),
+            "{line}"
+        );
+        assert_eq!(event["client"]["acc"], "AUTH", "{name}: {event}");
+        assert_eq!(event["client"]["user"], "nope", "{name}: {event}");
+        // Go tells why the service refused: naq does not.
+        assert!(event["reason"].is_string(), "{name}");
+    }
+}
+
+#[test]
 fn allowed_accounts_keep_the_users_of_others_as_configured() {
     let issuer = Arc::new(KeyPair::new_account());
     for (name, t) in targets(&conf(&issuer, "    allowed_accounts: [FOO]\n")) {

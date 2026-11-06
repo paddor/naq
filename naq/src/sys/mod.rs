@@ -5,6 +5,7 @@ mod account;
 mod claims;
 mod directory;
 mod encode;
+mod events;
 mod kick;
 mod later;
 mod remote;
@@ -18,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use naq_proto::client::Pub;
 use serde_json::Value;
 
+pub(crate) use events::{Of, closed, connected};
 pub(crate) use send::last_word;
 pub(crate) use server::Z;
 

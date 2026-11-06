@@ -1,0 +1,253 @@
+# Events of clients on $SYS: CONNECT once a client logs in, DISCONNECT
+# as it goes, with what it sent and got and why. A refused login sends
+# AUTH.ERR into the client's account, then on the server's subject, then
+# DISCONNECT, all in $G.
+#! server_name: s1
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#!   A { users [{user: a, password: p}] }
+#! }
+#! authorization { users [{user: g, password: p}] }
+#! system_account: SYS
+#~ id
+#~ time
+#~ seq
+#~ ver
+#~ timestamp
+s> CONNECT {"user":"sys","pass":"p","headers":true}
+s< 0
+s> SUB $SYS.ACCOUNT.*.CONNECT 1
+s> SUB $SYS.ACCOUNT.*.DISCONNECT 2
+s> SUB $SYS.SERVER.*.CLIENT.AUTH.ERR 3
+s< 0
+g> CONNECT {"user":"g","pass":"p"}
+g> SUB $SYS.ACCOUNT.CLIENT.AUTH.ERR 1
+g< 0
+s< 1
+< MSG $SYS.ACCOUNT.$G.CONNECT 1
+< {
+<   "type": "io.nats.server.advisory.v1.client_connect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "$G",
+<     "user": "g",
+<     "name_tag": "$G",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   }
+< }
+a> CONNECT {"user":"a","pass":"p","name":"evA","lang":"ruby","version":"9.9.9"}
+a> SUB y 1
+a> PUB x 5
+a> hello
+a< 0
+s< 1
+< MSG $SYS.ACCOUNT.A.CONNECT 1
+< {
+<   "type": "io.nats.server.advisory.v1.client_connect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "A",
+<     "user": "a",
+<     "name": "evA",
+<     "lang": "ruby",
+<     "ver": ~,
+<     "name_tag": "A",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   }
+< }
+a.
+s< 1
+< MSG $SYS.ACCOUNT.A.DISCONNECT 2
+< {
+<   "type": "io.nats.server.advisory.v1.client_disconnect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "A",
+<     "user": "a",
+<     "name": "evA",
+<     "lang": "ruby",
+<     "ver": ~,
+<     "rtt": ~,
+<     "stop": ~,
+<     "name_tag": "A",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   },
+<   "sent": {
+<     "msgs": 1,
+<     "bytes": 5
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "reason": "Client Closed"
+< }
+b> CONNECT {"user":"a","pass":"bad","name":"badpw","lang":"ruby","version":"9.9.9"}
+b< 0
+s< 2
+< MSG $SYS.SERVER.$SERVER_ID.CLIENT.AUTH.ERR 3
+< {
+<   "type": "io.nats.server.advisory.v1.client_disconnect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "$G",
+<     "user": "a",
+<     "name": "badpw",
+<     "lang": "ruby",
+<     "ver": ~,
+<     "rtt": ~,
+<     "stop": ~,
+<     "name_tag": "$G",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   },
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "reason": "Authentication Failure"
+< }
+< MSG $SYS.ACCOUNT.$G.DISCONNECT 2
+< {
+<   "type": "io.nats.server.advisory.v1.client_disconnect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "$G",
+<     "user": "a",
+<     "name": "badpw",
+<     "lang": "ruby",
+<     "ver": ~,
+<     "rtt": ~,
+<     "stop": ~,
+<     "name_tag": "$G",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   },
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "reason": "Authentication Failure"
+< }
+g< 1
+< MSG $SYS.ACCOUNT.CLIENT.AUTH.ERR 1
+< {
+<   "type": "io.nats.server.advisory.v1.client_disconnect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "$G",
+<     "user": "a",
+<     "name": "badpw",
+<     "lang": "ruby",
+<     "ver": ~,
+<     "rtt": ~,
+<     "stop": ~,
+<     "name_tag": "$G",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   },
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "reason": "Authentication Failure"
+< }

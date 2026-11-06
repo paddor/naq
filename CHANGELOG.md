@@ -89,6 +89,11 @@ Notable changes to naq. The format follows
   `nats-server` times it, and `SHUTDOWN` as the server stops. Servers of a
   cluster know each other from these: `active_servers` counts those heard
   from, until they say they go or fall quiet.
+- `naq`: events of connections on `$SYS`, as `nats-server` sends them:
+  `$SYS.ACCOUNT.<acc>.CONNECT` once a client or a link to a hub logs in,
+  `DISCONNECT` as it goes, with what it sent and got and why, and for a
+  refused login `$SYS.SERVER.<id>.CLIENT.AUTH.ERR` and
+  `$SYS.ACCOUNT.CLIENT.AUTH.ERR` in the account the client was in.
 
 ### Changed
 
@@ -103,6 +108,9 @@ Notable changes to naq. The format follows
 
 ### Fixed
 
+- `naq`: a client's first round trip is estimated as its `CONNECT`
+  comes, before the login, as in `nats-server`: a slow login or auth
+  callout no longer counts.
 - `naq`: a client that breaks the protocol is closed as `Protocol
   Violation`, as by `nats-server`, in the log and in the WebSocket close
   frame; a client without credentials is the `no_auth_user` in the user

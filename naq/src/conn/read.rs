@@ -132,7 +132,10 @@ impl Conn {
                 self.unfenced = false;
                 self.pong();
             }
-            Stop::Login(l) => self.later(*l).await?,
+            Stop::Login(l) => {
+                let login = self.later(*l).await;
+                self.refused(login)?;
+            }
         }
         self.lane.flush();
         Ok(None)
