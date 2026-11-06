@@ -248,3 +248,31 @@ fn accounts_ask_every_server_of_a_cluster_of_themselves() {
     assert_eq!(names(&me, "/server/name"), ["n0"]);
     assert_eq!(me[0]["data"]["account"], "A");
 }
+
+#[test]
+fn a_kick_by_server_id_closes_a_client_of_that_server() {
+    let servers = cluster(2);
+    let mut far = Sys::of(servers[1].addr(), "a");
+    let far_id = far.server_id.clone();
+    let mut c = Sys::new(servers[0].addr());
+    c.ask_all("$SYS.REQ.SERVER.PING.IDZ", 2);
+    // The far client's ID, as its server, which has only it, lists it.
+    let conns = c.ask(&format!("$SYS.REQ.SERVER.{far_id}.CONNZ"), 1, WAIT);
+    assert_eq!(conns[0]["data"]["num_connections"], 1);
+    let cid = conns[0]["data"]["connections"][0]["cid"].as_u64().unwrap();
+    let body = format!("{{\"cid\":{cid}}}");
+    c.next += 1;
+    let reply = format!("_R.{}", c.next);
+    c.send(&format!(
+        "PUB $SYS.REQ.SERVER.{far_id}.KICK {reply} {}\r\n{body}\r\n",
+        body.len()
+    ));
+    let answer = c.messages(1, WAIT, |s| s == reply);
+    assert_eq!(answer[0]["server"]["name"], "n1");
+    assert!(answer[0].get("error").is_none(), "{answer:?}");
+    // The kicked client gets no -ERR: its connection ends.
+    far.w.set_read_timeout(Some(WAIT)).unwrap();
+    let mut rest = String::new();
+    let _ = far.r.read_to_string(&mut rest);
+    assert!(!rest.contains("-ERR"), "{rest}");
+}

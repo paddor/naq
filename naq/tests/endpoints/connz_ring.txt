@@ -1,6 +1,5 @@
 # The ring keeps the newest closed connections, max_closed_clients of them.
 #! max_closed_clients: 2
-#~ pending_bytes
 a> CONNECT {"verbose":false,"name":"a"}
 a.
 b> CONNECT {"verbose":false,"name":"b"}

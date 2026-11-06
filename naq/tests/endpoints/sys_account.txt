@@ -23,7 +23,6 @@
 #~ out_bytes
 #~ bytes
 #~ subscriptions
-#~ pending_bytes
 #~ num_cache
 #~ num_matches
 #~ cache_hit_rate

@@ -19,7 +19,6 @@
 #~ subscriptions
 #~ total_connections
 #~ cpu
-#~ pending_bytes
 #~ mem
 #~ out_bytes
 #~ out_client_bytes

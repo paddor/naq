@@ -1,7 +1,6 @@
 # Users and accounts: who each connection logged in as, and filters.
 #! accounts { A { users: [{user: a, password: p}] }, B { users: [{user: b, password: p}] } }
 #! no_auth_user: b
-#~ pending_bytes
 a> CONNECT {"verbose":false,"user":"a","pass":"p","name":"a"}
 b> CONNECT {"verbose":false,"name":"b"}
 x> CONNECT {"verbose":false,"user":"a","pass":"wrong","name":"x"}

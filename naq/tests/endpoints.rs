@@ -13,7 +13,9 @@
 //!   got `n` messages, or for a moment if `n` is 0, and every message it
 //!   got shows: its control line without the sizes, its headers, and its
 //!   payload, as an answer body is shown, decoded if compressed.
-//!   `$SERVER_ID` in a client's line is the ID of the server.
+//!   `$SERVER_ID` in a client's line is the ID of the server, `$CID_a`
+//!   that of client `a`; a size `$LEN` at the end of a `PUB` is that of
+//!   the client's next line.
 //! - `a.`: client `a` sends what it has, then closes its connection, and
 //!   the harness waits until `/connz?state=closed` lists it. Before the
 //!   next request,
@@ -61,6 +63,8 @@ const MASKED: &[&str] = &[
     "idle",
     "rtt",
     "last_activity",
+    // Go counts what it has yet to write when it is asked, a PONG too.
+    "pending_bytes",
     "stop",
     "update_time",
     "mem",
@@ -289,10 +293,19 @@ impl Script {
             && !name.is_empty()
             && name.bytes().all(|b| b.is_ascii_alphanumeric())
         {
-            let c = clients
+            clients
                 .entry(name.to_owned())
                 .or_insert_with(|| Client::new(at.0));
-            c.pending += &unescape(&sent.replace("$SERVER_ID", &c.server_id));
+            let text = cids(sent, clients);
+            let c = clients.get_mut(name).unwrap();
+            let text = unescape(&text.replace("$SERVER_ID", &c.server_id));
+            if let Some(head) = c.sized.take() {
+                let _ = write!(c.pending, "{head} {}\r\n", text.len());
+            } else if let Some(head) = text.strip_suffix(" $LEN") {
+                c.sized = Some(head.to_owned());
+                return true;
+            }
+            c.pending += &text;
             c.pending += "\r\n";
             return true;
         }
@@ -543,6 +556,8 @@ struct Client {
     server_id: String,
     /// The messages it got that no step showed yet.
     got: Vec<Got>,
+    /// A `PUB` waiting for the size of its payload, the next line.
+    sized: Option<String>,
     /// Its connection closed.
     gone: bool,
     /// Closed connections list it.
@@ -573,6 +588,7 @@ impl Client {
             cid,
             server_id,
             got: Vec::new(),
+            sized: None,
             gone: false,
             listed: false,
         }

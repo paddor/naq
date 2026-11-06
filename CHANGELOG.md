@@ -74,6 +74,8 @@ Notable changes to naq. The format follows
   `GATEWAYZ`, `LEAFZ`, `ACCOUNTZ`, `HEALTHZ`, `JSZ`, `PROFILEZ`, `EXPVARZ`,
   `IPQUEUESZ` and `RAFTZ`. Their options, server filters and errors are
   Go's, and answers are compressed as `Accept-Encoding` asks.
+- `naq`: `$SYS.REQ.SERVER.<id>.KICK` closes a client, or a link to a
+  hub, as `Kicked`, as in `nats-server`.
 - `naq`: account requests on `$SYS`, as `nats-server` answers them:
   `$SYS.REQ.ACCOUNT.<acc>.SUBSZ`, `CONNZ`, `LEAFZ`, `JSZ`, `INFO`, `STATZ`
   and `CONNS`, `$SYS.REQ.ACCOUNT.PING.STATZ`, and a user's own details on

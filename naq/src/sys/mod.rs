@@ -5,6 +5,7 @@ mod account;
 mod claims;
 mod directory;
 mod encode;
+mod kick;
 mod later;
 mod reply;
 mod server;
@@ -51,6 +52,8 @@ pub(crate) enum Service {
     Server(Z),
     /// `$SYS.REQ.SERVER.PING`: `STATSZ` by its old subject.
     Ping,
+    /// `$SYS.REQ.SERVER.<id>.KICK`: a connection to close.
+    Kick,
     /// A request about an account, for what its last token names.
     Account(account::X),
     /// `$SYS.REQ.ACCOUNT.PING.STATZ`: the statistics of every account.
@@ -117,6 +120,7 @@ pub(crate) fn install(lane: &Lane) {
     };
     let mut index = lane.index(sys).borrow_mut();
     server::install(&mut index, &shared.server_id);
+    kick::install(&mut index, &shared.server_id);
     account::install(&mut index);
     if trust(shared).is_none() {
         return;
@@ -157,6 +161,7 @@ pub(crate) fn answer(
     match service {
         Service::Server(z) => server::take(lane, out, z, m),
         Service::Ping => server::take(lane, out, Z::Statsz, m),
+        Service::Kick => kick::take(lane, m),
         Service::Account(x) => account::take(lane, Some(x), m),
         Service::AccountPing => account::take(lane, None, m),
         Service::UserInfo => account::user_info(lane, m, from),

@@ -1,0 +1,124 @@
+# A kick by the server's ID closes a client as Kicked, with no -ERR; the
+# server answers with its block alone. A body that names no client gets
+# no answer, nor does a kick without a reply.
+#! server_name: s1
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#!   A { users [{user: a, password: p}] }
+#! }
+#! system_account: SYS
+#~ id
+#~ time
+#~ seq
+#~ ver
+s> CONNECT {"user":"sys","pass":"p","headers":true,"no_responders":true}
+s> SUB _R.> 1
+k> CONNECT {"user":"a","pass":"p","name":"k"}
+k> SUB x 1
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.KICK _R.1 $LEN
+s> {"cid":$CID_k}
+s< 1
+< MSG _R.1 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   }
+< }
+GET /connz?state=closed&cid=$CID_k
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 1,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Kicked",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0
+<     }
+<   ]
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.KICK _R.2 $LEN
+s> {"cid":999999}
+s< 1
+< MSG _R.2 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 500,
+<     "description": "no such client or leafnode id"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.KICK _R.3 0
+s>
+s< 0
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.KICK _R.4 $LEN
+s> {"cid":"x"}
+s< 0
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.KICK _R.5 $LEN
+s> {"cid":999999,"server_name":5}
+s< 1
+< MSG _R.5 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 400,
+<     "description": "json: cannot unmarshal number into Go struct field EventFilterOptions.server_name of type string"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.KICK _R.6 $LEN
+s> {"cid":999999,"server_name":"zz"}
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.KICK _R.7 $LEN
+s> {"cid":999999}
+s< 1
+< HMSG _R.7 1
+< NATS/1.0 503
+< Nats-Subject: $SYS.REQ.SERVER.PING.KICK

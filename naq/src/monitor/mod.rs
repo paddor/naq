@@ -404,7 +404,7 @@ pub(crate) async fn shown(shared: &Shared, e: Shown, q: &Query) -> Result<Vec<u8
 
 /// What `f` finds on every lane, in lane order. A lane that stopped finds
 /// nothing.
-async fn ask_all<T, F>(shared: &Shared, f: F) -> Vec<T>
+pub(crate) async fn ask_all<T, F>(shared: &Shared, f: F) -> Vec<T>
 where
     T: Send + 'static,
     F: Fn(&Lane) -> T + Clone + Send + 'static,

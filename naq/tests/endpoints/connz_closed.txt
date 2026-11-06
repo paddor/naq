@@ -1,6 +1,5 @@
 # Closed connections, with why they closed, newest first by stop. What
 # was left to write when the server closed one depends on timing.
-#~ pending_bytes
 a> CONNECT {"verbose":false,"name":"a"}
 a> SUB x 1
 a> SUB y q 2
