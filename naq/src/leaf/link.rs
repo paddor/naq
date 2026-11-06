@@ -495,6 +495,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             self.lane.slots.leafs(),
         );
         self.lane.links.borrow_mut().push(side.clone());
+        crate::sys::conns_changed(shared, account);
         crate::sys::connected(self.lane, crate::sys::Of::Link(&side));
         self.lane.mark(&client);
         let label = format!("{}:{} - lid:{}", side.facts.ip, side.facts.port, client.id);
@@ -506,6 +507,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         let why = close.reason();
         crate::monitor::link_closed(self.lane, &side, why);
         self.lane.links.borrow_mut().retain(|l| l.id != side.id);
+        crate::sys::conns_changed(shared, account);
         crate::sys::closed(self.lane, crate::sys::Of::Link(&side), close, None);
         side.forget_hub(self.lane);
         shared.log.info(format_args!(

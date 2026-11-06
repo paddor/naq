@@ -94,6 +94,15 @@ Notable changes to naq. The format follows
   `DISCONNECT` as it goes, with what it sent and got and why, and for a
   refused login `$SYS.SERVER.<id>.CLIENT.AUTH.ERR` and
   `$SYS.ACCOUNT.CLIENT.AUTH.ERR` in the account the client was in.
+- `naq`: the connections of each account on `$SYS`, as `nats-server`
+  tells them: `CONNS` on `$SYS.SERVER.ACCOUNT.<acc>.CONNS` and
+  `$SYS.ACCOUNT.<acc>.SERVER.CONNS` as they change and every 30 seconds
+  while there are any, and to `$SYS.REQ.ACCOUNT.<acc>.CONNS`. A server
+  asks the others for them as it starts and as accounts are added.
+- `naq`: `Account::max_connections` (`limits { max_connections }`): the
+  most clients an account may have across the cluster. A client past it is
+  refused; once the other servers tell of more, the newest clients here
+  past it close. The limit of an account JWT holds across the cluster too.
 
 ### Changed
 

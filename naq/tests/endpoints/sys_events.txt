@@ -16,7 +16,8 @@
 #~ timestamp
 s> CONNECT {"user":"sys","pass":"p","headers":true}
 s< 0
-s> SUB $SYS.ACCOUNT.*.CONNECT 1
+s> SUB $SYS.ACCOUNT.$G.CONNECT 1
+s> SUB $SYS.ACCOUNT.A.CONNECT 4
 s> SUB $SYS.ACCOUNT.*.DISCONNECT 2
 s> SUB $SYS.SERVER.*.CLIENT.AUTH.ERR 3
 s< 0
@@ -56,7 +57,7 @@ a> PUB x 5
 a> hello
 a< 0
 s< 1
-< MSG $SYS.ACCOUNT.A.CONNECT 1
+< MSG $SYS.ACCOUNT.A.CONNECT 4
 < {
 <   "type": "io.nats.server.advisory.v1.client_connect",
 <   "id": ~,

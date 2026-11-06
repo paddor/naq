@@ -1,5 +1,5 @@
 //! What the server says on `$SYS` of its own accord: its events, its
-//! `STATSZ` heartbeat and its last word. One task on lane 0 sends it all
+//! `STATSZ` heartbeat, the connections of its accounts and its last word. One task on lane 0 sends it all
 //! and numbers each message as it leaves, as `nats-server`'s send loop
 //! does, so that every other server gets them in order.
 
@@ -11,6 +11,9 @@ use std::time::Duration;
 use naq_proto::client::Pub;
 use tokio::time::Instant;
 
+use rustc_hash::FxHashMap;
+
+use super::conns::{Beats, CONNS};
 use super::reply::ServerInfo;
 use crate::lane::{Lane, Outs};
 use crate::mailbox::{self, Mailbox, Receiver};
@@ -40,6 +43,11 @@ pub(crate) enum Event {
     /// `STATSZ` on the server's own subject, as a new server makes
     /// `nats-server` send it: past the rate limit if `forced`.
     Statsz { forced: bool },
+    /// The connections of this account changed: `CONNS` goes out.
+    Conns(u32),
+    /// A `CONNS` request about account `account`, answered to `reply` if
+    /// the account has clients here.
+    Answer { account: String, reply: Vec<u8> },
     /// The server's last word, `SHUTDOWN`: `done` hears once it left.
     Last(SyncSender<()>),
 }
@@ -132,7 +140,57 @@ pub(crate) fn last_word(shared: &Shared) {
 async fn run(weak: Weak<Shared>, rx: Receiver<Event>) {
     let mut clock = Clock::new(Instant::now());
     let mut events = Vec::new();
+    // The accounts whose connections it asked the others for.
+    let mut tracked = 0;
     loop {
+        // Holds the server only while it sends.
+        {
+            let Some(shared) = weak.upgrade() else {
+                return;
+            };
+            let Some(lane) = crate::lane::get(shared.id, 0) else {
+                return;
+            };
+            let mut s = Sender::new(&lane);
+            tracked = s.track(tracked);
+            // A change that another in the batch follows goes out as that one.
+            let mut last = FxHashMap::default();
+            for (i, e) in events.iter().enumerate() {
+                if let Event::Conns(a) = e {
+                    last.insert(*a, i);
+                }
+            }
+            for (i, e) in events.drain(..).enumerate() {
+                match e {
+                    Event::Note(n) => s.note(&n),
+                    Event::Statsz { forced } => {
+                        if forced {
+                            clock.beat.last = None;
+                        }
+                        if !clock.beat.limited(Instant::now()) {
+                            s.statsz().await;
+                        }
+                    }
+                    Event::Conns(a) if last.get(&a) == Some(&i) => {
+                        s.conns(a, None, &mut clock.conns).await;
+                    }
+                    Event::Conns(_) => {}
+                    Event::Answer { account, reply } => {
+                        if let Some(a) = shared.accounts.id(&account) {
+                            s.conns(a, Some(&reply), &mut clock.conns).await;
+                        }
+                    }
+                    Event::Last(done) => {
+                        s.farewell();
+                        s.ship().await;
+                        let _ = done.send(());
+                        return;
+                    }
+                }
+            }
+            clock.tick(&mut s, Instant::now()).await;
+            s.ship().await;
+        }
         // Cancel-safe: `recv_all` takes the events only as it returns, and
         // a sleep loses nothing.
         tokio::select! {
@@ -141,48 +199,18 @@ async fn run(weak: Weak<Shared>, rx: Receiver<Event>) {
             },
             () = tokio::time::sleep_until(clock.due()) => {}
         }
-        let Some(shared) = weak.upgrade() else {
-            return;
-        };
-        let Some(lane) = crate::lane::get(shared.id, 0) else {
-            return;
-        };
-        let mut s = Sender::new(&lane);
-        let mut last = None;
-        for e in events.drain(..) {
-            match e {
-                Event::Note(n) => s.note(&n),
-                Event::Statsz { forced } => {
-                    if forced {
-                        clock.beat.last = None;
-                    }
-                    if !clock.beat.limited(Instant::now()) {
-                        s.statsz().await;
-                    }
-                }
-                Event::Last(done) => {
-                    last = Some(done);
-                    break;
-                }
-            }
-        }
-        if let Some(done) = last {
-            s.farewell();
-            s.ship().await;
-            let _ = done.send(());
-            return;
-        }
-        clock.tick(&mut s, Instant::now()).await;
-        s.ship().await;
     }
 }
 
 /// The timers of the sender.
+
 #[derive(Debug)]
 struct Clock {
     beat: Beat,
     /// When the servers are next checked for those gone quiet.
     sweep: Instant,
+    /// The heartbeats of the accounts with connections.
+    conns: Beats,
 }
 
 impl Clock {
@@ -190,12 +218,14 @@ impl Clock {
         Clock {
             beat: Beat::new(now),
             sweep: now + super::remote::SWEEP,
+            conns: Beats::default(),
         }
     }
 
     /// When the next timer is due.
     fn due(&self) -> Instant {
-        self.beat.next.min(self.sweep)
+        let due = self.beat.next.min(self.sweep);
+        self.conns.next().map_or(due, |c| c.min(due))
     }
 
     /// Does what the timers due at `now` call for, with `s`.
@@ -209,6 +239,9 @@ impl Clock {
         if now >= self.sweep {
             super::remote::sweep(&s.lane.shared, now);
             self.sweep = now + super::remote::SWEEP;
+        }
+        for a in self.conns.due(now) {
+            s.conns(a, None, &mut self.conns).await;
         }
     }
 }
@@ -282,6 +315,73 @@ impl<'l> Sender<'l> {
             payload,
         };
         crate::lane::inject(self.lane, &mut self.out, account, &m);
+    }
+
+    /// Asks the other servers for the connections of each account added
+    /// since the first `from`: they answer to this server's inbox. The
+    /// accounts asked for so far.
+    fn track(&mut self, from: u32) -> u32 {
+        let shared = self.lane.shared.clone();
+        let (Some(sys), n) = (shared.system, shared.accounts.len()) else {
+            return from;
+        };
+        let reply = format!("$SYS._INBOX_.{}", shared.server_id);
+        for id in from..n {
+            let name = shared.accounts.name(id);
+            let to = format!("$SYS.REQ.ACCOUNT.{name}.CONNS");
+            let mut payload = b"{\"server\":".to_vec();
+            payload.extend(json::compact(&ServerInfo::of(&shared)));
+            payload.extend_from_slice(b",\"acc\":");
+            payload.extend(json::compact(&name));
+            payload.push(b'}');
+            let m = Pub {
+                subject: to.as_bytes(),
+                reply: Some(reply.as_bytes()),
+                headers: None,
+                payload: &payload,
+            };
+            crate::lane::inject(self.lane, &mut self.out, sys, &m);
+        }
+        n
+    }
+
+    /// Sends `CONNS` of account `id`: to `reply`, through the imports it
+    /// meets, if it has clients here; else on both of its subjects. Its
+    /// heartbeat in `beats` starts again.
+    async fn conns(&mut self, id: u32, reply: Option<&[u8]>, beats: &mut Beats) {
+        let shared = self.lane.shared.clone();
+        let Some(sys) = shared.system else {
+            return;
+        };
+        let Some(c) = crate::monitor::conns(&shared, id).await else {
+            return;
+        };
+        if reply.is_some() && c.clients == 0 {
+            return;
+        }
+        beats.sent(id, c.total, Instant::now());
+        let head = super::events::head(CONNS, std::time::SystemTime::now());
+        let tail = [&b","[..], &c.fields, b"}"].concat();
+        let numbered = |shared: &Shared| {
+            let info = json::compact(&ServerInfo::of(shared));
+            [&head[..], &info, &tail].concat()
+        };
+        if let Some(reply) = reply {
+            let m = Pub {
+                subject: reply,
+                reply: Some(b""),
+                headers: None,
+                payload: &numbered(&shared),
+            };
+            crate::lane::inject_through(self.lane, &mut self.out, sys, &m);
+            return;
+        }
+        let name = shared.accounts.name(id);
+        let old = format!("$SYS.SERVER.ACCOUNT.{name}.CONNS");
+        let new = format!("$SYS.ACCOUNT.{name}.SERVER.CONNS");
+        for to in [old, new] {
+            self.send(sys, to.as_bytes(), &numbered(&shared));
+        }
     }
 
     /// Sends `n`, numbered now.

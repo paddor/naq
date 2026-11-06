@@ -12,8 +12,8 @@ replies.
 - Core publish and subscribe: wildcards, queue groups, `UNSUB` maximums,
   headers, no responders. Clients over TCP, TLS (TLS first too) and
   WebSocket.
-- Accounts with stream and service imports between them, and a system
-  account.
+- Accounts with stream and service imports between them, connection
+  limits that hold across a cluster, and a system account.
 - Users with passwords, tokens, NKeys or TLS certificates, permissions,
   connection types, and auth callout.
 - Operator mode: JWTs of operators, accounts and users, with memory, full
@@ -33,7 +33,7 @@ replies.
   connections write what is left, as `nats-server`.
 - The server and account requests on `$SYS`, answered by every server of
   a cluster as `nats-server` answers them, and the imports every account
-  has of them.
+  has of them; the events of servers, connections and accounts there.
 
 A configuration key it does not serve is an error, not ignored.
 
@@ -42,8 +42,7 @@ A configuration key it does not serve is an error, not ignored.
 - JetStream. A naq leaf reaches the JetStream of its `nats-server` hub.
 - Routes to `nats-server`, gateways, and `nats-server` leaf nodes on a naq
   hub.
-- Config reload, lame duck mode, Prometheus metrics, and the events on
-  `$SYS`.
+- Config reload, lame duck mode, and Prometheus metrics.
 
 ## Usage
 

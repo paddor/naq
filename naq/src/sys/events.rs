@@ -114,7 +114,7 @@ pub(crate) fn closed(lane: &Lane, of: Of<'_>, close: Close, refused: Option<u32>
 
 /// The head of an event of type `kind` at `now`, as Go's `TypedEvent`,
 /// up to the block of the server that sends it.
-fn head(kind: &'static str, now: SystemTime) -> Vec<u8> {
+pub(super) fn head(kind: &'static str, now: SystemTime) -> Vec<u8> {
     let mut h = json::compact(&Typed {
         kind,
         id: super::event_id(),

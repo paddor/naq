@@ -3,7 +3,7 @@
 //! account, once added, stays where it is: readers hold no lock.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +11,9 @@ use rustc_hash::FxHashMap;
 
 use crate::imports::Imports;
 use crate::imports::service::Responses;
+
+/// The id of `$G`, the account of clients that name none.
+pub(crate) const GLOBAL: u32 = 0;
 
 /// Accounts in one chunk: ids share a chunk by all but their low 8 bits.
 pub(crate) const CHUNK: usize = 256;
@@ -60,8 +63,11 @@ pub(crate) struct Account {
     imports: OnceLock<Imports>,
     /// The requests this server sent into it through service imports.
     pub(crate) responses: Arc<Responses>,
-    /// The connections of its users of JWTs, by client id.
+    /// The clients logged in to it, by id.
     pub(crate) conns: Mutex<BTreeSet<u64>>,
+    /// The most clients it may have across the cluster: negative for no
+    /// limit.
+    limit: AtomicI64,
     /// Its loop detection subject on leaf node links.
     pub(crate) lds: String,
     /// When it was added or last updated, in nanoseconds since the epoch.
@@ -82,6 +88,7 @@ impl Account {
             imports: OnceLock::new(),
             responses: Arc::new(responses),
             conns: Mutex::default(),
+            limit: AtomicI64::new(-1),
             lds: crate::leaf::lds(),
             updated: AtomicU64::new(0),
         }
@@ -108,6 +115,20 @@ impl Account {
     pub(crate) fn updated(&self) -> SystemTime {
         // Relaxed: see `touch`.
         UNIX_EPOCH + Duration::from_nanos(self.updated.load(Ordering::Relaxed))
+    }
+
+    /// The most clients it may have across the cluster: negative for no
+    /// limit.
+    pub(crate) fn limit(&self) -> i64 {
+        // Relaxed: a login that sees the old limit is as one before the
+        // change.
+        self.limit.load(Ordering::Relaxed)
+    }
+
+    /// Sets the most clients it may have, as its JWT or the options say.
+    pub(crate) fn set_limit(&self, limit: i64) {
+        // Relaxed: see `limit`.
+        self.limit.store(limit, Ordering::Relaxed);
     }
 
     /// Its imports: none until they are set.

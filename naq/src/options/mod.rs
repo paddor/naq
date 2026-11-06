@@ -265,6 +265,9 @@ pub struct Account {
     pub exports: Vec<Export>,
     /// What it takes from other accounts (`imports`).
     pub imports: Vec<Import>,
+    /// The most clients it may have across the cluster (`limits {
+    /// max_connections }`); `None` for no limit.
+    pub max_connections: Option<u32>,
 }
 
 impl From<&str> for Account {

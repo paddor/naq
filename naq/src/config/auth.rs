@@ -67,6 +67,7 @@ pub(super) fn accounts(o: &mut Options, item: &Item) -> Result<(), Bad> {
                         "users" => found.extend(users(field, Some(name))?),
                         "exports" => account.exports = super::imports::exports(field)?,
                         "imports" => account.imports = super::imports::imports(field)?,
+                        "limits" => account.max_connections = limits(field, name)?,
                         k => {
                             return Err((
                                 field.line,
@@ -82,6 +83,23 @@ pub(super) fn accounts(o: &mut Options, item: &Item) -> Result<(), Bad> {
         }
         _ => Err((item.line, "accounts: expected a map or a list".into())),
     }
+}
+
+/// The `limits` of account `name`: the most connections it may have, if
+/// any. A negative number is no limit.
+fn limits(item: &Item, name: &str) -> Result<Option<u32>, Bad> {
+    let mut most = None;
+    for (key, v) in map(item, "limits")? {
+        let bad = |reason: &str| (v.line, format!("accounts: {name}: limits: {key}: {reason}"));
+        match key.to_ascii_lowercase().as_str() {
+            "max_connections" | "max_conn" => {
+                let n: i64 = super::int(v).ok_or_else(|| bad("expected a number"))?;
+                most = u32::try_from(n).ok();
+            }
+            _ => return Err(bad("not supported")),
+        }
+    }
+    Ok(most)
 }
 
 /// Adds `account`, unless it is reserved or there already.

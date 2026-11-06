@@ -396,6 +396,7 @@ impl Link<'_> {
             ));
             (hub.slot, hub.account, hub.perms.clone())
         };
+        crate::sys::conns_changed(self.shared, account);
         let said = self.said.borrow();
         let Some(said) = said.as_ref() else {
             return;
@@ -425,7 +426,8 @@ impl Link<'_> {
         let shared = self.shared;
         hub.heard
             .forget(&mut |ch| interest(shared, slot, account, perms, ch));
-        if std::mem::take(&mut hub.up) {
+        let was_up = std::mem::take(&mut hub.up);
+        if was_up {
             shared.log.info(format_args!(
                 "{}:{} - lid:{} - Leafnode connection closed: Client Closed - Remote: {}",
                 hub.host, hub.port, hub.link, hub.name
@@ -434,6 +436,9 @@ impl Link<'_> {
         drop(hubs);
         for tx in &*shared.lanes {
             tx.control(LaneControl::Unlink { slot });
+        }
+        if was_up {
+            crate::sys::conns_changed(shared, account);
         }
     }
 }

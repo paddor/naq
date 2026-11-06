@@ -3,6 +3,7 @@
 
 mod account;
 mod claims;
+mod conns;
 mod directory;
 mod encode;
 mod events;
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use naq_proto::client::Pub;
 use serde_json::Value;
 
+pub(crate) use conns::changed as conns_changed;
 pub(crate) use events::{Of, closed, connected};
 pub(crate) use send::last_word;
 pub(crate) use server::Z;
@@ -101,6 +103,8 @@ pub(crate) enum Service {
     Heard,
     /// Another server says it goes.
     Gone,
+    /// The connections of an account on another server.
+    Conns,
 }
 
 /// An event ID as `nats-server` makes them: 22 letters or digits.
@@ -146,6 +150,7 @@ pub(crate) fn install(lane: &Lane) {
     let mut index = lane.index(sys).borrow_mut();
     server::install(&mut index, &shared.server_id);
     remote::install(&mut index);
+    conns::install(&mut index, &shared.server_id);
     kick::install(&mut index, &shared.server_id);
     account::install(&mut index);
     if trust(shared).is_none() {
@@ -209,6 +214,7 @@ pub(crate) fn answer(
             .is_some_and(|d| d.lookups.answer(m.subject, m.payload)),
         Service::Heard => remote::statsz(lane, m),
         Service::Gone => remote::gone(lane, m),
+        Service::Conns => conns::heard(lane, m),
     }
 }
 

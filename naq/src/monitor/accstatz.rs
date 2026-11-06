@@ -295,18 +295,39 @@ pub(crate) async fn statz(
     (n, body)
 }
 
-/// What account `name` counts here, as `$SYS` tells it in `CONNS`: its
-/// clients, and its fields as JSON, without their braces. `None` for an
-/// account the server does not have.
-pub(crate) async fn conns(shared: &Shared, name: &str) -> Option<(usize, Vec<u8>)> {
-    let id = shared
-        .accounts
-        .id(name)
-        .filter(|_| accountz::in_use(shared, name))?;
-    let u = uses(shared, Which::One(id)).await.pop()?;
+/// What an account counts here, as `$SYS` tells it in `CONNS`.
+#[derive(Debug)]
+pub(crate) struct Conns {
+    /// Its clients.
+    pub(crate) clients: usize,
+    /// Its clients and links.
+    pub(crate) total: usize,
+    /// Its fields as JSON, without their braces.
+    pub(crate) fields: Vec<u8>,
+}
+
+/// What account `id` counts here, as `$SYS` tells it in `CONNS`: its
+/// clients those logged in to it. `None` for an account the server does
+/// not have.
+pub(crate) async fn conns(shared: &Shared, id: u32) -> Option<Conns> {
+    let name = &shared.accounts.get(id)?.name;
+    if !accountz::in_use(shared, name) {
+        return None;
+    }
+    let mut u = uses(shared, Which::One(id)).await.pop()?;
+    let account = shared.accounts.get(id)?;
+    // A client refused may be in it as it goes, not counted.
+    u.clients = account
+        .conns
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .len();
     let stat = super::json::compact(&AccountStat::of(shared, name, &u));
-    let inner = stat.get(1..stat.len() - 1)?.to_vec();
-    Some((u.clients, inner))
+    Some(Conns {
+        clients: u.clients,
+        total: u.clients + u.leafs,
+        fields: stat.get(1..stat.len() - 1)?.to_vec(),
+    })
 }
 
 #[derive(Debug, Serialize)]

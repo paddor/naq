@@ -384,6 +384,7 @@ impl Hub {
             heard_at: Instant::now(),
             carries,
         });
+        crate::sys::conns_changed(&self.shared, account);
     }
 
     /// Fills `told` with what `leaf`, bound to `account`, of permissions
@@ -452,6 +453,7 @@ impl Hub {
         for tx in &*shared.lanes {
             tx.control(LaneControl::Unlink { slot });
         }
+        crate::sys::conns_changed(shared, account);
         true
     }
 

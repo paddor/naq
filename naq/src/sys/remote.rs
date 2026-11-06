@@ -1,6 +1,6 @@
 //! The other servers a server hears from on `$SYS`, as `nats-server`
 //! tracks them: known by their `STATSZ`, forgotten once they say they go
-//! or fall quiet.
+//! or fall quiet, with the connections of each account they tell of.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -24,9 +24,37 @@ pub(super) const QUIET: Duration = Duration::from_secs(150);
 /// How often the servers are checked for those gone quiet.
 pub(super) const SWEEP: Duration = Duration::from_secs(90);
 
-/// The other servers heard from, by ID.
+/// The other servers heard from.
 #[derive(Debug, Default)]
-pub(crate) struct Remote(Mutex<FxHashMap<String, Seen>>);
+pub(crate) struct Remote(Mutex<Known>);
+
+/// What a server knows of the others.
+#[derive(Debug, Default)]
+struct Known {
+    /// By ID.
+    servers: FxHashMap<String, Seen>,
+    /// The connections of each account, by its id, then by the ID of the
+    /// server that told of them: none there for none.
+    accounts: FxHashMap<u32, FxHashMap<String, Counts>>,
+}
+
+impl Known {
+    /// Forgets server `id`: whether it knew it.
+    fn forget(&mut self, id: &str) -> bool {
+        self.accounts.retain(|_, by| {
+            by.remove(id);
+            !by.is_empty()
+        });
+        self.servers.remove(id).is_some()
+    }
+}
+
+/// The connections of an account on one server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Counts {
+    pub(super) clients: usize,
+    pub(super) leafs: usize,
+}
 
 /// The last message of a server.
 #[derive(Debug, Clone, Copy)]
@@ -49,7 +77,7 @@ pub(super) enum Heard {
 }
 
 impl Remote {
-    fn lock(&self) -> MutexGuard<'_, FxHashMap<String, Seen>> {
+    fn lock(&self) -> MutexGuard<'_, Known> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -57,7 +85,7 @@ impl Remote {
     /// `nats-server`'s `updateRemoteServer`, a message out of order does
     /// not count as a sign of life.
     pub(super) fn heard(&self, id: &str, seq: u64, now: Instant) -> Heard {
-        let mut all = self.lock();
+        let all = &mut self.lock().servers;
         let Some(seen) = all.get_mut(id) else {
             all.insert(id.to_owned(), Seen { seq, at: now });
             return Heard::New;
@@ -71,27 +99,51 @@ impl Remote {
 
     /// Forgets server `id`: whether it knew it.
     pub(super) fn forget(&self, id: &str) -> bool {
-        self.lock().remove(id).is_some()
+        self.lock().forget(id)
     }
 
     /// Forgets the servers not heard from in [`QUIET`] before `now`, and
     /// returns their IDs.
     pub(super) fn sweep(&self, now: Instant) -> Vec<String> {
-        let mut all = self.lock();
-        let quiet: Vec<String> = all
+        let mut known = self.lock();
+        let quiet: Vec<String> = known
+            .servers
             .iter()
             .filter(|(_, s)| now.saturating_duration_since(s.at) > QUIET)
             .map(|(id, _)| id.clone())
             .collect();
         for id in &quiet {
-            all.remove(id);
+            known.forget(id);
         }
         quiet
     }
 
     /// The number of servers known.
     pub(crate) fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().servers.len()
+    }
+
+    /// Notes what server `id` told of the connections of `account`. Each
+    /// message tells them all, so one out of order counts still, as in
+    /// `nats-server`.
+    pub(super) fn counted(&self, id: &str, account: u32, counts: Counts) {
+        let mut known = self.lock();
+        let by = known.accounts.entry(account).or_default();
+        if counts == Counts::default() {
+            by.remove(id);
+            if by.is_empty() {
+                known.accounts.remove(&account);
+            }
+        } else {
+            by.insert(id.to_owned(), counts);
+        }
+    }
+
+    /// The clients of `account` on the other servers.
+    pub(crate) fn conns(&self, account: u32) -> usize {
+        let known = self.lock();
+        let by = known.accounts.get(&account);
+        by.map_or(0, |by| by.values().map(|c| c.clients).sum())
     }
 }
 
@@ -216,6 +268,30 @@ mod tests {
             "late messages are no sign of life"
         );
         assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn the_clients_of_an_account_are_summed_until_their_servers_go() {
+        let r = Remote::default();
+        let t0 = Instant::now();
+        let n = |clients, leafs| Counts { clients, leafs };
+        r.heard("a", 1, t0);
+        r.counted("a", 4, n(2, 1));
+        r.counted("b", 4, n(3, 0));
+        r.counted("b", 5, n(1, 0));
+        assert_eq!(r.conns(4), 5);
+        r.counted("b", 4, n(1, 0));
+        assert_eq!(r.conns(4), 3, "each message tells them all");
+        assert!(r.forget("a"));
+        assert_eq!(r.conns(4), 1);
+        r.counted("b", 4, n(0, 0));
+        assert_eq!(r.conns(4), 0);
+        assert!(!r.forget("b"), "known by its counts alone");
+        assert_eq!(r.conns(5), 0, "forgotten with it");
+        r.heard("c", 1, t0);
+        r.counted("c", 4, n(1, 0));
+        r.sweep(t0 + QUIET + Duration::from_secs(1));
+        assert_eq!(r.conns(4), 0, "gone quiet");
     }
 
     #[test]

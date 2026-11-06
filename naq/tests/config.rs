@@ -192,6 +192,7 @@ fn users_tokens_and_accounts_come_from_their_blocks() {
         .parse()
         .unwrap();
     assert_eq!(names(&o), ["A", "B"]);
+    assert_eq!(o.accounts[0].max_connections, None);
     assert_eq!(o.auth_timeout, Duration::from_millis(500));
     assert_eq!(o.no_auth_user.as_deref(), Some("a"));
     let users: Vec<_> = o
@@ -308,6 +309,32 @@ fn auth_that_contradicts_itself_is_an_error() {
         ("accounts [1]\n", "accounts: expected names"),
         ("accounts: 1\n", "accounts: expected a map or a list"),
         ("accounts { A: 1 }\n", "accounts: expected a map"),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_account_s_limits_cap_its_connections() {
+    let o: Options = "accounts {\n  A { limits { max_connections: 2 } }\n  \
+                      B { limits { MAX_CONN: -1 } }\n  C { limits { max_conn: 0 } }\n}\n"
+        .parse()
+        .unwrap();
+    let most: Vec<_> = o.accounts.iter().map(|a| a.max_connections).collect();
+    assert_eq!(most, [Some(2), None, Some(0)]);
+    for (text, reason) in [
+        (
+            "accounts { A { limits { max_subs: 1 } } }\n",
+            "accounts: A: limits: max_subs: not supported",
+        ),
+        (
+            "accounts { A { limits { max_conn: x } } }\n",
+            "accounts: A: limits: max_conn: expected a number",
+        ),
+        ("accounts { A { limits: 1 } }\n", "limits: expected a map"),
     ] {
         match text.parse::<Options>() {
             Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),

@@ -12,7 +12,7 @@ use super::Service;
 use super::later::{Answer, Asked, later};
 use super::reply::{self, ApiError};
 use super::server::{self, CONNZ, FILTERS, JSZ, LEAFZ, SUBSZ, Z};
-use super::unmarshal::{self, Fields, Kind, Set};
+use super::unmarshal::{Fields, Kind, Set};
 use crate::conn::Client;
 use crate::imports::info::{self, ClientInfo};
 use crate::imports::service::Tap;
@@ -64,7 +64,7 @@ impl X {
     }
 
     /// The Go struct its body is read into.
-    const fn fields(self) -> Fields {
+    pub(super) const fn fields(self) -> Fields {
         let (name, keys): (&str, [&[(&str, Kind)]; 2]) = match self {
             X::Subsz => ("SubszEventOptions", [SUBSZ, FILTERS]),
             X::Connz => ("ConnzEventOptions", [CONNZ, FILTERS]),
@@ -93,7 +93,7 @@ pub(super) fn install(index: &mut Index) {
 }
 
 /// The account a request on `subject` is about: its token 4.
-fn account_of(subject: &[u8]) -> String {
+pub(super) fn account_of(subject: &[u8]) -> String {
     let token = subject.split(|&b| b == b'.').nth(3).unwrap_or_default();
     String::from_utf8_lossy(token).into_owned()
 }
@@ -102,6 +102,9 @@ fn account_of(subject: &[u8]) -> String {
 /// `None`, `$SYS.REQ.ACCOUNT.PING.STATZ`. A request without a reply is
 /// dropped.
 pub(super) fn take(lane: &Lane, x: Option<X>, m: &Pub<'_>) -> bool {
+    if x == Some(X::Conns) {
+        return super::conns::asked(lane, m);
+    }
     if m.reply.is_some_and(|r| !r.is_empty()) {
         later(lane, m, move |shared, asked| answer(shared, x, asked));
     }
@@ -113,9 +116,6 @@ pub(super) fn take(lane: &Lane, x: Option<X>, m: &Pub<'_>) -> bool {
 async fn answer(shared: Arc<Shared>, x: Option<X>, asked: Asked) -> Option<Answer> {
     let s = &*shared;
     let acc = account_of(&asked.subject);
-    if x == Some(X::Conns) {
-        return conns(s, &acc, asked).await;
-    }
     let fields = x.map_or(X::Statz.fields(), X::fields);
     let set = match server::options(s, &asked, &fields) {
         Ok(Some(set)) => set,
@@ -167,51 +167,6 @@ async fn statz(s: &Shared, asked: Asked, names: Option<&[String]>, set: &Set) ->
         return None;
     }
     server::answered(s, asked, Ok(data), false)
-}
-
-/// The answer to `CONNS` request `asked` about account `acc`: what it
-/// counts here, as the event of its connections, if it has clients here.
-async fn conns(s: &Shared, acc: &str, asked: Asked) -> Option<Answer> {
-    if !asked.body.is_empty() {
-        let fields = X::Conns.fields();
-        let named = unmarshal::decode(&asked.body, &fields);
-        let ok = named.as_ref().is_ok_and(|set| set.str("acc") == acc);
-        if !ok {
-            s.log.error(format_args!(
-                "Error unmarshalling account connections request message: {}",
-                named
-                    .err()
-                    .unwrap_or_else(|| "account does not match subject".into())
-            ));
-            return None;
-        }
-    }
-    let (clients, fields) = monitor::conns(s, acc).await?;
-    if clients == 0 {
-        return None;
-    }
-    let head = Head {
-        kind: "io.nats.server.advisory.v1.account_connections",
-        id: super::event_id(),
-        timestamp: crate::times::rfc3339_nano(SystemTime::now()),
-        server: reply::ServerInfo::of(s),
-    };
-    let mut payload = monitor::json::compact(&head);
-    payload.pop();
-    payload.push(b',');
-    payload.extend_from_slice(&fields);
-    payload.push(b'}');
-    Some(Answer::new(asked.reply, payload))
-}
-
-/// The head of an event, as Go's `TypedEvent`, and the server sending it.
-#[derive(Debug, Serialize)]
-struct Head<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    id: String,
-    timestamp: String,
-    server: reply::ServerInfo<'a>,
 }
 
 /// Takes user request `m`, which came on `lane` from client `from`, if a

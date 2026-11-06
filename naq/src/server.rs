@@ -1,8 +1,8 @@
 //! Starting and stopping a server: lanes, the listener, accepting clients.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use zzq_tokio::transport::{Listener, TransportOptions};
@@ -89,23 +89,38 @@ impl Shared {
         self.next_client.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Counts client `id` among the connections of `account`, unless it
-    /// has `limit` already; a negative limit is none.
-    pub(crate) fn count(&self, account: u32, id: u64, limit: i64) -> bool {
-        let Some(Ok(mut ids)) = self.accounts.get(account).map(|a| a.conns.lock()) else {
+    /// Counts client `id` among the connections of `account`, unless the
+    /// account has all it may across the cluster, as far as this server
+    /// knows.
+    pub(crate) fn count(&self, account: u32, id: u64) -> bool {
+        let Some(a) = self.accounts.get(account) else {
             return false;
         };
-        if usize::try_from(limit).is_ok_and(|l| ids.len() >= l) {
+        let limit = usize::try_from(a.limit()).ok();
+        // The others' first: the two locks do not nest.
+        let remote = limit.map_or(0, |_| self.sys.remote.conns(account));
+        let mut ids = a.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        if limit.is_some_and(|l| ids.len() + remote >= l) {
             return false;
         }
         ids.insert(id);
+        drop(ids);
+        crate::sys::conns_changed(self, account);
         true
     }
 
     /// Lets client `id` of `account` that [`Shared::count`] counted go.
     pub(crate) fn uncount(&self, account: u32, id: u64) {
-        if let Some(Ok(mut ids)) = self.accounts.get(account).map(|a| a.conns.lock()) {
-            ids.remove(&id);
+        let Some(a) = self.accounts.get(account) else {
+            return;
+        };
+        let gone = a
+            .conns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        if gone {
+            crate::sys::conns_changed(self, account);
         }
     }
 
@@ -115,9 +130,10 @@ impl Shared {
         let Ok(limit) = usize::try_from(limit) else {
             return true;
         };
-        let Some(Ok(ids)) = self.accounts.get(account).map(|a| a.conns.lock()) else {
+        let Some(a) = self.accounts.get(account) else {
             return true;
         };
+        let ids = a.conns.lock().unwrap_or_else(PoisonError::into_inner);
         ids.range(..id).count() < limit
     }
 
@@ -184,11 +200,11 @@ impl Server {
             server_id: keys.server.public_key(),
             keys,
             lanes: txs.into_boxed_slice(),
-            accounts: Arc::new(crate::accounts::Accounts::new(
+            accounts: Arc::new(new_accounts(
                 &accounts,
                 setup.imports,
                 setup.resolver.is_some(),
-                responses,
+                opts,
             )),
             resolver: setup.resolver,
             ws_auth: Auth::websocket(opts, auth.as_ref()),
@@ -281,6 +297,24 @@ impl Server {
     pub const fn leafnode_addr(&self) -> Option<SocketAddr> {
         self.mesh.leafnodes
     }
+}
+
+/// The accounts `names`, with `imports`, room for more if `growing`, and
+/// the connection limits `opts` give them.
+fn new_accounts(
+    names: &[String],
+    imports: Box<[crate::imports::Imports]>,
+    growing: bool,
+    opts: &Options,
+) -> crate::accounts::Accounts {
+    let accounts = crate::accounts::Accounts::new(names, imports, growing, responses);
+    for a in &opts.accounts {
+        let id = accounts.id(&a.name);
+        if let (Some(acc), Some(n)) = (id.and_then(|id| accounts.get(id)), a.max_connections) {
+            acc.set_limit(i64::from(n));
+        }
+    }
+    accounts
 }
 
 /// The engine context of the lanes `opts` ask for.

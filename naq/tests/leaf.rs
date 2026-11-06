@@ -2404,10 +2404,10 @@ fn the_system_account_hears_of_links_as_they_come_and_go() {
         w: s,
     };
     c.line();
-    // Its own CONNECT event goes before it subscribes.
+    // Its own events are in SYS: it may hear them still as it subscribes.
     c.send("CONNECT {\"user\":\"sys\",\"pass\":\"p\",\"verbose\":false}\r\nPING\r\n");
     assert_eq!(c.line(), "PONG");
-    c.send("SUB $SYS.ACCOUNT.*.CONNECT 1\r\nSUB $SYS.ACCOUNT.*.DISCONNECT 2\r\nPING\r\n");
+    c.send("SUB $SYS.ACCOUNT.$G.CONNECT 1\r\nSUB $SYS.ACCOUNT.$G.DISCONNECT 2\r\nPING\r\n");
     assert_eq!(c.line(), "PONG");
     let p = linked(&hub);
     let (subject, up) = message(&mut c);

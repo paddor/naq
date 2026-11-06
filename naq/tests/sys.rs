@@ -21,15 +21,15 @@ fn free_port() -> u16 {
 }
 
 /// Server `n<i>` of a cluster on `ports`, with a user `sys` of the system
-/// account and a user `a` of account `A`.
-fn member(i: usize, ports: &[u16]) -> Server {
+/// account and a user `a` of account `A`, which has `limits` too.
+fn member(i: usize, ports: &[u16], limits: &str) -> Server {
     let routes: Vec<String> = (0..ports.len())
         .filter(|&j| j != i)
         .map(|j| format!("\"nats-route://127.0.0.1:{}\"", ports[j]))
         .collect();
     let conf = format!(
         "server_name: n{i}\n\
-         accounts {{ SYS {{ users [{{user: sys, password: p}}] }}, A {{ users [{{user: a, password: p}}] }} }}\n\
+         accounts {{ SYS {{ users [{{user: sys, password: p}}] }}, A {{ users [{{user: a, password: p}}] {limits} }} }}\n\
          system_account: SYS\n\
          cluster {{ name: c, listen: \"127.0.0.1:{}\", routes: [{}] }}\n",
         ports[i],
@@ -46,8 +46,13 @@ fn member(i: usize, ports: &[u16]) -> Server {
 }
 
 fn cluster(n: usize) -> Vec<Server> {
+    limited(n, "")
+}
+
+/// A cluster of `n` servers, account `A` with `limits` on each.
+fn limited(n: usize, limits: &str) -> Vec<Server> {
     let ports: Vec<u16> = (0..n).map(|_| free_port()).collect();
-    (0..n).map(|i| member(i, &ports)).collect()
+    (0..n).map(|i| member(i, &ports, limits)).collect()
 }
 
 /// A user of the system account.
@@ -86,6 +91,23 @@ impl Sys {
 
     fn send(&mut self, text: &str) {
         self.w.write_all(text.as_bytes()).unwrap();
+    }
+
+    /// What the server sends until it closes the connection, in `WAIT`;
+    /// `PONG` once it logged in.
+    fn told(&mut self) -> String {
+        self.w.set_read_timeout(Some(WAIT)).unwrap();
+        let mut all = String::new();
+        loop {
+            let mut line = String::new();
+            if self.r.read_line(&mut line).unwrap_or(0) == 0 {
+                return all;
+            }
+            all += &line;
+            if line.starts_with("PONG") {
+                return all;
+            }
+        }
     }
 
     /// The answers to a request on `subject`, as many as come in `wait`
@@ -331,4 +353,69 @@ fn a_kick_by_server_id_closes_a_client_of_that_server() {
     let mut rest = String::new();
     let _ = far.r.read_to_string(&mut rest);
     assert!(!rest.contains("-ERR"), "{rest}");
+}
+
+const TOO_MANY: &str = "-ERR 'maximum account active connections exceeded'";
+
+#[test]
+fn an_account_s_clients_on_other_servers_count_against_its_limit() {
+    let servers = limited(2, "limits { max_connections: 2 }");
+    let mut c = Sys::new(servers[0].addr());
+    c.ask_all("$SYS.REQ.SERVER.PING.IDZ", 2);
+    c.send("SUB $SYS.SERVER.ACCOUNT.A.CONNS 2\r\nPING\r\n");
+    let mut far = Sys::of(servers[1].addr(), "a");
+    assert!(far.told().ends_with("PONG\r\n"));
+    let told = c.messages(1, WAIT, |s| s == "$SYS.SERVER.ACCOUNT.A.CONNS");
+    assert_eq!(told[0]["server"]["name"], "n1");
+    assert_eq!(told[0]["conns"], 1);
+    let mut near = Sys::of(servers[0].addr(), "a");
+    assert!(near.told().ends_with("PONG\r\n"), "one here and one there");
+    let mut over = Sys::of(servers[0].addr(), "a");
+    assert!(
+        over.told().starts_with(TOO_MANY),
+        "the third is one too many"
+    );
+}
+
+#[test]
+fn clients_past_the_limit_go_newest_first_until_the_others_leave() {
+    let opts: Options = "accounts {\n  SYS { users [{user: sys, password: p}] }\n  \
+                         A { users [{user: a, password: p}], limits { max_connections: 2 } }\n}\n\
+                         system_account: SYS\n"
+        .parse()
+        .unwrap();
+    let server = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        ..opts
+    })
+    .unwrap();
+    let mut old = Sys::of(server.addr(), "a");
+    let mut new = Sys::of(server.addr(), "a");
+    assert!(old.told().ends_with("PONG\r\n"));
+    assert!(new.told().ends_with("PONG\r\n"));
+    // Another server tells of a client of its own.
+    let mut c = Sys::new(server.addr());
+    let conns = r#"{"server":{"id":"NFAR","seq":1},"acc":"A","conns":1}"#;
+    c.send(&format!(
+        "PUB $SYS.SERVER.ACCOUNT.A.CONNS {}\r\n{conns}\r\nPING\r\n",
+        conns.len()
+    ));
+    assert!(new.told().starts_with(TOO_MANY), "the newest goes");
+    assert!(Sys::of(server.addr(), "a").told().starts_with(TOO_MANY));
+    old.send("PING\r\n");
+    assert_eq!(old.told(), "PONG\r\n", "the oldest stays");
+    let bye = r#"{"id":"NFAR","seq":2}"#;
+    c.send(&format!(
+        "PUB $SYS.SERVER.NFAR.SHUTDOWN {}\r\n{bye}\r\nPING\r\n",
+        bye.len()
+    ));
+    let deadline = Instant::now() + WAIT;
+    while !Sys::of(server.addr(), "a").told().ends_with("PONG\r\n") {
+        assert!(
+            Instant::now() < deadline,
+            "its clients are forgotten with it"
+        );
+    }
 }
