@@ -26,6 +26,26 @@ Notable changes to naq. The format follows
   `--max_traced_msg_len`), with `-flag=value` and `--flag` forms, and `-n`
   for the server name.
 - `naq`: `Options::config_file`, set by `Options::from_file`.
+- `naq`: `Server::shutdown`, as `nats-server` shuts down: no new
+  connections, then clients and hub links close with `Server Shutdown`
+  once their lane delivered what was sent to it, and get a few seconds to
+  write what is left.
+- `naq`: `Server::wait_for_signals`: `INT`, `TERM` and `USR2` shut the
+  server down, `USR1` opens the log file again, `HUP` is logged.
+- `naq`: `Options::pid_file` (`pid_file`, `-P`) and
+  `Options::ports_file_dir` (`ports_file_dir`, `--ports_file_dir`): the
+  process ID, and the URLs the server listens at, in a file removed as it
+  stops. `Error::Write` if they cannot be written.
+- `naq` binary: `--signal` (`stop`, `quit`, `term`, `reopen`, `reload`,
+  `ldm`, to a process ID, a pid file, or the one `naq` running), `-t`,
+  `-v`, `--user`, `--pass`, `--auth`, the `--tls*` flags, `--cluster`,
+  `--cluster_name` and `--routes`. Flags of `nats-server` naq does not
+  serve say so.
+
+### Changed
+
+- `naq` binary: a configuration it cannot use exits 1, as `nats-server`;
+  flags it cannot read exit 2.
 
 ### Fixed
 

@@ -130,7 +130,7 @@ fn takes_a_configuration_file_that_flags_override() {
         .args(["-c".as_ref(), conf.as_os_str()])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("bogus: not supported"));
     let out = Command::new(NAQ).arg("-c").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
@@ -246,4 +246,198 @@ fn takes_the_other_log_flags_of_nats_server() {
         }
     };
     assert!(ready.starts_with("<5>"), "{ready}");
+}
+
+/// Sends signal `sig` to process `pid` with `kill`.
+fn kill(sig: &str, pid: u32) {
+    let ok = Command::new("kill")
+        .args(["-s", sig, &pid.to_string()])
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "kill -s {sig} {pid}");
+}
+
+/// Reads lines from `r` until one contains `text`; returns them.
+fn until(r: &mut impl BufRead, text: &str) -> Vec<String> {
+    let mut seen = Vec::new();
+    loop {
+        let mut line = String::new();
+        assert!(
+            r.read_line(&mut line).unwrap() > 0,
+            "no {text:?} in {seen:#?}"
+        );
+        let found = line.contains(text);
+        seen.push(line);
+        if found {
+            return seen;
+        }
+    }
+}
+
+#[test]
+fn term_shuts_the_server_down_and_usr1_reopens_its_log() {
+    let dir = std::env::temp_dir().join(format!("naq-bin-sig-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("naq.log");
+    let mut child = Command::new(NAQ)
+        .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1", "-D"])
+        .args(["-l".as_ref(), log.as_os_str()])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let wait = |text: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let t = std::fs::read_to_string(&log).unwrap_or_default();
+            if t.contains(text) {
+                return t;
+            }
+            assert!(std::time::Instant::now() < deadline, "no {text:?} in {t}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let text = wait("Server is ready");
+    let (addr, _) = listening(&mut text.as_bytes());
+    std::fs::rename(&log, dir.join("old.log")).unwrap();
+    kill("USR1", pid);
+    wait("File log re-opened");
+    let mut c = TcpStream::connect(&addr).unwrap();
+    c.write_all(b"CONNECT {}\r\nPING\r\n").unwrap();
+    wait("Client connection created");
+    kill("TERM", pid);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    let text = std::fs::read_to_string(&log).unwrap();
+    for line in [
+        "[INF] Trapped \"terminated\" signal",
+        "[INF] Initiating Shutdown...",
+        "Client connection closed: Server Shutdown",
+        "[INF] Server Exiting..",
+    ] {
+        assert!(text.contains(line), "no {line:?} in {text}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn signal_sends_its_command_to_the_server_its_pid_file_names() {
+    let dir = std::env::temp_dir().join(format!("naq-bin-sl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("naq.pid");
+    let mut child = Command::new(NAQ)
+        .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1"])
+        .args(["-P".as_ref(), pid_file.as_os_str()])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut r = BufReader::new(child.stderr.take().unwrap());
+    until(&mut r, "Server is ready");
+    let reopen = format!("reopen={}", pid_file.display());
+    let out = Command::new(NAQ)
+        .args(["--signal", &reopen])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    until(&mut r, "File log re-open ignored, not a file logger");
+    let quit = format!("quit={}", child.id());
+    let out = Command::new(NAQ).args(["-sl", &quit]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    until(&mut r, "Trapped \"interrupt\" signal");
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    for (spec, err) in [
+        ("bogus=1", "naq: unknown signal \"bogus\""),
+        ("stop=x", "naq: invalid pid: x"),
+        ("stop=1=2", "naq: invalid signal parameters"),
+    ] {
+        let out = Command::new(NAQ).args(["--signal", spec]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{spec}");
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(text.starts_with(err), "{spec}: {text}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn version_help_and_checks_answer_without_a_server() {
+    let out = Command::new(NAQ).arg("-v").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("naq: v{}\n", env!("CARGO_PKG_VERSION"))
+    );
+    for args in [&["version"][..], &["--version"], &["help"], &["--help_tls"]] {
+        assert!(
+            Command::new(NAQ)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let dir = std::env::temp_dir().join(format!("naq-bin-t-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("good.conf");
+    std::fs::write(&conf, "port: 4333\n").unwrap();
+    let out = Command::new(NAQ)
+        .args(["-t", "-c"])
+        .arg(&conf)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("good.conf is valid (sha256:"), "{text}");
+    std::fs::write(&conf, "bogus: 1\n").unwrap();
+    let out = Command::new(NAQ)
+        .args(["-t", "-c"])
+        .arg(&conf)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let out = Command::new(NAQ).arg("-t").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    for (args, code) in [
+        (&["extra"][..], 2),
+        (&["-js"], 2),
+        (&["--tls"], 1),
+        (&["--tlscert", "c.pem"], 1),
+        (&["--routes", "nats://h:1"], 1),
+    ] {
+        let out = Command::new(NAQ).args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(code), "{args:?}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn auth_and_cluster_flags_set_what_they_name() {
+    let mut child = Command::new(NAQ)
+        .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1"])
+        .args([
+            "--user",
+            "u",
+            "--pass",
+            "p",
+            "--cluster",
+            "nats://127.0.0.1:-1",
+        ])
+        .args(["--cluster_name", "c", "--routes", ""])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut r = BufReader::new(child.stderr.take().unwrap());
+    let (addr, before) = listening(&mut r);
+    let proc = Proc(child);
+    assert!(
+        before.iter().any(|l| l.contains("Plaintext passwords")),
+        "{before:#?}"
+    );
+    until(&mut r, "Cluster name is c");
+    let mut c = TcpStream::connect(&addr).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"CONNECT {\"user\":\"u\",\"pass\":\"x\"}\r\nPING\r\n")
+        .unwrap();
+    let mut got = String::new();
+    let _ = c.read_to_string(&mut got);
+    assert!(got.contains("-ERR 'Authorization Violation'"), "{got}");
+    drop(proc);
 }

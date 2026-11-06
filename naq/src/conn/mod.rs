@@ -241,6 +241,8 @@ pub(crate) enum Close {
     SlowWrite(usize),
     /// A write to it failed.
     WriteError,
+    /// The server shuts down.
+    Shutdown,
     /// The client broke the protocol.
     Parse(ParseError),
     /// The `CONNECT` was not valid.
@@ -278,6 +280,7 @@ impl Close {
             Close::SlowPending => "Slow Consumer (Pending Bytes)",
             Close::SlowWrite(_) => "Slow Consumer (Write Deadline)",
             Close::WriteError => "Write Error",
+            Close::Shutdown => "Server Shutdown",
             Close::Parse(ParseError::MaxPayload(_)) => "Maximum Message Payload Exceeded",
             Close::Parse(ParseError::ControlLine) => "Maximum Control Line Exceeded",
             Close::Parse(_) | Close::Connect => "Parse Error",
@@ -595,6 +598,7 @@ impl Conn {
         self.lane.flush();
         self.client.ended.set(Some(close));
         self.client.close();
+        let _ending = self.lane.ending();
         if tokio::time::timeout(CLOSE_LINGER, &mut writer)
             .await
             .is_err()
@@ -625,6 +629,7 @@ const fn farewell(close: Close) -> Option<&'static str> {
         | Close::SlowPending
         | Close::SlowWrite(_)
         | Close::WriteError
+        | Close::Shutdown
         | Close::Connect
         | Close::Unsigned
         | Close::NoHeaders => None,

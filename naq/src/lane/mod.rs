@@ -69,6 +69,9 @@ pub(crate) enum Control {
     Refresh { account: u32 },
     /// Account `account` was added with imports: their taps go in.
     Imports { account: u32 },
+    /// The server shuts down: every client and link closes; answered once
+    /// they are gone, or after a while.
+    Shutdown(oneshot::Sender<()>),
     /// Answered with the lane's clients, for monitoring.
     Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
     /// The server in slot `server` has `weight` members in `subject` of
@@ -124,6 +127,11 @@ impl LaneTx {
     /// Hands the lane a control.
     pub(crate) fn control(&self, c: Control) {
         self.control.push(c);
+    }
+
+    /// Whether no batch waits for the lane: those it took, it delivered.
+    pub(crate) fn no_data(&self) -> bool {
+        self.data.is_empty()
     }
 }
 
@@ -201,9 +209,28 @@ pub(crate) struct Lane {
     pub(crate) imported: Cell<bool>,
     /// Account ids by name, as this lane met them.
     account_ids: RefCell<FxHashMap<Box<[u8]>, u32>>,
+    /// Connections that closed and are still writing what was left.
+    pub(crate) ending: Rc<Cell<usize>>,
+}
+
+/// A connection counted as ending on its lane, until dropped.
+#[derive(Debug)]
+pub(crate) struct Ending(Rc<Cell<usize>>);
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
 }
 
 impl Lane {
+    /// Counts a connection as ending until the guard drops: a shutdown
+    /// waits for it.
+    pub(crate) fn ending(&self) -> Ending {
+        self.ending.set(self.ending.get() + 1);
+        Ending(self.ending.clone())
+    }
+
     /// The interest in `account`, an id of the server's.
     #[inline]
     pub(crate) fn index(&self, account: u32) -> &RefCell<Index> {
@@ -378,6 +405,7 @@ impl Lane {
                     }
                 }
             }
+            Control::Shutdown(done) => crate::stop::lane(self, done),
             Control::Clients(answer) => {
                 let _ = answer.send(crate::monitor::conns(self));
             }
@@ -474,6 +502,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         taps: RefCell::default(),
         imported: Cell::new(false),
         account_ids: RefCell::default(),
+        ending: Rc::default(),
     });
     crate::imports::service::install(&lane);
     if let Some(c) = &lane.shared.callouts {

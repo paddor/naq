@@ -37,9 +37,10 @@ serde_json.workspace = true
 sha1_smol.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros", "signal"] }
 zzq-tokio.workspace = true
 omq-tokio.workspace = true
+nix.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

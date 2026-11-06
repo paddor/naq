@@ -86,6 +86,11 @@ impl<T> Mailbox<T> {
         }
     }
 
+    /// Whether nothing is queued.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.shared.lock().items.is_empty()
+    }
+
     /// Queues `item`, waiting while the mailbox is full. Drops it once the
     /// mailbox is closed.
     pub(crate) async fn send(&self, item: T) {

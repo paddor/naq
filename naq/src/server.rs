@@ -49,6 +49,8 @@ pub(crate) struct Shared {
     pub(crate) callouts: Option<crate::callout::Callouts>,
     /// Where the server logs to.
     pub(crate) log: crate::log::Log,
+    /// It shuts down: no new connections.
+    pub(crate) stopping: std::sync::atomic::AtomicBool,
     /// Message counts of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
     /// Slow consumers and stale clients so far.
@@ -129,13 +131,15 @@ impl Shared {
     }
 }
 
-/// A running server. Dropping it stops the server and closes its
-/// connections.
+/// A running server. Dropping it stops the server at once and drops its
+/// connections; [`Server::shutdown`] lets them close first.
 #[derive(Debug)]
 pub struct Server {
     // Held, not used: the lanes stop when the last clone drops.
     _ctx: Context,
     shared: Arc<Shared>,
+    /// The ports file it wrote, removed as it stops.
+    ports: Option<std::path::PathBuf>,
     addr: SocketAddr,
     monitor: Option<SocketAddr>,
     websocket: Option<SocketAddr>,
@@ -151,19 +155,15 @@ impl Server {
     /// the TLS certificates or key cannot be read,
     /// [`Error::Lanes`] if the lane threads cannot start,
     /// [`Error::Listen`] if the client, WebSocket or monitoring port cannot
-    /// be bound.
+    /// be bound, [`Error::Log`] if the log cannot be opened,
+    /// [`Error::Write`] if the process ID or ports file cannot be written.
     pub fn start(opts: &Options) -> Result<Server, Error> {
         let setup = check(opts)?;
         let log = crate::log::Log::new(&opts.log).map_err(Error::Log)?;
         let accounts = auth::accounts(opts);
         let system = auth::system(opts, &accounts);
         let auth = Auth::new(opts, &accounts);
-        let ctx = Context::with_config(&Config {
-            io_threads: lanes(opts.lanes),
-            name: "naq".into(),
-            ..Config::default()
-        })
-        .map_err(|e| Error::Lanes(io(e)))?;
+        let ctx = context(opts)?;
         let (ports, at) = bind_all(&ctx, opts)?;
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
         let keys = Keys::new();
@@ -190,6 +190,7 @@ impl Server {
             ws_auth: Auth::websocket(opts, auth.as_ref()),
             auth,
             log,
+            stopping: std::sync::atomic::AtomicBool::new(false),
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
             events: stats::Events::default(),
             started: std::time::SystemTime::now(),
@@ -203,10 +204,11 @@ impl Server {
             next_client: AtomicU64::new(1),
         });
         let mesh = run(&ctx, &shared, rxs, ports)?;
-        log_start(&shared, &at, &mesh);
+        let ports = announce(&shared, &at, &mesh)?;
         Ok(Server {
             _ctx: ctx,
             shared,
+            ports,
             addr: at.client,
             monitor: at.monitor,
             websocket: at.ws,
@@ -214,10 +216,45 @@ impl Server {
         })
     }
 
+    /// Stops the server as `nats-server` does: it takes no more
+    /// connections, closes those it has with `Server Shutdown`, lets them
+    /// write what is left for a few seconds, then stops its lanes.
+    ///
+    /// # Panics
+    ///
+    /// Called from within an async runtime, which it would block.
+    pub fn shutdown(self) {
+        crate::stop::server(&self.shared);
+    }
+
+    /// Serves until a signal stops it, and shuts it down, as
+    /// `nats-server` handles signals: `INT`, `TERM` and `USR2` stop it,
+    /// `USR1` opens the log file again, `HUP` is logged.
+    ///
+    /// # Errors
+    ///
+    /// The signal handlers cannot be installed.
+    ///
+    /// # Panics
+    ///
+    /// Called from within an async runtime.
+    pub fn wait_for_signals(self) -> std::io::Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(crate::signals::wait(&self))?;
+        self.shutdown();
+        Ok(())
+    }
+
     /// Opens the log file again at its path, as after another tool moved
     /// it away. Without a log file, it logs that it did nothing.
     pub fn reopen_log(&self) {
         self.shared.log.reopen();
+    }
+
+    pub(crate) fn log(&self) -> &crate::log::Log {
+        &self.shared.log
     }
 
     /// Where clients connect.
@@ -247,8 +284,23 @@ impl Server {
     }
 }
 
-/// Logs the start of `shared`, bound at `at` and `mesh`.
-fn log_start(shared: &Shared, at: &Addrs, mesh: &crate::mesh::Bound) {
+/// The engine context of the lanes `opts` ask for.
+fn context(opts: &Options) -> Result<Context, Error> {
+    Context::with_config(&Config {
+        io_threads: lanes(opts.lanes),
+        name: "naq".into(),
+        ..Config::default()
+    })
+    .map_err(|e| Error::Lanes(io(e)))
+}
+
+/// Logs the start of `shared`, bound at `at` and `mesh`, and writes its
+/// process ID and ports files. Returns the ports file.
+fn announce(
+    shared: &Shared,
+    at: &Addrs,
+    mesh: &crate::mesh::Bound,
+) -> Result<Option<std::path::PathBuf>, Error> {
     let bound = crate::log::banner::Bound {
         client: at.client,
         monitor: at.monitor,
@@ -257,6 +309,28 @@ fn log_start(shared: &Shared, at: &Addrs, mesh: &crate::mesh::Bound) {
         cluster: mesh.cluster,
     };
     crate::log::banner::log(shared, &bound);
+    let o = &shared.opts;
+    let write = |path: &std::path::Path| {
+        let path = path.display().to_string();
+        move |source| Error::Write { path, source }
+    };
+    if let Some(p) = &o.pid_file {
+        crate::files::pid(p).map_err(write(p))?;
+    }
+    let Some(dir) = &o.ports_file_dir else {
+        return Ok(None);
+    };
+    crate::files::ports(dir, o, &bound)
+        .map(Some)
+        .map_err(write(dir))
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if let Some(p) = &self.ports {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// The WebSocket port of `opts`, bound at `addr`, with TLS `tls`.
@@ -539,6 +613,9 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
                 continue;
             }
         };
+        if crate::stop::stopping(&shared) {
+            return;
+        }
         let lane = &lanes[next % lanes.len()];
         next += 1;
         let (s, index) = (shared.clone(), lane.index());

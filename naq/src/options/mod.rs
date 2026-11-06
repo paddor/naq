@@ -105,6 +105,12 @@ pub struct Options {
     /// The configuration file the options came from, as
     /// [`Options::from_file`] sets it.
     pub config_file: Option<std::path::PathBuf>,
+    /// Where the server writes its process ID as it starts (`pid_file`).
+    pub pid_file: Option<std::path::PathBuf>,
+    /// Where the server writes the URLs it listens at as it starts, in a
+    /// file of the program's name and process ID, removed as it stops
+    /// (`ports_file_dir`).
+    pub ports_file_dir: Option<std::path::PathBuf>,
 }
 
 /// Where the JWTs of accounts come from (`resolver`).
@@ -540,6 +546,8 @@ impl Default for Options {
             websocket: None,
             log: Logging::default(),
             config_file: None,
+            pid_file: None,
+            ports_file_dir: None,
         }
     }
 }

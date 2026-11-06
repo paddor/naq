@@ -26,6 +26,8 @@ replies.
 - Monitoring: `/healthz`, `/varz`, `/connz`, `/routez` and `/leafz`.
 - Logs as `nats-server` writes them, to stderr, a file (rotated by size)
   or a syslog, with debug lines and protocol traces on request.
+- Signals, `--signal`, pid and ports files, and a shutdown that lets
+  connections write what is left, as `nats-server`.
 
 A configuration key it does not serve is an error, not ignored.
 
@@ -34,8 +36,8 @@ A configuration key it does not serve is an error, not ignored.
 - JetStream. A naq leaf reaches the JetStream of its `nats-server` hub.
 - Routes to `nats-server`, gateways, and `nats-server` leaf nodes on a naq
   hub.
-- Config reload, lame duck mode, signals, Prometheus metrics, and most
-  `$SYS` requests and events.
+- Config reload, lame duck mode, Prometheus metrics, and most `$SYS`
+  requests and events.
 
 ## Usage
 

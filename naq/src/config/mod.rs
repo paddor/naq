@@ -17,9 +17,6 @@ use parse::{Item, Map, Value};
 
 use crate::{Error, Options};
 
-/// Keys of `nats-server` naq does without.
-const IGNORED: &[&str] = &["pidfile", "pid_file"];
-
 impl Options {
     /// Reads a `nats-server` configuration file. Keys it leaves out keep
     /// their default; keys naq does not serve yet are an error.
@@ -153,7 +150,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }
-            k if IGNORED.contains(&k) => {}
+            "pid_file" | "pidfile" | "ports_file_dir" => files(o, &key, item)?,
             _ => return Err(bad("not supported")),
         }
     }
@@ -226,6 +223,17 @@ pub(super) fn seconds(v: &Item) -> Result<Duration, String> {
         Value::Float(f) => Duration::try_from_secs_f64(f).map_err(|_| "expected seconds".into()),
         _ => duration(v),
     }
+}
+
+/// `pid_file` and `ports_file_dir`: where the server writes of itself.
+fn files(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    let path = string(item).ok_or_else(|| (item.line, format!("{key}: expected a path")))?;
+    if key == "ports_file_dir" {
+        o.ports_file_dir = Some(path.into());
+    } else {
+        o.pid_file = Some(path.into());
+    }
+    Ok(())
 }
 
 pub(super) fn string(item: &Item) -> Option<String> {

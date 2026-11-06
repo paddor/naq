@@ -227,7 +227,7 @@ pub(super) fn closing(why: Option<Close>) -> (u16, &'static str) {
         | Close::Revoked => frame::POLICY,
         Close::Parse(_) | Close::Connect | Close::NoHeaders => frame::PROTOCOL_ERROR,
         Close::Refused(text) if text == conn::BAD_PROTOCOL => frame::PROTOCOL_ERROR,
-        Close::Stale | Close::WriteError => frame::GOING_AWAY,
+        Close::Stale | Close::WriteError | Close::Shutdown => frame::GOING_AWAY,
         Close::Refused(_) | Close::Kicked => frame::INTERNAL,
     };
     (status, why.reason())

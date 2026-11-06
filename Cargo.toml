@@ -58,6 +58,7 @@ sha2 = { version = "0.10", default-features = false }
 tokio = { version = "1.53", default-features = false }
 zzq-tokio = { version = "=0.6.0", default-features = false }
 omq-tokio = { version = "=0.34.3", default-features = false }
+nix = { version = "0.31", default-features = false, features = ["signal"] }
 thiserror = { version = "2.0", default-features = false }
 
 [profile.release]

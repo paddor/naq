@@ -37,6 +37,7 @@ mod callout;
 mod config;
 mod conn;
 mod error;
+mod files;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -53,7 +54,9 @@ mod options;
 mod perms;
 mod resolver;
 mod server;
+mod signals;
 mod stats;
+mod stop;
 mod sys;
 mod tls;
 mod ws;

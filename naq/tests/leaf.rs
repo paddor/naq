@@ -2086,3 +2086,89 @@ fn a_member_two_links_away_gets_its_pick_once() {
     );
     assert_eq!(got.iter().filter(|l| *l == "end").count(), 1, "{got:?}");
 }
+
+#[test]
+fn a_shutdown_closes_the_link_and_logs_it_and_its_start() {
+    let hub = Hub::new();
+    let dir = std::env::temp_dir().join(format!("naq-leaf-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("leaf.log");
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        server_name: "l".into(),
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://127.0.0.1:{}", hub.port())],
+            ..Remote::default()
+        }],
+        log: naq::Logging {
+            to: Some(naq::LogTo::File(log.clone())),
+            debug: true,
+            time: false,
+            ..naq::Logging::default()
+        },
+        ..Options::default()
+    })
+    .unwrap();
+    let mut p = linked(&hub);
+    s.shutdown();
+    assert!(p.closed(), "the link stays");
+    assert!(
+        hub.accept_within(Duration::from_millis(200)).is_none(),
+        "dialed again"
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    let at = format!("127.0.0.1:{} - lid:", hub.port());
+    for line in [
+        "Trying to connect as leafnode to remote server on",
+        "Leafnode connection created for account: $G ",
+        "Leafnode connection closed: Server Shutdown - Remote: ",
+    ] {
+        assert!(text.contains(line), "no {line:?} in {text}");
+    }
+    assert!(text.contains(&at), "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_hub_that_cannot_be_reached_is_logged_with_each_attempt() {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dir = std::env::temp_dir().join(format!("naq-leaf-dial-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("leaf.log");
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        leaf_reconnect: Duration::from_millis(20),
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://127.0.0.1:{port}")],
+            ..Remote::default()
+        }],
+        log: naq::Logging {
+            to: Some(naq::LogTo::File(log.clone())),
+            time: false,
+            ..naq::Logging::default()
+        },
+        ..Options::default()
+    })
+    .unwrap();
+    let deadline = Instant::now() + WAIT;
+    let want = format!(
+        "[ERR] Error trying to connect as leafnode to remote server \"127.0.0.1:{port}\" (attempt 2): "
+    );
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains(&want)
+    {
+        assert!(Instant::now() < deadline, "no second attempt logged");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(s);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

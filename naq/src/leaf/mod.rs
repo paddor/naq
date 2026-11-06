@@ -223,6 +223,9 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
         let Some(url) = urls.pop_front() else {
             return;
         };
+        if crate::stop::stopping(&lane.shared) {
+            return;
+        }
         urls.push_back(url.clone());
         let at = format!("{}:{}", url.host, url.port);
         let log = &lane.shared.log;
