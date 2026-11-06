@@ -113,6 +113,9 @@ where
     F: FnOnce(Arc<Shared>, Asked) -> Fut + 'static,
     Fut: Future<Output = Option<Answer>> + 'static,
 {
+    if lane.shared.sys.quiet() {
+        return;
+    }
     let Some(turn) = Turn::take(&lane.shared) else {
         return;
     };
@@ -149,6 +152,9 @@ pub(crate) async fn send(lane: &Rc<Lane>, a: &Answer) {
 /// Sends `a` from `lane` in account `sys` with `out`, as `nats-server`
 /// sends its own messages: with an empty reply.
 pub(crate) fn send_now(lane: &Lane, out: &mut Outs, sys: u32, a: &Answer) {
+    if lane.shared.sys.quiet() {
+        return;
+    }
     let m = Pub {
         subject: &a.to,
         reply: Some(b""),

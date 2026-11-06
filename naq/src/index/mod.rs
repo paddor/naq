@@ -375,6 +375,21 @@ impl Index {
             .is_some_and(|i| i.taps.iter().any(has))
     }
 
+    /// Whether anything but the server's own services takes `subject`: a
+    /// subscription anywhere, or an import.
+    pub(crate) fn wanted(&self, subject: &[u8]) -> bool {
+        let wants = |i: &Interest| {
+            !i.plain.is_empty()
+                || !i.queues.is_empty()
+                || i.taps.iter().any(|t| !matches!(t, Tap::Sys(_)))
+        };
+        match self.matches(subject) {
+            None => false,
+            Some(Found::One(i)) => wants(i),
+            Some(Found::Many(found)) => found.iter().any(wants),
+        }
+    }
+
     /// Removes subscription `sid` of client `id`.
     pub(crate) fn remove(&mut self, filter: &[u8], queue: Option<&[u8]>, id: u64, sid: &[u8]) {
         self.drop_local(filter, queue, |e| {
@@ -763,6 +778,20 @@ mod tests {
         }
         assert!(idx.wild.is_empty());
         assert_eq!(idx.changes(), (4, 4));
+    }
+
+    #[test]
+    fn only_interest_beyond_the_server_s_own_services_is_wanted() {
+        let mut idx = Index::default();
+        let ping = crate::sys::Service::Ping;
+        idx.tap(b"$SYS.SERVER.*.STATSZ", Tap::Sys(ping));
+        assert!(!idx.wanted(b"$SYS.SERVER.x.STATSZ"), "its own tap only");
+        idx.remote(b"$SYS.>", None, 1, true);
+        assert!(idx.wanted(b"$SYS.SERVER.x.STATSZ"), "another lane's");
+        assert!(!idx.wanted(b"other"));
+        let mut q = Index::default();
+        q.insert(b"a", Some(b"g"), Entry::new(Rc::new(Client::new(1)), b"1"));
+        assert!(q.wanted(b"a"), "a queue group");
     }
 
     #[test]

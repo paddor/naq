@@ -94,7 +94,7 @@ pub(crate) async fn statsz(shared: &Shared) -> ServerStats {
             pending: 0,
         })
         .collect();
-    let active_servers = routes.len() + 1;
+    let active_servers = shared.sys.remote.len() + 1;
     ServerStats {
         start: rfc3339_nano(shared.started),
         mem,

@@ -86,6 +86,16 @@ impl<T> Mailbox<T> {
         }
     }
 
+    /// Queues `item` unless the mailbox is full or closed: whether it did.
+    pub(crate) fn offer(&self, item: T) -> bool {
+        let st = self.shared.lock();
+        if st.closed || st.items.len() >= self.shared.cap {
+            return false;
+        }
+        self.shared.put(st, item);
+        true
+    }
+
     /// Whether nothing is queued.
     pub(crate) fn is_empty(&self) -> bool {
         self.shared.lock().items.is_empty()
@@ -201,6 +211,19 @@ mod tests {
         assert!(matches!(sent, Ok(Ok(()))), "closing frees the sender");
         tx.push(item.clone());
         assert_eq!(Arc::strong_count(&item), 1, "nothing kept");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_offer_to_a_full_or_closed_mailbox_is_dropped() {
+        let (tx, rx) = mailbox::<u32>(2);
+        assert!(tx.offer(1) && tx.offer(2));
+        assert!(!tx.offer(3), "full");
+        let mut got = Vec::new();
+        assert!(rx.recv_all(&mut got).await);
+        assert_eq!(got, [1, 2]);
+        assert!(tx.offer(4), "room again");
+        drop(rx);
+        assert!(!tx.offer(5), "closed");
     }
 
     #[tokio::test(flavor = "current_thread")]

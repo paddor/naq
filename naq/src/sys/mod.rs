@@ -7,15 +7,18 @@ mod directory;
 mod encode;
 mod kick;
 mod later;
+mod remote;
 mod reply;
+mod send;
 mod server;
 mod unmarshal;
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use naq_proto::client::Pub;
 use serde_json::Value;
 
+pub(crate) use send::last_word;
 pub(crate) use server::Z;
 
 use crate::imports::service::Tap;
@@ -32,6 +35,12 @@ pub(crate) struct State {
     seq: AtomicU64,
     /// The requests it answers now.
     busy: later::Busy,
+    /// What it sends on its own, through the sender on lane 0.
+    pub(crate) outbox: send::Outbox,
+    /// The other servers it heard from.
+    pub(crate) remote: remote::Remote,
+    /// It said its last word: it answers no more.
+    quiet: AtomicBool,
 }
 
 impl State {
@@ -41,7 +50,16 @@ impl State {
             node,
             seq: AtomicU64::new(0),
             busy: later::Busy::default(),
+            outbox: send::Outbox::new(),
+            remote: remote::Remote::default(),
+            quiet: AtomicBool::new(false),
         }
+    }
+
+    /// Whether it said its last word.
+    fn quiet(&self) -> bool {
+        // Relaxed: see `send::Sender::farewell`.
+        self.quiet.load(Ordering::Relaxed)
     }
 }
 
@@ -77,6 +95,10 @@ pub(crate) enum Service {
     Packed,
     /// Answers to the lookups of JWTs this server sent the others.
     Lookups,
+    /// `STATSZ` of another server.
+    Heard,
+    /// Another server says it goes.
+    Gone,
 }
 
 /// An event ID as `nats-server` makes them: 22 letters or digits.
@@ -118,8 +140,10 @@ pub(crate) fn install(lane: &Lane) {
     let Some(sys) = shared.system else {
         return;
     };
+    send::start(lane);
     let mut index = lane.index(sys).borrow_mut();
     server::install(&mut index, &shared.server_id);
+    remote::install(&mut index);
     kick::install(&mut index, &shared.server_id);
     account::install(&mut index);
     if trust(shared).is_none() {
@@ -181,6 +205,8 @@ pub(crate) fn answer(
             .resolver
             .as_ref()
             .is_some_and(|d| d.lookups.answer(m.subject, m.payload)),
+        Service::Heard => remote::statsz(lane, m),
+        Service::Gone => remote::gone(lane, m),
     }
 }
 

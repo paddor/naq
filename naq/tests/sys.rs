@@ -176,11 +176,67 @@ fn every_server_of_a_cluster_answers_a_ping() {
         .iter()
         .map(|s| {
             let name = s["server"]["name"].as_str().unwrap().to_owned();
-            assert_eq!(s["statsz"]["active_servers"], 3);
             (name, s["statsz"]["routes"].as_array().unwrap().len())
         })
         .collect();
     assert_eq!(routes.values().collect::<Vec<_>>(), [&2, &2, &2]);
+}
+
+/// The `STATSZ` of the `n` servers that answer `c`, once each of them
+/// counts `active` servers.
+fn until_active(c: &mut Sys, n: usize, active: u64) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let all = c.ask("$SYS.REQ.SERVER.PING", n, Duration::from_millis(500));
+        let counted = all
+            .iter()
+            .filter(|s| s["statsz"]["active_servers"] == active)
+            .count();
+        if counted == n {
+            return all;
+        }
+        assert!(Instant::now() < deadline, "{all:?}");
+    }
+}
+
+#[test]
+fn servers_of_a_cluster_track_each_other_until_one_says_it_goes() {
+    let mut servers = cluster(3);
+    let mut c = Sys::new(servers[0].addr());
+    until_active(&mut c, 3, 3);
+    c.send("SUB $SYS.SERVER.*.SHUTDOWN 2\r\nPING\r\n");
+    let gone = servers.pop().unwrap();
+    let id = Sys::new(gone.addr()).server_id;
+    gone.shutdown();
+    let farewell = c.messages(1, WAIT, |s| s == format!("$SYS.SERVER.{id}.SHUTDOWN"));
+    assert_eq!(farewell[0]["name"], "n2", "the block of the server alone");
+    assert_eq!(farewell[0]["id"], id.as_str());
+    // The others forget it at once: they need not wait until it is quiet.
+    let left = c.ask("$SYS.REQ.SERVER.PING", 2, Duration::from_secs(1));
+    assert_eq!(names(&left, "/server/name"), ["n0", "n1"]);
+    for s in &left {
+        assert_eq!(s["statsz"]["active_servers"], 2, "{s}");
+    }
+}
+
+#[test]
+fn a_server_alone_sends_its_heartbeat_once_someone_listens() {
+    let opts: Options = "accounts { SYS { users [{user: sys, password: p}] } }\n\
+                         system_account: SYS\n"
+        .parse()
+        .unwrap();
+    let server = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        ..opts
+    })
+    .unwrap();
+    let mut c = Sys::new(server.addr());
+    c.send("SUB $SYS.SERVER.*.STATSZ 2\r\nPING\r\n");
+    let beat = c.messages(1, WAIT, |s| s.ends_with(".STATSZ"));
+    assert_eq!(beat.len(), 1, "a heartbeat");
+    assert_eq!(beat[0]["server"]["id"], c.server_id.as_str());
+    assert_eq!(beat[0]["statsz"]["active_servers"], 1);
 }
 
 #[test]

@@ -10,6 +10,7 @@ use serde::Serialize;
 use super::Service;
 use super::later::{Answer, Asked, later, send_now};
 use super::reply::{self, ApiError, ServerInfo};
+use super::send::{Event, Note};
 use super::unmarshal::{self, Fields, Kind, Set};
 use crate::imports::service::Tap;
 use crate::index::Index;
@@ -364,7 +365,8 @@ pub(super) fn take(lane: &Lane, out: &mut Outs, z: Z, m: &Pub<'_>) -> bool {
                 );
             }
         }
-        (Z::Statsz, _) => later(lane, m, statsz),
+        (Z::Statsz, Some(_)) => later(lane, m, statsz),
+        (Z::Statsz, None) => broadcast_asked(&lane.shared, m.payload),
         (_, Some(_)) => later(lane, m, move |shared, asked| answer(shared, z, asked)),
         (_, None) => {}
     }
@@ -398,23 +400,48 @@ pub(super) fn options(
     }
 }
 
-/// The answer to `STATSZ` request `asked`, to its reply or, without one,
-/// on the server's own `STATSZ` subject.
-async fn statsz(shared: Arc<Shared>, mut asked: Asked) -> Option<Answer> {
+/// The answer to `STATSZ` request `asked`.
+async fn statsz(shared: Arc<Shared>, asked: Asked) -> Option<Answer> {
     let s = &*shared;
-    if asked.reply.is_empty() {
-        asked.reply = format!("$SYS.SERVER.{}.STATSZ", s.server_id).into_bytes();
-    }
     match options(s, &asked, &Z::Statsz.fields()) {
         Ok(Some(_)) => {}
         Ok(None) => return None,
         Err(a) => return Some(a),
     }
-    let body = json::compact(&Statsz {
+    Some(Answer::new(asked.reply, broadcast(s).await))
+}
+
+/// Takes a `STATSZ` request without a reply, with `body`: the server
+/// broadcasts `STATSZ` at once, past the rate limit, unless the filters
+/// pass it by; the error of a body it cannot read goes out on the
+/// broadcast subject.
+fn broadcast_asked(s: &Shared, body: &[u8]) {
+    let Some(sys) = s.system else {
+        return;
+    };
+    let event = if body.is_empty() {
+        Event::Statsz { forced: true }
+    } else {
+        match unmarshal::decode(body, &Z::Statsz.fields()) {
+            Ok(set) if wanted(s, &set) => Event::Statsz { forced: true },
+            Ok(_) => return,
+            Err(why) => {
+                let to = format!("$SYS.SERVER.{}.STATSZ", s.server_id).into_bytes();
+                Event::Note(Note::error(sys, to, &ApiError::new(400, why)))
+            }
+        }
+    };
+    s.sys.outbox.post(event);
+}
+
+/// The `STATSZ` message of `s`, as it is now: the counts taken first,
+/// then the server block, numbered.
+pub(super) async fn broadcast(s: &Shared) -> Vec<u8> {
+    let statsz = monitor::statsz(s).await;
+    json::compact(&Statsz {
         server: ServerInfo::of(s),
-        statsz: monitor::statsz(s).await,
-    });
-    Some(Answer::new(asked.reply, body))
+        statsz,
+    })
 }
 
 /// A `STATSZ` message, as Go's `ServerStatsMsg`.

@@ -85,6 +85,10 @@ Notable changes to naq. The format follows
 - `naq`: `Options::server_tags` (`server_tags`) and
   `Options::server_metadata` (`server_metadata`), shown in `/varz` and on
   `$SYS`.
+- `naq`: the `STATSZ` heartbeat on `$SYS.SERVER.<id>.STATSZ`, timed as
+  `nats-server` times it, and `SHUTDOWN` as the server stops. Servers of a
+  cluster know each other from these: `active_servers` counts those heard
+  from, until they say they go or fall quiet.
 
 ### Changed
 
