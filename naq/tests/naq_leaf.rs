@@ -1239,3 +1239,35 @@ fn a_leaf_of_an_importer_hears_of_its_services_and_gets_their_responses() {
     while line(&mut req) != "MSG inbox 1 2" {}
     assert_eq!(line(&mut req), "ok");
 }
+
+#[test]
+fn a_side_with_plain_and_queue_interest_gets_a_message_once_for_each() {
+    let h = hub("hub");
+    // Its denies hold back what the link may not carry.
+    let l = Server::start(&Options {
+        remotes: vec![Remote {
+            deny_imports: vec!["secret".into()],
+            ..naq_remote(h.leafnode_addr().unwrap().port())
+        }],
+        ..base("leaf")
+    })
+    .unwrap();
+    leafz(&h, |z| z["leafnodes"] == 1);
+    for (here, there) in [(&h, &l), (&l, &h)] {
+        let mut sub = client(there, "SUB * 1\r\n");
+        let mut member = client(there, "SUB * q 1\r\n");
+        hears(here, "*");
+        let mut p = client(here, "");
+        // The member's interest came last: once it gets one, both do.
+        until_heard(&mut p, &mut member, "c");
+        send(&mut p, "PUB c 1\r\nx\r\nPUB c 3\r\nend\r\n");
+        for c in [&mut sub, &mut member] {
+            let mut got = Vec::new();
+            while got.last().is_none_or(|l| l != "end") {
+                got.push(line(c));
+            }
+            let x = got.iter().filter(|l| *l == "x").count();
+            assert_eq!(x, 1, "{got:?}");
+        }
+    }
+}

@@ -160,6 +160,36 @@ impl<'a, 'p> Routing<'a, 'p> {
         }
     }
 
+    /// Routes the message to the queue groups of `found` it names, and to
+    /// nothing else: another server sends plain subscriptions their copy
+    /// apart.
+    pub(crate) fn route_queues(&mut self, found: &Found<'_>) {
+        if self.lane.slots.guarded() != 0 {
+            self.hold_back();
+        }
+        match found {
+            Found::One(i) => {
+                for (name, _) in &i.queues {
+                    if self.picks(name) {
+                        self.queue(found, 0, name);
+                    }
+                }
+            }
+            Found::Many(all) => {
+                for (k, i) in all.iter().enumerate() {
+                    for (name, _) in &i.queues {
+                        if !merged_before(all, k, name) && self.picks(name) {
+                            self.queue(found, k, name);
+                        }
+                    }
+                }
+            }
+        }
+        if self.lane.has_hits() {
+            self.lane.send_hits(self.p, &mut self.stalled);
+        }
+    }
+
     /// Counts the links whose permissions hold the message back as sent to
     /// already. Out of line: links with permissions are rare, and folding
     /// the bits in on every message stalled on the stores just made.

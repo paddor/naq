@@ -2,56 +2,18 @@
 
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use naq::{Cluster, Options, Server};
 
+#[path = "mesh/cluster.rs"]
+mod cluster;
 mod proxy;
 
+use cluster::{WAIT, free_port, get, node, proxied, quiet, told};
 use proxy::{BLACKHOLE, CUT, OPEN, Proxy, STALLED, STALLING};
-
-/// Longest wait for anything a test expects.
-const WAIT: Duration = Duration::from_secs(5);
-
-/// A free port, each once per run, below the kernel's ephemeral ports.
-fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 32_000 - (std::process::id() % 400) as u16 * 30;
-    loop {
-        // Relaxed: only uniqueness matters.
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let port = base - n % 2_000;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-}
-
-/// Server `n{i}` of cluster `c`, two lanes, on cluster port `port` with
-/// routes to `routes`.
-fn node(i: usize, port: u16, routes: &[u16]) -> Server {
-    Server::start(&Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
-        http_port: Some(0),
-        server_name: format!("n{i}"),
-        cluster: Some(Cluster {
-            name: "c".into(),
-            host: "127.0.0.1".into(),
-            port,
-            routes: routes
-                .iter()
-                .map(|p| format!("nats-route://127.0.0.1:{p}"))
-                .collect(),
-        }),
-        ..Options::default()
-    })
-    .unwrap()
-}
 
 /// Server `i` of a cluster on `ports`, with routes to all the others.
 fn member(i: usize, ports: &[u16]) -> Server {
@@ -68,83 +30,9 @@ fn cluster(n: usize) -> Vec<Server> {
     (0..n).map(|i| member(i, &ports)).collect()
 }
 
-/// Interest one server tells the others of: subject, queue group and its
-/// members there, 1 for plain interest.
-type Told = (String, Option<String>, u64);
-
-/// `entries`, sorted, as [`heard`] gives them.
-fn told(entries: &[(&str, Option<&str>, u64)]) -> Vec<Told> {
-    let mut all: Vec<Told> = entries
-        .iter()
-        .map(|&(s, q, w)| (s.to_owned(), q.map(str::to_owned), w))
-        .collect();
-    all.sort();
-    all
-}
-
-/// What `s` heard of the interest of server `name`, sorted; `None`
-/// while its route is down.
-fn heard(s: &Server, name: &str) -> Option<Vec<Told>> {
-    let z = get(s, "/routez?subs=detail");
-    let r = z["routes"]
-        .as_array()?
-        .iter()
-        .find(|r| r["remote_name"] == name)?;
-    let mut all: Vec<Told> = r["subscriptions_list_detail"]
-        .as_array()
-        .map(|subs| {
-            subs.iter()
-                .map(|d| {
-                    (
-                        d["subject"].as_str().unwrap().to_owned(),
-                        d["qgroup"].as_str().map(str::to_owned),
-                        d["queue_weight"].as_u64().unwrap_or(1),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    all.sort();
-    Some(all)
-}
-
-/// The oracle of a quiet cluster. Waits until each server `n{i}` that is
-/// up, `Some` in `servers`, heard of each other one `n{j}` what `want[j]`
-/// says of its clients, if `apart(i, j)` does not keep them apart, and
-/// has no route to it otherwise.
-fn quiet(servers: &[Option<&Server>], apart: impl Fn(usize, usize) -> bool, want: &[Vec<Told>]) {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let mut wrong = None;
-        for (i, s) in servers.iter().enumerate() {
-            let Some(s) = s else { continue };
-            for (j, other) in servers.iter().enumerate().filter(|&(j, _)| j != i) {
-                let got = heard(s, &format!("n{j}"));
-                let expect = other.filter(|_| !apart(i, j)).map(|_| want[j].clone());
-                if got != expect {
-                    wrong = Some(format!("n{i} heard of n{j}: {got:?}, not {expect:?}"));
-                }
-            }
-        }
-        let Some(wrong) = wrong else { return };
-        assert!(Instant::now() < deadline, "{wrong}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 /// Never apart.
 const fn together(_: usize, _: usize) -> bool {
     false
-}
-
-/// `GET path` on `s`'s monitoring port.
-fn get(s: &Server, path: &str) -> serde_json::Value {
-    let mut c = TcpStream::connect(s.monitor_addr().unwrap()).unwrap();
-    c.set_read_timeout(Some(WAIT)).unwrap();
-    write!(c, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
-    let mut body = String::new();
-    c.read_to_string(&mut body).unwrap();
-    serde_json::from_str(body.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
 
 /// Waits until `f` holds of `path` on `s`, and returns it.
@@ -630,25 +518,6 @@ fn a_server_that_starts_again_is_heard_anew() {
     until_heard(&mut p, &mut new, "new");
 }
 
-/// Three servers whose routes go through proxies, by server and route.
-fn proxied() -> (Vec<Server>, Vec<Vec<Option<Proxy>>>) {
-    let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
-    let proxies: Vec<Vec<Option<Proxy>>> = (0..3)
-        .map(|i| {
-            (0..3)
-                .map(|j| (i != j).then(|| Proxy::to("127.0.0.1", ports[j])))
-                .collect()
-        })
-        .collect();
-    let servers = (0..3)
-        .map(|i| {
-            let routes: Vec<u16> = proxies[i].iter().flatten().map(|p| p.port).collect();
-            node(i, ports[i], &routes)
-        })
-        .collect();
-    (servers, proxies)
-}
-
 /// Sets every proxy between server 2 and the others to `state`.
 fn isolate_two(proxies: &[Vec<Option<Proxy>>], state: u8) {
     for (i, j) in [(0, 2), (2, 0), (1, 2), (2, 1)] {
@@ -1030,4 +899,37 @@ fn a_request_through_an_import_is_answered_at_another_server() {
     send(&mut svc, &format!("PUB {} 2\r\nok\r\n", parts[3]));
     assert_eq!(line(&mut req), "MSG inbox 1 2");
     assert_eq!(line(&mut req), "ok");
+}
+
+/// What `c` gets until a message `end`, with its payload lines.
+fn until_end(c: &mut Client) -> Vec<String> {
+    let mut got = Vec::new();
+    loop {
+        let l = line(c);
+        if l == "end" {
+            return got;
+        }
+        if l != "PING" {
+            got.push(l);
+        }
+    }
+}
+
+#[test]
+fn a_server_with_plain_and_queue_interest_gets_a_message_once_for_each() {
+    let servers = met_cluster();
+    let up: Vec<Option<&Server>> = servers.iter().map(Some).collect();
+    let none = Vec::new();
+    let mut sub = client(&servers[1], "SUB * 1\r\n");
+    let mut member = client(&servers[1], "SUB * q 1\r\n");
+    let n1 = told(&[("*", None, 1), ("*", Some("q"), 1)]);
+    quiet(&up, together, &[none.clone(), n1, none]);
+    let mut p = client(&servers[0], "");
+    until_heard(&mut p, &mut sub, "c");
+    send(&mut p, "PUB c 1\r\nx\r\nPUB c 3\r\nend\r\n");
+    assert_eq!(until_end(&mut sub), ["MSG c 1 1", "x", "MSG c 1 3"]);
+    // The only member of its group: it gets every message, once.
+    let got = until_end(&mut member);
+    let once = |payload: &str| got.iter().filter(|l| *l == payload).count();
+    assert_eq!((once("sync"), once("x")), (1, 1), "{got:?}");
 }

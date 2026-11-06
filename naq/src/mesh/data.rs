@@ -243,7 +243,13 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
             From::Route => routing.by_server(r.queue, skips),
             From::Hub(_) | From::Leaf(_) => routing.by_linked(r.queue, skips),
         };
-        routing.route(&found);
+        // A record for a queue group is that group's alone: plain
+        // subscriptions get a record of their own.
+        if r.queue.is_some() {
+            routing.route_queues(&found);
+        } else {
+            routing.route(&found);
+        }
         let (tapped, skips) = (routing.tapped(), routing.skips());
         if let Some(s) = routing.stalled {
             stalled = Some(s);

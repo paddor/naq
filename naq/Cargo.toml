@@ -3,6 +3,8 @@ name = "naq"
 description = "Core NATS server"
 keywords = ["nats", "messaging", "pubsub", "server"]
 categories = ["network-programming"]
+# Tests stay out of the published crate.
+exclude = ["tests/", "src/**/tests.rs"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

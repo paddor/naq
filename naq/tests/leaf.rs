@@ -2030,3 +2030,59 @@ fn a_leaf_bound_to_an_account_of_a_go_hub_shares_no_other() {
     m.send("PING\r\n");
     assert_eq!(m.line(), "PONG", "another account of the leaf");
 }
+
+#[test]
+fn a_member_two_links_away_gets_its_pick_once() {
+    let hub = Hub::new();
+    // A naq hub for naq leafs, and a leaf of the hub played here; its denies
+    // hold back what that link may not carry.
+    let middle = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        server_name: "middle".into(),
+        leafnodes: Some(naq::Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            ..naq::Leafnodes::default()
+        }),
+        leaf_reconnect: Duration::from_millis(50),
+        remotes: vec![Remote {
+            urls: vec![format!("127.0.0.1:{}", hub.port())],
+            deny_exports: vec!["secret".into()],
+            ..Remote::default()
+        }],
+        ..Options::default()
+    })
+    .unwrap();
+    let mut p = linked(&hub);
+    p.send("LS+ j q 1\r\n");
+    let at_middle = format!("naq://127.0.0.1:{}", middle.leafnode_addr().unwrap().port());
+    let leaf = leaf_with(Remote {
+        urls: vec![at_middle],
+        ..Remote::default()
+    });
+    // The only member is the hub's: the leaf picks it through the middle.
+    let mut c = client(&leaf, "");
+    let deadline = Instant::now() + WAIT;
+    p.w.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    loop {
+        c.send("PUB j 4\r\nwait\r\n");
+        let mut l = String::new();
+        if p.r.read_line(&mut l).is_ok() && l.starts_with("LMSG j | q 4") {
+            p.line();
+            break;
+        }
+        assert!(Instant::now() < deadline, "no pick for the hub");
+    }
+    p.w.set_read_timeout(Some(WAIT)).unwrap();
+    c.send("PUB j 3\r\nend\r\n");
+    let got = lines_until(&mut p, "end");
+    let heads = got.iter().filter(|l| l.starts_with("LMSG"));
+    assert!(
+        heads.clone().all(|l| l.starts_with("LMSG j | q ")),
+        "{got:?}"
+    );
+    assert_eq!(got.iter().filter(|l| *l == "end").count(), 1, "{got:?}");
+}
