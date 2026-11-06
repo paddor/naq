@@ -1,5 +1,7 @@
 //! The `naq` binary.
 
+#![expect(clippy::unwrap_used, reason = "tests fail loudly")]
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -14,6 +16,23 @@ impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// Reads log lines from `r` up to the one that says where clients connect:
+/// the address, and the lines before.
+fn listening(r: &mut impl BufRead) -> (String, Vec<String>) {
+    let mut lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        assert!(
+            r.read_line(&mut line).unwrap() > 0,
+            "no address in {lines:?}"
+        );
+        if let Some((_, addr)) = line.split_once("Listening for client connections on ") {
+            return (addr.trim().to_owned(), lines);
+        }
+        lines.push(line);
     }
 }
 
@@ -33,15 +52,8 @@ fn logs_its_address_and_serves_clients() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stderr.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
+    let (addr, _) = listening(&mut BufReader::new(child.stderr.take().unwrap()));
     let _proc = Proc(child);
-    let addr = line
-        .strip_prefix("[naq] Listening for client connections on ")
-        .unwrap_or_else(|| panic!("{line:?}"))
-        .trim();
     let mut c = TcpStream::connect(addr).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     c.write_all(b"PING\r\n").unwrap();
@@ -107,15 +119,8 @@ fn takes_a_configuration_file_that_flags_override() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stderr.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
+    let (addr, _) = listening(&mut BufReader::new(child.stderr.take().unwrap()));
     let _proc = Proc(child);
-    let addr = line
-        .strip_prefix("[naq] Listening for client connections on ")
-        .unwrap_or_else(|| panic!("{line:?}"))
-        .trim();
     let mut r = BufReader::new(TcpStream::connect(addr).unwrap());
     let mut info = String::new();
     r.read_line(&mut info).unwrap();
@@ -158,18 +163,15 @@ fn takes_the_flags_nats_server_harnesses_pass() {
         .unwrap();
     let proc = Proc(child);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let line = loop {
+    let text = loop {
         let text = std::fs::read_to_string(&log).unwrap_or_default();
-        if text.ends_with('\n') {
+        if text.contains("Server is ready\n") {
             break text;
         }
         assert!(std::time::Instant::now() < deadline, "no log line");
         std::thread::sleep(Duration::from_millis(10));
     };
-    let addr = line
-        .trim()
-        .strip_prefix("[naq] Listening for client connections on ")
-        .unwrap_or_else(|| panic!("{line:?}"));
+    let (addr, _) = listening(&mut text.as_bytes());
     assert_ne!(addr, "127.0.0.1:0");
     TcpStream::connect(addr).unwrap();
     assert_eq!(
@@ -178,4 +180,70 @@ fn takes_the_flags_nats_server_harnesses_pass() {
     );
     drop(proc);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn log_flags_set_the_level_and_the_time() {
+    let mut child = Command::new(NAQ)
+        .args([
+            "-a",
+            "127.0.0.1",
+            "-p",
+            "0",
+            "--lanes",
+            "1",
+            "-DV",
+            "-T=false",
+        ])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut r = BufReader::new(child.stderr.take().unwrap());
+    let (addr, before) = listening(&mut r);
+    let proc = Proc(child);
+    let pid = proc.0.id();
+    assert_eq!(before[0], format!("[{pid}] [INF] Starting naq\n"));
+    let mut c = TcpStream::connect(&addr).unwrap();
+    c.write_all(b"CONNECT {}\r\nPING\r\n").unwrap();
+    let mut seen = Vec::new();
+    while !seen.iter().any(|l: &String| l.contains("->> [PONG]")) {
+        let mut line = String::new();
+        assert!(r.read_line(&mut line).unwrap() > 0, "{seen:#?}");
+        seen.push(line);
+    }
+    assert!(
+        seen.iter().any(|l| l.contains("[DBG] 127.0.0.1:")),
+        "{seen:#?}"
+    );
+    assert!(
+        seen.iter().any(|l| l.contains("[TRC] 127.0.0.1:")),
+        "{seen:#?}"
+    );
+    let out = Command::new(NAQ).args(["-D=maybe"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn takes_the_other_log_flags_of_nats_server() {
+    let syslog = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    syslog
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let url = format!("udp://{}", syslog.local_addr().unwrap());
+    let child = Command::new(NAQ)
+        .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1", "-r", &url])
+        .args(["-s=false", "--logtime_utc", "--log_size_limit=100000"])
+        .args(["--max_traced_msg_len", "8", "-V=false"])
+        .spawn()
+        .unwrap();
+    let _running = Proc(child);
+    let mut buf = [0; 512];
+    let ready = loop {
+        let n = syslog.recv(&mut buf).unwrap();
+        let line = String::from_utf8_lossy(&buf[..n]).into_owned();
+        if line.contains("Server is ready") {
+            break line;
+        }
+    };
+    assert!(ready.starts_with("<5>"), "{ready}");
 }

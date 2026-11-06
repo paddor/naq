@@ -33,6 +33,9 @@ pub enum Error {
     /// Options that contradict themselves.
     #[error("bad options: {0}")]
     Options(String),
+    /// The log file cannot be opened, or the syslog not reached.
+    #[error("cannot log")]
+    Log(#[source] io::Error),
     /// A configuration does not parse, or holds what naq cannot use.
     #[error("{at}: {reason}")]
     Config {

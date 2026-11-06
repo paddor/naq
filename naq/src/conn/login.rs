@@ -100,6 +100,7 @@ impl Conn {
             let mut meta = self.client.meta.borrow_mut();
             (meta.name, meta.lang, meta.version) = names;
             meta.websocket = self.via.ws;
+            meta.how = super::log::How::of(&creds);
             meta.user = creds.user.or(creds.nkey);
         }
         // A user of the service may not ask for others in its account.
@@ -301,9 +302,12 @@ impl Conn {
     /// dropped, as a new `CONNECT` drops them in `nats-server`.
     pub(super) fn bind(&mut self, grant: Grant) {
         self.auth_by = None;
+        self.watch.on = self.watch.tracing;
         self.out.account = grant.account;
         let held = grant.perms.map(|p| Rc::new(Held::new(p)));
-        self.client.guarded.set(held.is_some());
+        self.client
+            .guarded
+            .set(held.is_some() || self.client.traced.get());
         *self.client.held.borrow_mut() = held;
         if self.client.account.get() == grant.account {
             return;

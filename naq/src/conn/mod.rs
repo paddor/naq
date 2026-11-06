@@ -1,9 +1,11 @@
 //! One client connection: `INFO`, the read loop and the writer.
 
 mod handshake;
+mod log;
 mod login;
 mod ping;
 mod read;
+mod trace;
 mod write;
 
 pub(crate) use read::{READ_CHUNK, SpentReads, make_room, stall};
@@ -49,8 +51,10 @@ pub(crate) struct Client {
     pub(crate) account: Cell<u32>,
     /// Its permissions, if any limit it.
     pub(crate) held: RefCell<Option<Rc<Held>>>,
-    /// Whether `held` is set: deliveries check it.
+    /// Whether `held` is set or it is traced: deliveries check it.
     pub(crate) guarded: Cell<bool>,
+    /// Its protocol is traced.
+    pub(crate) traced: Cell<bool>,
     /// Messages it sent and got.
     pub(crate) tally: Tally,
     /// The round trip to it, as last measured.
@@ -81,6 +85,7 @@ impl Client {
             account: Cell::new(crate::auth::GLOBAL),
             held: RefCell::default(),
             guarded: Cell::new(false),
+            traced: Cell::new(false),
             tally: Tally::default(),
             rtt: Cell::new(Duration::ZERO),
             meta: RefCell::new(Meta {
@@ -89,6 +94,7 @@ impl Client {
                 start: std::time::SystemTime::now(),
                 websocket: false,
                 user: None,
+                how: None,
                 name: None,
                 lang: None,
                 version: None,
@@ -131,6 +137,9 @@ impl Client {
         let Some(sub) = self.subs.borrow_mut().remove(sid) else {
             return;
         };
+        if self.traced.get() {
+            self.trace_delsub(&lane.shared, sid);
+        }
         let (queue, account) = (sub.queue.as_deref(), self.account.get());
         lane.index(account)
             .borrow_mut()
@@ -163,6 +172,14 @@ impl Client {
         self.stop.notified().await;
     }
 
+    /// Closes the connection for `why`, unless it was closed already.
+    pub(crate) fn kick(&self, why: Close) {
+        if self.ended.get().is_none() && !self.closed.get() {
+            self.ended.set(Some(why));
+        }
+        self.close();
+    }
+
     /// Closes the connection once the writer wrote what is queued.
     pub(crate) fn close(&self) {
         if !self.closed.replace(true) {
@@ -182,6 +199,8 @@ pub(crate) struct Meta {
     pub(crate) websocket: bool,
     /// Who it logged in as, if anyone: a user name or an NKey.
     pub(crate) user: Option<String>,
+    /// What it logged in with, for its log lines.
+    pub(crate) how: Option<log::How>,
     /// From its `CONNECT`.
     pub(crate) name: Option<String>,
     pub(crate) lang: Option<String>,
@@ -213,8 +232,15 @@ enum Stage {
 pub(crate) enum Close {
     /// The client closed it, or reading failed.
     Lost,
-    /// The server closed it, as for a slow consumer.
+    /// The server closed it.
     Kicked,
+    /// It let more output wait than `max_pending`: a slow consumer.
+    SlowPending,
+    /// A write of this many bytes to it took longer than `write_deadline`:
+    /// a slow consumer.
+    SlowWrite(usize),
+    /// A write to it failed.
+    WriteError,
     /// The client broke the protocol.
     Parse(ParseError),
     /// The `CONNECT` was not valid.
@@ -241,6 +267,32 @@ pub(crate) enum Close {
     AccountExpired,
     /// The key that signed its user no longer may: closed without a word.
     Unsigned,
+}
+
+impl Close {
+    /// Why it ended, in the words of `nats-server`.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Close::Lost => "Client Closed",
+            Close::Kicked => "Kicked",
+            Close::SlowPending => "Slow Consumer (Pending Bytes)",
+            Close::SlowWrite(_) => "Slow Consumer (Write Deadline)",
+            Close::WriteError => "Write Error",
+            Close::Parse(ParseError::MaxPayload(_)) => "Maximum Message Payload Exceeded",
+            Close::Parse(ParseError::ControlLine) => "Maximum Control Line Exceeded",
+            Close::Parse(_) | Close::Connect => "Parse Error",
+            Close::NoHeaders => "Protocol Violation",
+            Close::Refused(text) if text == BAD_PROTOCOL => "Bad Client Protocol Version",
+            Close::Refused(_) => "No Responders Requires Headers",
+            Close::Stale => "Stale Connection",
+            Close::Auth | Close::Unsigned => "Authentication Failure",
+            Close::AuthTimeout => "Authentication Timeout",
+            Close::AccountConns => "Maximum Account Connections Exceeded",
+            Close::UserExpired | Close::AccountExpired => "Authentication Expired",
+            Close::MaxSubs => "Maximum Subscriptions Exceeded",
+            Close::Revoked => "Credentials Revoked",
+        }
+    }
 }
 
 /// The refusal of a `CONNECT` with a protocol other than 0 and 1.
@@ -288,6 +340,16 @@ struct Conn {
     via: Via,
     /// What its user may do, beyond the server's limits.
     bounds: Bounds,
+    watch: Watch,
+}
+
+/// Whether what a client sends goes by `watched` first, and why.
+#[derive(Debug, Clone, Copy)]
+struct Watch {
+    /// Until it authenticates, or while it is traced.
+    on: bool,
+    /// Its protocol is traced.
+    tracing: bool,
 }
 
 /// The limits of a connection's user, set as it logs in.
@@ -417,6 +479,11 @@ where
         max_control_line: opts.max_control_line,
         max_payload: opts.max_payload,
     };
+    let tracing = lane.shared.log.traces();
+    if tracing {
+        client.traced.set(true);
+        client.guarded.set(true);
+    }
     let mut conn = Conn {
         lane,
         client,
@@ -438,7 +505,12 @@ where
             counted: None,
             kept: None,
         },
+        watch: Watch {
+            on: tracing || auth_by.is_some(),
+            tracing,
+        },
     };
+    conn.log_created();
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
 }
@@ -453,6 +525,9 @@ impl Conn {
     /// Queues `+OK` in verbose mode.
     fn ok(&self) {
         if self.opts.verbose {
+            if self.watch.tracing {
+                self.trace_out("OK", None);
+            }
             self.reply(encode::OK);
         }
     }
@@ -460,6 +535,9 @@ impl Conn {
     /// Queues `PONG`, and after the first since the `CONNECT`, an `INFO` for
     /// clients that take one at any time.
     fn pong(&mut self) {
+        if self.watch.tracing {
+            self.trace_out("PONG", None);
+        }
         self.reply(encode::PONG);
         if self.stage != Stage::Connected {
             return;
@@ -486,15 +564,25 @@ impl Conn {
 
     /// Queues `-ERR 'text'` for this client.
     fn error(&self, text: &str) {
+        if self.watch.tracing {
+            self.trace_out("-ERR", Some(text));
+        }
         naq_proto::encode::err(&mut *self.client.out.borrow_mut(), text);
         self.lane.mark(&self.client);
     }
 
     /// Removes the connection's interest, writes what is left and closes.
     async fn end(&mut self, close: Close, mut writer: JoinHandle<()>) {
+        // Kicked by another, it was told why.
+        let close = match (close, self.client.ended()) {
+            (Close::Kicked, Some(why)) => why,
+            _ => close,
+        };
+        self.log_why(close);
         if let Some(text) = farewell(close) {
             self.error(text);
         }
+        self.log_closed(close);
         let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
         for sid in sids {
             self.client.unsubscribe(&self.lane, &sid);
@@ -534,6 +622,9 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked
+        | Close::SlowPending
+        | Close::SlowWrite(_)
+        | Close::WriteError
         | Close::Connect
         | Close::Unsigned
         | Close::NoHeaders => None,

@@ -116,7 +116,13 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                     {
                         let mut peers = mesh.peers.borrow_mut();
                         peers[i].heard.forget(&mut apply);
-                        peers[i].up = false;
+                        let p = &mut peers[i];
+                        if std::mem::take(&mut p.up) {
+                            shared.log.info(format_args!(
+                                "{}:{} - rid:{i} - Router connection closed: Client Closed - Remote: {}",
+                                p.host, p.port, p.name
+                            ));
+                        }
                         // Linked again at its next `Hello`.
                         peers[i].data.clear();
                     }
@@ -191,7 +197,12 @@ fn met(shared: &Shared, mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let mut peers = mesh.peers.borrow_mut();
     let p = &mut peers[i];
-    p.up = true;
+    if !std::mem::replace(&mut p.up, true) {
+        shared.log.info(format_args!(
+            "{}:{} - rid:{i} - Route connection created",
+            p.host, p.port
+        ));
+    }
     p.server_id = text(h.server_id);
     p.name = text(h.name);
     p.epoch = h.epoch;

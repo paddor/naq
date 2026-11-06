@@ -387,6 +387,13 @@ impl Link<'_> {
             let mut hubs = self.mesh.hubs.borrow_mut();
             let hub = &mut hubs[self.at];
             hub.up = true;
+            self.shared.log.info(format_args!(
+                "{}:{} - lid:{} - Leafnode connection created for account: {} ",
+                hub.host,
+                hub.port,
+                hub.link,
+                self.shared.accounts.name(hub.account)
+            ));
             (hub.slot, hub.account, hub.perms.clone())
         };
         let said = self.said.borrow();
@@ -418,7 +425,12 @@ impl Link<'_> {
         let shared = self.shared;
         hub.heard
             .forget(&mut |ch| interest(shared, slot, account, perms, ch));
-        hub.up = false;
+        if std::mem::take(&mut hub.up) {
+            shared.log.info(format_args!(
+                "{}:{} - lid:{} - Leafnode connection closed: Client Closed - Remote: {}",
+                hub.host, hub.port, hub.link, hub.name
+            ));
+        }
         drop(hubs);
         for tx in &*shared.lanes {
             tx.control(LaneControl::Unlink { slot });

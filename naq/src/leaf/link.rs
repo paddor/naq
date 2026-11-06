@@ -151,8 +151,10 @@ pub(super) async fn session(
     told: &RefCell<Option<Told>>,
 ) -> Ended {
     let dial = timeout(DIAL, TcpStream::connect((url.host.as_str(), url.port)));
-    let Ok(Ok(tcp)) = dial.await else {
-        return Ended::Unreached;
+    let tcp = match dial.await {
+        Ok(Ok(tcp)) => tcp,
+        Ok(Err(e)) => return Ended::Unreached(e.to_string()),
+        Err(_) => return Ended::Unreached("i/o timeout".into()),
     };
     let _ = tcp.set_nodelay(true);
     let d = Dial {
@@ -494,9 +496,20 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         );
         self.lane.links.borrow_mut().push(side.clone());
         self.lane.mark(&client);
+        let label = format!("{}:{} - lid:{}", side.facts.ip, side.facts.port, client.id);
+        shared.log.info(format_args!(
+            "{label} - Leafnode connection created for account: {name} "
+        ));
         let end = self.read_loop(&side, lds).await;
         self.lane.links.borrow_mut().retain(|l| l.id != side.id);
         side.forget_hub(self.lane);
+        let why = client
+            .ended()
+            .map_or("Client Closed", crate::conn::Close::reason);
+        shared.log.info(format_args!(
+            "{label} - Leafnode connection closed: {why} - Remote: {}",
+            side.facts.name
+        ));
         client.close();
         if timeout(LINGER, &mut writer).await.is_err() {
             writer.abort();

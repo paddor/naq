@@ -129,6 +129,20 @@ impl Lane {
         got
     }
 
+    /// Whether client `c`, which permissions or a trace guard, takes `m`
+    /// on `sid`; traces the delivery if so.
+    #[cold]
+    #[inline(never)]
+    fn guard(&self, c: &Client, m: &Pub<'_>, sid: &[u8]) -> bool {
+        if !c.accepts(m) {
+            return false;
+        }
+        if c.traced.get() {
+            c.trace_delivery(&self.shared, m, sid);
+        }
+        true
+    }
+
     /// [`Lane::deliver_to`] with `m` as it is.
     #[inline]
     fn deliver_entry(
@@ -139,7 +153,11 @@ impl Lane {
         stalled: &mut Option<Rc<Client>>,
     ) -> bool {
         let c = &e.client;
-        if c.is_closed() || c.id == skip || e.is_spent() || (c.guarded.get() && !c.accepts(m)) {
+        if c.is_closed()
+            || c.id == skip
+            || e.is_spent()
+            || (c.guarded.get() && !self.guard(c, m, &e.sid))
+        {
             return false;
         }
         let headers = m.headers.filter(|_| c.headers.get());
@@ -167,7 +185,7 @@ impl Lane {
         if len > opts.max_pending {
             // A slow consumer.
             crate::stats::Events::note(&self.shared.events.slow_consumers);
-            c.close();
+            c.kick(crate::conn::Close::SlowPending);
         } else if len > opts.max_pending / 4 * 3 {
             *stalled = Some(c.clone());
         }

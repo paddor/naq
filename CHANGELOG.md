@@ -5,6 +5,28 @@ Notable changes to naq. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `naq`: a log, as `nats-server` writes it: `[pid] time [LVL] text`, the
+  start of the server in its order, clients created, refused and closed
+  with Go's reasons and texts, permission violations, slow consumers,
+  routes and leaf node links. `Options::log` (`Logging`, `LogTo`,
+  `Trace`) and the keys `debug`, `trace`, `trace_verbose`,
+  `trace_headers`, `logtime`, `logtime_utc`, `log_file`,
+  `log_size_limit`, `log_max_num`, `syslog`, `remote_syslog` and
+  `max_traced_msg_len`. Times are in UTC. The library logs nothing unless
+  told; the binary logs to stderr. `Server::start` fails with `Error::Log`
+  if the log file cannot be opened or the syslog not reached.
+- `naq`: protocol traces of clients (`trace`): what each sent and got,
+  payloads cut at `max_traced_msg_len`, secrets of a `CONNECT` left out.
+- `naq`: log files rotated past `log_size_limit` and purged to
+  `log_max_num`; `Server::reopen_log` opens the file again.
+- `naq` binary: the log flags of `nats-server` (`-D`, `-V`, `-DV`, `-T`,
+  `-l`, `-s`, `-r`, `--logtime_utc`, `--log_size_limit`,
+  `--max_traced_msg_len`), with `-flag=value` and `--flag` forms, and `-n`
+  for the server name.
+- `naq`: `Options::config_file`, set by `Options::from_file`.
+
 ### Fixed
 
 - `naq`: plain subscriptions get a message from another server of the

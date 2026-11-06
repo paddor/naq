@@ -636,7 +636,7 @@ fn compare(secret: &str, given: &str, grant: &Grant) -> Check {
     }
 }
 
-fn is_bcrypt(s: &str) -> bool {
+pub(crate) fn is_bcrypt(s: &str) -> bool {
     ["$2a$", "$2b$", "$2x$", "$2y$"]
         .iter()
         .any(|p| s.starts_with(p))

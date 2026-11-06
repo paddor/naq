@@ -5,6 +5,7 @@ pub(crate) mod callout;
 mod cluster;
 mod imports;
 mod leaf;
+mod log;
 mod operator;
 mod parse;
 mod ws;
@@ -16,22 +17,8 @@ use parse::{Item, Map, Value};
 
 use crate::{Error, Options};
 
-/// Keys of `nats-server` that only change its logs, ignored here.
-const IGNORED: &[&str] = &[
-    "debug",
-    "trace",
-    "trace_verbose",
-    "logtime",
-    "logtime_utc",
-    "logfile",
-    "log_file",
-    "log_size_limit",
-    "log_max_num",
-    "syslog",
-    "remote_syslog",
-    "pidfile",
-    "pid_file",
-];
+/// Keys of `nats-server` naq does without.
+const IGNORED: &[&str] = &["pidfile", "pid_file"];
 
 impl Options {
     /// Reads a `nats-server` configuration file. Keys it leaves out keep
@@ -71,7 +58,10 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
         at: at(e.line, e.file.as_deref()),
         reason: e.reason,
     })?;
-    let mut opts = Options::default();
+    let mut opts = Options {
+        config_file: file.map(Path::to_path_buf),
+        ..Options::default()
+    };
     apply(&mut opts, &map).map_err(|(line, reason)| Error::Config {
         at: at(line, file),
         reason,
@@ -159,6 +149,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 auth::system(o, &key, item)?;
             }
             k if operator::KEYS.contains(&k) => operator::apply(o, k, item)?,
+            k if log::KEYS.contains(&k) => log::apply(o, k, item)?,
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }

@@ -33,12 +33,12 @@ pub(crate) async fn writer<W: AsyncWrite + Unpin>(
         match tokio::time::timeout(deadline, put(&mut w, &buf)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                client.close();
+                client.kick(super::Close::WriteError);
                 return;
             }
             Err(_) => {
                 slow();
-                client.close();
+                client.kick(super::Close::SlowWrite(buf.len()));
                 return;
             }
         }

@@ -24,6 +24,8 @@ replies.
 - Clusters of naq servers, meshed over OMQ, and naq leaf nodes of naq
   hubs.
 - Monitoring: `/healthz`, `/varz`, `/connz`, `/routez` and `/leafz`.
+- Logs as `nats-server` writes them, to stderr, a file (rotated by size)
+  or a syslog, with debug lines and protocol traces on request.
 
 A configuration key it does not serve is an error, not ignored.
 

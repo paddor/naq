@@ -1,5 +1,9 @@
 //! Server settings.
 
+mod log;
+
+pub use log::{LogTo, Logging, Trace};
+
 use std::time::Duration;
 
 /// Server settings. The defaults are those of `nats-server`.
@@ -96,6 +100,11 @@ pub struct Options {
     /// Account JWTs the resolver starts with, by the account's public key
     /// (`resolver_preload`).
     pub resolver_preload: Vec<(String, String)>,
+    /// What the server logs, and where to.
+    pub log: Logging,
+    /// The configuration file the options came from, as
+    /// [`Options::from_file`] sets it.
+    pub config_file: Option<std::path::PathBuf>,
 }
 
 /// Where the JWTs of accounts come from (`resolver`).
@@ -529,6 +538,8 @@ impl Default for Options {
             http_host: None,
             tls: None,
             websocket: None,
+            log: Logging::default(),
+            config_file: None,
         }
     }
 }

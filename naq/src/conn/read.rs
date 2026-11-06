@@ -159,7 +159,10 @@ impl Conn {
                     }
                 }
                 Ok(Parsed::Partial(need)) => return (at, Ok(Stop::More(need))),
-                Err(e) => return (at, Err(Close::Parse(e))),
+                Err(e) => {
+                    self.log_parse(&e, &buf[at..]);
+                    return (at, Err(Close::Parse(e)));
+                }
             }
         }
     }
@@ -176,8 +179,8 @@ impl Conn {
     // remains small enough.
     #[inline]
     fn handle(&mut self, op: ClientOp<'_>, buf: &[u8]) -> Result<Step, Close> {
-        if self.auth_by.is_some() && !matches!(op, ClientOp::Connect(_)) {
-            self.without_connect()?;
+        if self.watch.on {
+            self.watched(&op)?;
         }
         match op {
             ClientOp::Pub(p) => {
@@ -254,6 +257,20 @@ impl Conn {
         }
     }
 
+    /// What a watched client sends goes by here first: it is traced, and
+    /// until it authenticates, it may send nothing but a `CONNECT`.
+    #[cold]
+    #[inline(never)]
+    fn watched(&mut self, op: &ClientOp<'_>) -> Result<(), Close> {
+        if self.watch.tracing {
+            self.trace_in(op);
+        }
+        if self.auth_by.is_some() && !matches!(op, ClientOp::Connect(_)) {
+            self.without_connect()?;
+        }
+        Ok(())
+    }
+
     /// The ping timer fired: maybe a `PING`, maybe the end.
     #[inline(never)]
     fn ping_tick(&mut self) -> Option<Close> {
@@ -264,6 +281,9 @@ impl Conn {
         {
             Tick::Quiet => None,
             Tick::Ping => {
+                if self.watch.tracing {
+                    self.trace_out("PING", None);
+                }
                 self.reply(encode::PING);
                 self.lane.flush();
                 None
@@ -282,21 +302,29 @@ impl Conn {
     #[cold]
     #[inline(never)]
     fn may_send(&self, p: &Pub<'_>) -> bool {
+        // A traced client is guarded: its payload is traced here.
+        if self.watch.tracing {
+            self.trace_payload_in(p);
+        }
         let subject = p.subject;
         if subject.starts_with(b"_GR_.") && subject.len() > 5
             || subject.starts_with(b"$GR.") && subject.len() > 4
         {
-            self.error(&publish_violation(subject));
+            self.refuse_publish(subject);
             return false;
         }
         if self.client.guarded.get() && !self.may_publish(subject) {
             return false;
         }
         if subject.starts_with(b"$NRG.") {
-            self.error(&publish_violation(subject));
+            self.refuse_publish(subject);
             return false;
         }
         if let Some(reply) = p.reply.filter(|r| is_reserved_reply(r)) {
+            self.log_violation(format_args!(
+                "Publish Violation - Reply {:?}",
+                String::from_utf8_lossy(reply)
+            ));
             self.error(&format!(
                 "Permissions Violation for Publish with Reply of {}",
                 quoted(reply)
@@ -315,8 +343,18 @@ impl Conn {
         if held.is_none_or(|h| h.may_publish(subject)) {
             return true;
         }
-        self.error(&publish_violation(subject));
+        self.refuse_publish(subject);
         false
+    }
+
+    /// Tells it and the log it may not publish to `subject`.
+    #[cold]
+    fn refuse_publish(&self, subject: &[u8]) {
+        self.log_violation(format_args!(
+            "Publish Violation - Subject {:?}",
+            String::from_utf8_lossy(subject)
+        ));
+        self.error(&publish_violation(subject));
     }
 
     /// Whether its permissions let it subscribe as `s` asks; if not, it is
@@ -327,6 +365,19 @@ impl Conn {
         let held = self.client.held.borrow().clone();
         if held.is_none_or(|h| h.perms.subscribe(s.subject, s.queue)) {
             return true;
+        }
+        let (subject, sid) = (
+            String::from_utf8_lossy(s.subject),
+            String::from_utf8_lossy(s.sid),
+        );
+        match s.queue {
+            Some(q) => self.log_violation(format_args!(
+                "Subscription Violation - Subject {subject:?}, Queue: {:?}, SID {sid}",
+                String::from_utf8_lossy(q)
+            )),
+            None => self.log_violation(format_args!(
+                "Subscription Violation - Subject {subject:?}, SID {sid}"
+            )),
         }
         let text = match s.queue {
             Some(q) => format!(

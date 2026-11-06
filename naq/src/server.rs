@@ -47,6 +47,8 @@ pub(crate) struct Shared {
     ws_auth: Option<Auth>,
     /// The auth callouts clients log in through, if any.
     pub(crate) callouts: Option<crate::callout::Callouts>,
+    /// Where the server logs to.
+    pub(crate) log: crate::log::Log,
     /// Message counts of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
     /// Slow consumers and stale clients so far.
@@ -133,6 +135,7 @@ impl Shared {
 pub struct Server {
     // Held, not used: the lanes stop when the last clone drops.
     _ctx: Context,
+    shared: Arc<Shared>,
     addr: SocketAddr,
     monitor: Option<SocketAddr>,
     websocket: Option<SocketAddr>,
@@ -151,6 +154,7 @@ impl Server {
     /// be bound.
     pub fn start(opts: &Options) -> Result<Server, Error> {
         let setup = check(opts)?;
+        let log = crate::log::Log::new(&opts.log).map_err(Error::Log)?;
         let accounts = auth::accounts(opts);
         let system = auth::system(opts, &accounts);
         let auth = Auth::new(opts, &accounts);
@@ -185,6 +189,7 @@ impl Server {
             resolver: setup.resolver,
             ws_auth: Auth::websocket(opts, auth.as_ref()),
             auth,
+            log,
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
             events: stats::Events::default(),
             started: std::time::SystemTime::now(),
@@ -198,13 +203,21 @@ impl Server {
             next_client: AtomicU64::new(1),
         });
         let mesh = run(&ctx, &shared, rxs, ports)?;
+        log_start(&shared, &at, &mesh);
         Ok(Server {
             _ctx: ctx,
+            shared,
             addr: at.client,
             monitor: at.monitor,
             websocket: at.ws,
             mesh,
         })
+    }
+
+    /// Opens the log file again at its path, as after another tool moved
+    /// it away. Without a log file, it logs that it did nothing.
+    pub fn reopen_log(&self) {
+        self.shared.log.reopen();
     }
 
     /// Where clients connect.
@@ -232,6 +245,18 @@ impl Server {
     pub const fn leafnode_addr(&self) -> Option<SocketAddr> {
         self.mesh.leafnodes
     }
+}
+
+/// Logs the start of `shared`, bound at `at` and `mesh`.
+fn log_start(shared: &Shared, at: &Addrs, mesh: &crate::mesh::Bound) {
+    let bound = crate::log::banner::Bound {
+        client: at.client,
+        monitor: at.monitor,
+        websocket: at.ws,
+        leafnodes: mesh.leafnodes,
+        cluster: mesh.cluster,
+    };
+    crate::log::banner::log(shared, &bound);
 }
 
 /// The WebSocket port of `opts`, bound at `addr`, with TLS `tls`.

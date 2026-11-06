@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use naq::{Error, Options, WebsocketAuth};
+use naq::{Error, LogTo, Logging, Options, Trace, WebsocketAuth};
 
 /// A directory of its own for test `name`.
 fn dir(name: &str) -> PathBuf {
@@ -39,10 +39,43 @@ fn a_file_sets_what_it_names_and_leaves_the_rest() {
             ping_interval: Duration::from_secs(30),
             max_pings_out: 5,
             write_deadline: Duration::from_secs(2),
+            log: Logging {
+                debug: true,
+                ..Logging::default()
+            },
+            config_file: Some(path.clone()),
             ..Options::default()
         }
     );
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn log_keys_set_what_and_where_the_server_logs() {
+    let o: Options = "debug: true\ntrace_verbose: true\nlogtime: false\nlogtime_utc: true\n\
+                      syslog: true\nlog_file: \"/var/log/naq.log\"\nlog_size_limit: 1MB\n\
+                      log_max_num: 3\nmax_traced_msg_len: 64\n"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        o.log,
+        Logging {
+            to: Some(LogTo::File("/var/log/naq.log".into())),
+            debug: true,
+            trace: Trace::On,
+            time: false,
+            size_limit: 1 << 20,
+            max_files: 3,
+            max_traced: 64,
+        }
+    );
+    let o: Options = "remote_syslog: \"udp://h:514\"\nsyslog: true\ntrace_headers: true\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.log.to, Some(LogTo::RemoteSyslog("udp://h:514".into())));
+    assert_eq!(o.log.trace, Trace::Headers);
+    let e = "debug: 1\n".parse::<Options>().unwrap_err();
+    assert_eq!(e.to_string(), "line 1: debug: expected true or false");
 }
 
 #[test]
