@@ -54,6 +54,10 @@ Notable changes to naq. The format follows
   users, accounts and what issued a JWT user; links to hubs among the
   connections; and the connections that closed, with why, the newest
   `max_closed_clients` (`Options::max_closed_clients`) of them.
+- `naq`: `/subsz` (`/subscriptionsz`) as `nats-server` serves it: counts
+  by account, and the subscriptions of clients, paged and tested against
+  a subject. `/routez` and `/leafz` in Go's fields: when a route came up
+  and was last heard from, what it sent, round trips of links to Go hubs.
 - `naq`: `Options::https_port` (`https_port`, `https`, `-ms`): monitoring
   over HTTPS with the certificate of the client port, and
   `Options::http_base_path` (`http_base_path`).

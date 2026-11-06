@@ -350,21 +350,22 @@ struct Issued<'a> {
     tags: &'a [String],
 }
 
-/// One subscription of a connection.
+/// One subscription of a connection, as `nats-server` details it: in
+/// `/connz`, `/routez` and `/subsz`.
 #[derive(Debug, Serialize)]
-struct SubDetail<'a> {
+pub(super) struct SubDetail<'a> {
     #[serde(skip_serializing_if = "str::is_empty")]
-    account: &'a str,
+    pub(super) account: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
-    account_tag: &'a str,
-    subject: &'a str,
+    pub(super) account_tag: &'a str,
+    pub(super) subject: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    qgroup: Option<&'a str>,
-    sid: &'a str,
-    msgs: u64,
+    pub(super) qgroup: Option<&'a str>,
+    pub(super) sid: &'a str,
+    pub(super) msgs: u64,
     #[serde(skip_serializing_if = "is_zero")]
-    max: u64,
-    cid: u64,
+    pub(super) max: u64,
+    pub(super) cid: u64,
 }
 
 impl<'a> ConnInfo<'a> {

@@ -9,6 +9,7 @@ mod links;
 mod pages;
 mod query;
 mod routes;
+mod subsz;
 mod varz;
 
 use std::collections::BTreeMap;
@@ -329,7 +330,8 @@ impl http::Handler for Pages {
                 s.monitor.count(Counted::Leafz);
                 links::answer(s, &q).await
             }
-            Page::Subsz | Page::Accountz | Page::Accstatz => Ok(Response::not_found()),
+            Page::Subsz => subsz::answer(s, &q).await,
+            Page::Accountz | Page::Accstatz => Ok(Response::not_found()),
             Page::Jsz => {
                 s.monitor.count(Counted::Jsz);
                 pages::jsz(s, &q)
@@ -375,19 +377,6 @@ where
         }
     }
     all
-}
-
-/// What `f` finds on lane 0, unless it stopped.
-async fn ask_first<T, F>(shared: &Shared, f: F) -> Option<T>
-where
-    T: Send + 'static,
-    F: FnOnce(&Lane) -> T + Send + 'static,
-{
-    let (tx, rx) = oneshot::channel();
-    shared.lanes[0].control(Control::Ask(Ask(Box::new(move |lane| {
-        let _ = tx.send(f(lane));
-    }))));
-    rx.await.ok()
 }
 
 /// Work monitoring hands a lane: it runs there, and sends what it finds

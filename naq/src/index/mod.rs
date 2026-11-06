@@ -335,12 +335,21 @@ impl<'a> Found<'a> {
 pub(crate) struct Index {
     literal: literal::Literals,
     wild: trie::Node,
+    /// Subscriptions of this lane added and removed, shadows too.
+    inserts: u64,
+    removes: u64,
 }
 
 impl Index {
     /// Adds subscription `entry` to `filter`, in `queue` if given.
     pub(crate) fn insert(&mut self, filter: &[u8], queue: Option<&[u8]>, entry: Entry) {
+        self.inserts += 1;
         self.interest(filter).group(queue).local.push(entry);
+    }
+
+    /// Subscriptions of this lane added and removed so far, shadows too.
+    pub(crate) const fn changes(&self) -> (u64, u64) {
+        (self.inserts, self.removes)
     }
 
     /// Adds `tap` to `filter`.
@@ -366,9 +375,8 @@ impl Index {
 
     /// Removes subscription `sid` of client `id`.
     pub(crate) fn remove(&mut self, filter: &[u8], queue: Option<&[u8]>, id: u64, sid: &[u8]) {
-        self.change(filter, queue, |g| {
-            g.local
-                .retain(|e| e.client.id != id || *e.sid != *sid || e.shadow.is_some());
+        self.drop_local(filter, queue, |e| {
+            e.client.id == id && *e.sid == *sid && e.shadow.is_none()
         });
     }
 
@@ -380,10 +388,22 @@ impl Index {
         id: u64,
         sid: &[u8],
     ) {
-        self.change(filter, queue, |g| {
-            g.local
-                .retain(|e| e.client.id != id || *e.sid != *sid || e.shadow.is_none());
+        self.drop_local(filter, queue, |e| {
+            e.client.id == id && *e.sid == *sid && e.shadow.is_some()
         });
+    }
+
+    /// Removes the subscriptions of this lane in `filter`, in `queue` if
+    /// given, that `drop` picks, and counts them.
+    fn drop_local(&mut self, filter: &[u8], queue: Option<&[u8]>, drop: impl Fn(&Entry) -> bool) {
+        let mut gone = 0;
+        self.change(filter, queue, |g| {
+            let before = g.local.len();
+            g.local.retain(|e| !drop(e));
+            gone = before - g.local.len();
+        });
+        // Lengths fit.
+        self.removes += gone as u64;
     }
 
     /// Counts a subscription that lane `lane` gained, or lost.
@@ -708,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_subscriptions_are_found_and_removed() {
+    fn wildcard_subscriptions_are_found_removed_and_counted() {
         let c = Rc::new(Client::new(7));
         let mut idx = Index::default();
         let subs: [(&[u8], Option<&[u8]>); 4] = [
@@ -735,10 +755,12 @@ mod tests {
             idx.remove(f, q, 7, b"0");
         }
         assert!(idx.find(b"a.>", Some(b"r"), 7, b"1").is_none());
+        assert_eq!(idx.changes(), (4, 0), "misses remove nothing");
         for (i, (f, q)) in subs.iter().enumerate() {
             idx.remove(f, *q, 7, i.to_string().as_bytes());
         }
         assert!(idx.wild.is_empty());
+        assert_eq!(idx.changes(), (4, 4));
     }
 
     #[test]

@@ -4,13 +4,14 @@
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use naq_proto::peer::{self, Control, Hello, Role};
 use omq_tokio::{Message, MonitorEvent, Socket, SocketType};
 
 use super::interest::Change;
-use super::{Mesh, Peer, endpoint, route, socket_options};
+use super::{Mesh, Peer, Up, endpoint, route, socket_options};
 use crate::Cluster;
 use crate::index::Members;
 use crate::lane::Control as LaneControl;
@@ -113,24 +114,8 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                     let _ = s.send(Message::single(me.hello.clone())).await;
                 }
                 Ok(MonitorEvent::Disconnected { .. }) => {
-                    {
-                        let mut peers = mesh.peers.borrow_mut();
-                        peers[i].heard.forget(&mut apply);
-                        let p = &mut peers[i];
-                        if std::mem::take(&mut p.up) {
-                            shared.log.info(format_args!(
-                                "{}:{} - rid:{i} - Router connection closed: Client Closed - Remote: {}",
-                                p.host, p.port, p.name
-                            ));
-                        }
-                        // Linked again at its next `Hello`.
-                        peers[i].data.clear();
-                    }
-                    for tx in &*shared.lanes {
-                        // Routes are few: their count fits.
-                        tx.control(LaneControl::Gone { server: i as u16 });
-                    }
-                    connect_urls(&shared, &mesh);
+                    mesh.peers.borrow_mut()[i].heard.forget(&mut apply);
+                    down(&shared, &mesh, i);
                 }
                 Ok(_) => {}
                 Err(_) => return,
@@ -139,6 +124,9 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                 let Ok(msg) = msg else { return };
                 let Ok(bytes) = msg.into_bytes() else { continue };
                 let Ok(c) = peer::decode(&bytes) else { continue };
+                if let Some(up) = &mut mesh.peers.borrow_mut()[i].up {
+                    up.last = SystemTime::now();
+                }
                 if let Control::Hello(h) = &c
                     && !met(&shared, &mesh, i, h, &me)
                 {
@@ -153,6 +141,28 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
             }
         }
     }
+}
+
+/// Notes the server of route `i` of `mesh` down, its interest forgotten:
+/// the lanes drop their data links to it.
+fn down(shared: &Shared, mesh: &Mesh, i: usize) {
+    {
+        let mut peers = mesh.peers.borrow_mut();
+        let p = &mut peers[i];
+        if p.up.take().is_some() {
+            shared.log.info(format_args!(
+                "{}:{} - rid:{i} - Router connection closed: Client Closed - Remote: {}",
+                p.host, p.port, p.name
+            ));
+        }
+        // Linked again at its next `Hello`.
+        p.data.clear();
+    }
+    for tx in &*shared.lanes {
+        // Routes are few: their count fits.
+        tx.control(LaneControl::Gone { server: i as u16 });
+    }
+    connect_urls(shared, mesh);
 }
 
 /// Sets the interest of the server of route `i` on every lane, as change
@@ -197,7 +207,12 @@ fn met(shared: &Shared, mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let mut peers = mesh.peers.borrow_mut();
     let p = &mut peers[i];
-    if !std::mem::replace(&mut p.up, true) {
+    if p.up.is_none() {
+        let now = SystemTime::now();
+        p.up = Some(Up {
+            since: now,
+            last: now,
+        });
         shared.log.info(format_args!(
             "{}:{} - rid:{i} - Route connection created",
             p.host, p.port
@@ -235,7 +250,7 @@ fn connect_urls(shared: &Shared, mesh: &Mesh) {
         .peers
         .borrow()
         .iter()
-        .filter(|p| p.up)
+        .filter(|p| p.up.is_some())
         .flat_map(|p| p.client_urls.iter().cloned())
         .collect();
     // A poisoned lock still holds the list.

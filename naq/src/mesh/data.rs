@@ -79,6 +79,8 @@ pub(crate) fn push(lane: &Lane, server: u16, endpoint: &str) {
 /// on it fail, and what it holds is dropped.
 pub(crate) fn gone(lane: &Lane, server: u16) {
     set(lane, server, None);
+    // Counted again once it is back, as a new route.
+    lane.slots.tally(server).reset();
 }
 
 /// Gives `lane` a data link to the naq leaf in slot `s`, of control

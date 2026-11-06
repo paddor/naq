@@ -2219,3 +2219,126 @@ fn connz_lists_a_link_to_a_hub_as_a_leafnode_and_keeps_it_once_closed() {
         "{z}"
     );
 }
+
+/// The body of `GET path` on monitoring port `port`, as it came.
+fn raw(port: u16, path: &str) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(s, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut s, &mut body).unwrap();
+    body.split_once("\r\n\r\n").unwrap().1.to_owned()
+}
+
+/// The first link of a `/leafz` body, with its keys in order, and what
+/// changes between servers and runs masked.
+fn first_link(body: &str) -> Vec<(String, serde_json::Value)> {
+    let keys: Vec<&str> = body
+        .lines()
+        .skip_while(|l| !l.starts_with("  \"leafs\""))
+        .skip(2)
+        .take_while(|l| *l != "    }" && *l != "    },")
+        .filter_map(|l| Some(l.strip_prefix("      \"")?.split_once('"')?.0))
+        .collect();
+    let z: serde_json::Value = serde_json::from_str(body).unwrap();
+    let link = &z["leafs"][0];
+    keys.into_iter()
+        .map(|k| {
+            let v = match k {
+                "id" | "port" | "rtt" | "compression" => serde_json::Value::Null,
+                "subscriptions_list" => {
+                    let mut subs: Vec<String> = link[k]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|s| s.as_str().unwrap().to_owned())
+                        .map(|s| {
+                            if s.starts_with("$LDS.") {
+                                "$LDS.".into()
+                            } else {
+                                s
+                            }
+                        })
+                        .collect();
+                    subs.sort();
+                    serde_json::json!(subs)
+                }
+                _ => link[k].clone(),
+            };
+            (k.to_owned(), v)
+        })
+        .collect()
+}
+
+/// Two messages from `at_leaf`, a client of a leaf, to `at_hub`, a client
+/// of its hub, and one back.
+fn both_ways(at_leaf: &mut Peer, at_hub: &mut Peer) {
+    at_leaf.send("PUB orders.x 2\r\nhi\r\nPUB orders.y 3\r\nyes\r\n");
+    assert_eq!(
+        lines(at_hub, 4),
+        ["MSG orders.x 1 2", "hi", "MSG orders.y 1 3", "yes"]
+    );
+    at_hub.send("PUB back 4\r\nback\r\n");
+    assert_eq!(lines(at_leaf, 2), ["MSG back 1 4", "back"]);
+}
+
+#[test]
+fn a_link_to_a_go_hub_shows_in_leafz_as_that_of_a_go_leaf() {
+    let ports: Vec<u16> = (0..8).map(|_| free_port()).collect();
+    let hub = |i: usize| {
+        let (port, leafport, http) = (ports[3 * i], ports[3 * i + 1], ports[3 * i + 2]);
+        format!(
+            "server_name: hub\nport: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n"
+        )
+    };
+    let Some(_go_hub) = go(&hub(0)) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let _naq_hub = go(&hub(1)).unwrap();
+    let (go_leaf_http, go_leaf_port) = (ports[6], ports[7]);
+    let _go_leaf = go(&format!(
+        "server_name: leaf\nport: {go_leaf_port}\nhttp_port: {go_leaf_http}\n\
+         leafnodes {{ remotes [{{ url: \"nats-leaf://127.0.0.1:{}\" }}] }}\n",
+        ports[1]
+    ))
+    .unwrap();
+    let naq_leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        http_port: Some(0),
+        server_name: "leaf".into(),
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://127.0.0.1:{}", ports[4])],
+            ..Remote::default()
+        }],
+        ..Options::default()
+    })
+    .unwrap();
+    let naq_http = naq_leaf.monitor_addr().unwrap().port();
+    let mut at_hubs: Vec<Peer> = [ports[0], ports[3]]
+        .iter()
+        .map(|&p| go_client(p, "SUB orders.* 1\r\n"))
+        .collect();
+    let mut at_leafs = [
+        go_client(go_leaf_port, "SUB back 1\r\n"),
+        client(&naq_leaf, "SUB back 1\r\n"),
+    ];
+    let lists = |subject: &'static str| {
+        move |z: &serde_json::Value| {
+            z["leafs"][0]["subscriptions_list"]
+                .as_array()
+                .is_some_and(|l| l.iter().any(|s| s == subject))
+        }
+    };
+    for (leaf, hub) in [(go_leaf_http, ports[2]), (naq_http, ports[5])] {
+        until(leaf, "/leafz?subs=1", lists("orders.*"));
+        until(hub, "/leafz?subs=1", lists("back"));
+    }
+    for (at_leaf, at_hub) in at_leafs.iter_mut().zip(&mut at_hubs) {
+        both_ways(at_leaf, at_hub);
+    }
+    let go_side = first_link(&raw(go_leaf_http, "/leafz?subs=1"));
+    let naq_side = first_link(&raw(naq_http, "/leafz?subs=1"));
+    assert_eq!(naq_side, go_side);
+}

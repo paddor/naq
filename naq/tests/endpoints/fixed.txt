@@ -122,6 +122,31 @@ GET /raftz
 < content-type: text/plain; charset=utf-8
 <
 < No Raft nodes registered
+GET /routez
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": ~,
+<   "now": ~,
+<   "num_routes": 0,
+<   "routes": []
+< }
+GET /leafz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "leafnodes": 0,
+<   "leafs": []
+< }
 GET /varz
 < HTTP/1.1 200 OK
 < access-control-allow-origin: *
@@ -182,6 +207,8 @@ GET /varz
 <   "http_req_stats": {
 <     "/gatewayz": 3,
 <     "/jsz": 4,
+<     "/leafz": 1,
+<     "/routez": 1,
 <     "/varz": 1
 <   },
 <   "config_load_time": ~,

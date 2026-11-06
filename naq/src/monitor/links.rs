@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use super::http::Response;
 use super::query::{Query, Refused};
-use super::{ask_all, now, pretty, text};
+use super::{ask_all, now, pretty, rtt, text};
 use crate::lane::Lane;
 use crate::perms::LinkPerms;
 use crate::server::Shared;
@@ -21,13 +21,14 @@ struct LeafInfo {
     account: String,
     ip: String,
     port: u16,
+    rtt: String,
     in_msgs: u64,
     out_msgs: u64,
     in_bytes: u64,
     out_bytes: u64,
     subscriptions: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    subscriptions_list: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    subscriptions_list: Vec<String>,
     compression: &'static str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     websocket: bool,
@@ -75,12 +76,13 @@ fn go_links(lane: &Lane) -> Vec<LeafInfo> {
                 account: lane.shared.accounts.name(l.account).to_owned(),
                 ip: f.ip.clone(),
                 port: f.port,
+                rtt: rtt(l.client.rtt.get()),
                 in_msgs: t.in_msgs,
                 out_msgs: t.out_msgs,
                 in_bytes: t.in_bytes,
                 out_bytes: t.out_bytes,
                 subscriptions: subs.len(),
-                subscriptions_list: Some(subs),
+                subscriptions_list: subs,
                 compression: "off",
                 websocket: f.websocket,
                 slot: None,
@@ -114,12 +116,14 @@ fn naq_links(lane: &Lane, mesh: &crate::mesh::Mesh, all: &mut Vec<LeafInfo>) {
             account: accounts.name(account).to_owned(),
             ip: String::new(),
             port: 0,
+            // Not measured over OMQ.
+            rtt: "0s".into(),
             in_msgs: 0,
             out_msgs: 0,
             in_bytes: 0,
             out_bytes: 0,
             subscriptions: subs.len(),
-            subscriptions_list: Some(subs),
+            subscriptions_list: subs,
             compression: "off",
             websocket: false,
             slot: None,
@@ -181,7 +185,7 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
     leafs.sort_by_key(|l| l.id);
     if !subs {
         for l in &mut leafs {
-            l.subscriptions_list = None;
+            l.subscriptions_list = Vec::new();
         }
     }
     Ok(pretty(&Leafz {

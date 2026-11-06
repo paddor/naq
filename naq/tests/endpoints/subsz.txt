@@ -1,0 +1,408 @@
+# Subscriptions of accounts: counts, the list, a test subject, paging.
+#! no_system_account: true
+#! accounts {
+#!   A { users: [{user: a, password: p}] }
+#!   B { users: [{user: b, password: p}] }
+#!   C { users: [{user: c, password: p}] }
+#! }
+# naq keeps no cache of matches.
+#~ num_cache
+#~ num_matches
+#~ cache_hit_rate
+#~ max_fanout
+#~ avg_fanout
+a> CONNECT {"verbose":false,"user":"a","pass":"p"}
+a> SUB orders.* 1
+a> SUB orders.> q 2
+a> SUB jobs 3
+a> UNSUB 3
+a> SUB auto 4
+a> UNSUB 4 2
+a> PUB orders.x 2
+a> hi
+b> CONNECT {"verbose":false,"user":"b","pass":"p"}
+b> SUB orders.new 1
+c> CONNECT {"verbose":false,"user":"c","pass":"p"}
+c> SUB x 7
+GET /subsz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 5,
+<   "num_cache": ~,
+<   "num_inserts": 6,
+<   "num_removes": 1,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 0,
+<   "offset": 0,
+<   "limit": 1024
+< }
+GET /subsz?subs=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 5,
+<   "num_cache": ~,
+<   "num_inserts": 6,
+<   "num_removes": 1,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 5,
+<   "offset": 0,
+<   "limit": 1024,
+<   "subscriptions_list": [
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "auto",
+<       "sid": "4",
+<       "msgs": 0,
+<       "max": 2,
+<       "cid": ~
+<     },
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "orders.*",
+<       "sid": "1",
+<       "msgs": 1,
+<       "cid": ~
+<     },
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "orders.\u003e",
+<       "qgroup": "q",
+<       "sid": "2",
+<       "msgs": 1,
+<       "cid": ~
+<     },
+<     {
+<       "account": "B",
+<       "account_tag": "B",
+<       "subject": "orders.new",
+<       "sid": "1",
+<       "msgs": 0,
+<       "cid": ~
+<     },
+<     {
+<       "account": "C",
+<       "account_tag": "C",
+<       "subject": "x",
+<       "sid": "7",
+<       "msgs": 0,
+<       "cid": ~
+<     }
+<   ]
+< }
+GET /subsz?subs=1&acc=A
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 3,
+<   "num_cache": ~,
+<   "num_inserts": 4,
+<   "num_removes": 1,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "subscriptions_list": [
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "auto",
+<       "sid": "4",
+<       "msgs": 0,
+<       "max": 2,
+<       "cid": ~
+<     },
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "orders.*",
+<       "sid": "1",
+<       "msgs": 1,
+<       "cid": ~
+<     },
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "orders.\u003e",
+<       "qgroup": "q",
+<       "sid": "2",
+<       "msgs": 1,
+<       "cid": ~
+<     }
+<   ]
+< }
+GET /subsz?subs=1&acc=nope
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 0,
+<   "num_cache": ~,
+<   "num_inserts": 0,
+<   "num_removes": 0,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 0,
+<   "offset": 0,
+<   "limit": 1024
+< }
+GET /subsz?subs=1&test=orders.new
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 5,
+<   "num_cache": ~,
+<   "num_inserts": 6,
+<   "num_removes": 1,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "subscriptions_list": [
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "orders.*",
+<       "sid": "1",
+<       "msgs": 1,
+<       "cid": ~
+<     },
+<     {
+<       "account": "A",
+<       "account_tag": "A",
+<       "subject": "orders.\u003e",
+<       "qgroup": "q",
+<       "sid": "2",
+<       "msgs": 1,
+<       "cid": ~
+<     },
+<     {
+<       "account": "B",
+<       "account_tag": "B",
+<       "subject": "orders.new",
+<       "sid": "1",
+<       "msgs": 0,
+<       "cid": ~
+<     }
+<   ]
+< }
+GET /subsz?subs=1&test=orders.new&acc=B
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 1,
+<   "num_cache": ~,
+<   "num_inserts": 1,
+<   "num_removes": 0,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 1,
+<   "offset": 0,
+<   "limit": 1024,
+<   "subscriptions_list": [
+<     {
+<       "account": "B",
+<       "account_tag": "B",
+<       "subject": "orders.new",
+<       "sid": "1",
+<       "msgs": 0,
+<       "cid": ~
+<     }
+<   ]
+< }
+GET /subsz?test=orders.new
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 5,
+<   "num_cache": ~,
+<   "num_inserts": 6,
+<   "num_removes": 1,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 0,
+<   "offset": 0,
+<   "limit": 1024
+< }
+GET /subscriptionsz?subs=true&limit=1&acc=C
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 1,
+<   "num_cache": ~,
+<   "num_inserts": 1,
+<   "num_removes": 0,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 1,
+<   "offset": 0,
+<   "limit": 1,
+<   "subscriptions_list": [
+<     {
+<       "account": "C",
+<       "account_tag": "C",
+<       "subject": "x",
+<       "sid": "7",
+<       "msgs": 0,
+<       "cid": ~
+<     }
+<   ]
+< }
+GET /subsz?subs=1&offset=1&acc=C
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 1,
+<   "num_cache": ~,
+<   "num_inserts": 1,
+<   "num_removes": 0,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 1,
+<   "offset": 1,
+<   "limit": 1024
+< }
+GET /subsz?subs=1&offset=-2&limit=-3&acc=C
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 1,
+<   "num_cache": ~,
+<   "num_inserts": 1,
+<   "num_removes": 0,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 1,
+<   "offset": 0,
+<   "limit": 1024,
+<   "subscriptions_list": [
+<     {
+<       "account": "C",
+<       "account_tag": "C",
+<       "subject": "x",
+<       "sid": "7",
+<       "msgs": 0,
+<       "cid": ~
+<     }
+<   ]
+< }
+GET /subsz?subs=1&test=jobs
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 5,
+<   "num_cache": ~,
+<   "num_inserts": 6,
+<   "num_removes": 1,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 0,
+<   "offset": 0,
+<   "limit": 1024
+< }
+c.
+GET /subsz?acc=C
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_subscriptions": 0,
+<   "num_cache": ~,
+<   "num_inserts": 1,
+<   "num_removes": 1,
+<   "num_matches": ~,
+<   "cache_hit_rate": ~,
+<   "max_fanout": ~,
+<   "avg_fanout": ~,
+<   "total": 0,
+<   "offset": 0,
+<   "limit": 1024
+< }

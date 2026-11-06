@@ -229,7 +229,12 @@ fn on_lane(lane: &Lane) -> OnLane {
     let mut routes = 0;
     if let Some(mesh) = lane.mesh.borrow().as_ref() {
         leafs += mesh.leafs.borrow().len() + mesh.hubs.borrow().iter().filter(|h| h.up).count();
-        routes = mesh.peers.borrow().iter().filter(|p| p.up).count();
+        routes = mesh
+            .peers
+            .borrow()
+            .iter()
+            .filter(|p| p.up.is_some())
+            .count();
     }
     OnLane {
         subscriptions,

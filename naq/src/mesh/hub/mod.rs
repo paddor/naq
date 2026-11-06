@@ -104,7 +104,7 @@ impl Me {
             .peers
             .borrow()
             .iter()
-            .filter(|p| p.up)
+            .filter(|p| p.up.is_some())
             .flat_map(|p| &p.leaf_urls)
         {
             urls.push(' ');
