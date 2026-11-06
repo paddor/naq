@@ -34,6 +34,8 @@ pub(crate) struct Acceptor {
     map: bool,
     /// The certificate authorities of `ca_file`.
     roots: Vec<CertificateDer<'static>>,
+    /// When the server's certificate expires, if it tells.
+    pub(crate) not_after: Option<std::time::SystemTime>,
 }
 
 impl std::fmt::Debug for Acceptor {
@@ -50,12 +52,8 @@ impl std::fmt::Debug for Acceptor {
 impl Acceptor {
     /// Reads the certificates and key `o` names.
     pub(crate) fn new(o: &Tls) -> Result<Acceptor, Error> {
-        let bad = |what: &str, e: &dyn std::fmt::Display| Error::Tls(format!("{what}: {e}"));
-        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&o.cert_file)
-            .and_then(Iterator::collect)
-            .map_err(|e| bad(&o.cert_file.display().to_string(), &e))?;
-        let key = PrivateKeyDer::from_pem_file(&o.key_file)
-            .map_err(|e| bad(&o.key_file.display().to_string(), &e))?;
+        let (certs, key) = identity(o)?;
+        let not_after = certs.first().and_then(|c| cert::not_after(c));
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -93,8 +91,38 @@ impl Acceptor {
             verify: o.verify,
             map: o.map,
             roots: cas,
+            not_after,
         })
     }
+}
+
+/// A TLS error: `e` went wrong with `what`.
+fn bad(what: &str, e: &dyn std::fmt::Display) -> Error {
+    Error::Tls(format!("{what}: {e}"))
+}
+
+/// The certificate chain and key `o` names, read.
+fn identity(o: &Tls) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Error> {
+    let certs = CertificateDer::pem_file_iter(&o.cert_file)
+        .and_then(Iterator::collect)
+        .map_err(|e| bad(&o.cert_file.display().to_string(), &e))?;
+    let key = PrivateKeyDer::from_pem_file(&o.key_file)
+        .map_err(|e| bad(&o.key_file.display().to_string(), &e))?;
+    Ok((certs, key))
+}
+
+/// TLS with the certificate `o` names that asks clients for none, as the
+/// HTTPS monitoring port has it.
+pub(crate) fn plain_acceptor(o: &Tls) -> Result<TlsAcceptor, Error> {
+    let (certs, key) = identity(o)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| bad("protocols", &e))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| bad("certificate and key", &e))?;
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 impl Acceptor {

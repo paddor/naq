@@ -70,7 +70,7 @@ impl Conn {
                 Err(close) => return close,
             };
             if let Some(sub) = self.stalled.take() {
-                stall(&sub, stall_mark).await;
+                stall(&sub, stall_mark, &self.lane.shared.events.stalls).await;
             }
             // Lets the writers just woken run before the next read, so output
             // leaves in step with input instead of in bursts.
@@ -289,7 +289,7 @@ impl Conn {
                 None
             }
             Tick::Stale => {
-                crate::stats::Events::note(&self.lane.shared.events.stale);
+                self.lane.shared.events.stale_clients.note();
                 Some(Close::Stale)
             }
         }
@@ -580,8 +580,8 @@ impl SpentReads {
 }
 
 /// Waits up to [`STALL_MAX`] while `sub` has more than `mark` bytes queued,
-/// so its publisher slows to its pace.
-pub(crate) async fn stall(sub: &Rc<Client>, mark: usize) {
+/// so its publisher slows to its pace, and counts the wait in `stalls`.
+pub(crate) async fn stall(sub: &Rc<Client>, mark: usize, stalls: &crate::stats::Counter) {
     let drained = sub.drained.notified();
     tokio::pin!(drained);
     // Registered before the check, so a drain after it is not missed.
@@ -589,6 +589,7 @@ pub(crate) async fn stall(sub: &Rc<Client>, mark: usize) {
     if sub.is_closed() || sub.out.borrow().len() <= mark {
         return;
     }
+    stalls.note();
     let _ = tokio::time::timeout(STALL_MAX, drained).await;
 }
 

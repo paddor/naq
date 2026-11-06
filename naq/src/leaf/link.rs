@@ -539,7 +539,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             };
             // A subscriber past the stall mark slows the hub to its pace.
             if let Some(sub) = self.stalled.take() {
-                conn::stall(&sub, mark).await;
+                conn::stall(&sub, mark, &lane.shared.events.stalls).await;
             }
             tokio::task::yield_now().await;
             conn::make_room(&mut buf, need, &lane.reads);
@@ -640,7 +640,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
     fn inbound(&mut self, m: &leaf::Msg<'_>, buf: &[u8], side: &LinkSide) {
         let lane = self.lane;
         let len = m.payload.len() + m.headers.map_or(0, <[u8]>::len);
-        lane.tally.took(len);
+        lane.peers.took(len);
         side.client.tally.took(len);
         if side::denied(m.subject) || !side.takes(m.subject) {
             return;

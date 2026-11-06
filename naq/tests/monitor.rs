@@ -13,13 +13,13 @@ use naq::{Options, Server};
 fn get(at: SocketAddr, path: &str) -> (String, serde_json::Value) {
     let mut c = TcpStream::connect(at).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    c.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+    c.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
         .unwrap();
     let mut text = String::new();
     c.read_to_string(&mut text).unwrap();
     let (head, body) = text.split_once("\r\n\r\n").unwrap();
     let status = head.lines().next().unwrap().to_owned();
-    (status, serde_json::from_str(body).unwrap())
+    (status, serde_json::from_str(body).unwrap_or_default())
 }
 
 /// A client that subscribed to its name and sent `n` messages to itself,
@@ -85,7 +85,7 @@ fn health_vars_and_connections_come_as_nats_server_writes_them() {
 }
 
 #[test]
-fn a_bad_request_is_closed() {
+fn one_connection_takes_requests_in_turn() {
     let s = Server::start(&Options {
         host: "127.0.0.1".into(),
         port: 0,
@@ -94,20 +94,31 @@ fn a_bad_request_is_closed() {
         ..Options::default()
     })
     .unwrap();
-    let m = s.monitor_addr().unwrap();
-    for bad in ["POST /varz HTTP/1.1\r\n\r\n", "GET\r\n\r\n"] {
-        let mut c = TcpStream::connect(m).unwrap();
-        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        c.write_all(bad.as_bytes()).unwrap();
-        let mut text = String::new();
-        let _ = c.read_to_string(&mut text);
-        assert_eq!(text, "", "{bad:?}");
+    let mut c = TcpStream::connect(s.monitor_addr().unwrap()).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\nGET /nope HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let mut r = BufReader::new(c);
+    let mut statuses = Vec::new();
+    let mut line = String::new();
+    while statuses.len() < 2 {
+        line.clear();
+        assert!(r.read_line(&mut line).unwrap() > 0, "closed");
+        // A body without a newline runs into the next status line.
+        if let Some(at) = line.find("HTTP/1.1 ") {
+            statuses.push(line[at..].trim_end().to_owned());
+        }
     }
-    let mut c = TcpStream::connect(m).unwrap();
-    c.write_all(&[b'x'; 9000]).unwrap();
+    assert_eq!(statuses, ["HTTP/1.1 200 OK", "HTTP/1.1 404 Not Found"]);
+    // A head past 1 MiB is refused, and the connection closed.
+    let mut c = TcpStream::connect(s.monitor_addr().unwrap()).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut big = b"GET /varz HTTP/1.1\r\nX: ".to_vec();
+    big.resize((1 << 20) + 8192, b'x');
+    let _ = c.write_all(&big);
     let mut text = String::new();
     let _ = c.read_to_string(&mut text);
-    assert_eq!(text, "");
+    assert!(text.starts_with("HTTP/1.1 431 "), "{text}");
 }
 
 #[test]
@@ -120,4 +131,86 @@ fn no_port_no_monitoring() {
     })
     .unwrap();
     assert!(s.monitor_addr().is_none());
+}
+
+/// The status line, headers and body of `GET path`, as text.
+fn get_text(at: SocketAddr, path: &str) -> (String, String) {
+    let mut c = TcpStream::connect(at).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut text = String::new();
+    c.read_to_string(&mut text).unwrap();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    (head.to_owned(), body.to_owned())
+}
+
+#[test]
+fn the_index_links_to_the_endpoints_under_the_base_path() {
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        http_port: Some(0),
+        http_base_path: "/mon/".into(),
+        ..Options::default()
+    })
+    .unwrap();
+    let m = s.monitor_addr().unwrap();
+    let (head, page) = get_text(m, "/mon");
+    assert!(
+        head.contains("Content-Type: text/html; charset=utf-8"),
+        "{head}"
+    );
+    assert!(page.contains("<a href=\"/mon/varz\">varz</a>"), "{page}");
+    assert!(page.contains("<a href=\"/mon/debug/vars\">"), "{page}");
+    let (_, varz) = get(m, "/mon/varz");
+    assert_eq!(varz["http_req_stats"]["/"], 1);
+    // The command line, as Go's expvar writes it.
+    let (head, expvar) = get_text(m, "/mon/debug/vars");
+    assert!(
+        head.contains("Content-Type: application/json; charset=utf-8"),
+        "{head}"
+    );
+    assert!(!head.contains("Access-Control"), "{head}");
+    assert!(
+        expvar.starts_with("{\n\"cmdline\": [\"") && expvar.ends_with("\"]\n}\n"),
+        "{expvar}"
+    );
+    let (head, _) = get_text(m, "/mon/stacksz");
+    assert!(head.starts_with("HTTP/1.1 404 "), "{head}");
+}
+
+#[test]
+fn a_publisher_that_outruns_its_subscriber_is_stalled_and_counted() {
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        http_port: Some(0),
+        max_pending: 256 << 10,
+        ..Options::default()
+    })
+    .unwrap();
+    // A subscriber that never reads.
+    let mut sub = TcpStream::connect(s.addr()).unwrap();
+    sub.write_all(b"CONNECT {\"verbose\":false}\r\nSUB big 1\r\nPING\r\n")
+        .unwrap();
+    let mut publisher = busy(&s, "p", 0);
+    let payload = "x".repeat(32 << 10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, varz) = get(s.monitor_addr().unwrap(), "/varz");
+        if varz["slow_consumer_stats"]["clients"] == 1 {
+            assert!(varz["stalled_clients"].as_u64().unwrap() > 0, "{varz}");
+            assert_eq!(varz["slow_consumers"], 1);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{varz}");
+        let mut batch = String::new();
+        for _ in 0..64 {
+            let _ = write!(batch, "PUB big {}\r\n{payload}\r\n", payload.len());
+        }
+        publisher.get_mut().write_all(batch.as_bytes()).unwrap();
+    }
 }

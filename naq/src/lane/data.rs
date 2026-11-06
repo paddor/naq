@@ -336,7 +336,7 @@ pub(super) async fn run(lane: Rc<Lane>, rx: Receiver<Batch>) {
         // A subscriber past the stall mark slows its publishers: they wait
         // for room in this lane's mailbox meanwhile.
         if let Some(c) = stalled {
-            crate::conn::stall(&c, mark).await;
+            crate::conn::stall(&c, mark, &lane.shared.events.stalls).await;
         }
         tokio::task::yield_now().await;
     }
@@ -421,6 +421,7 @@ impl Lane {
             };
             // Slots are below 64: they fit.
             self.slots.tally(s as u16).gave_many(msgs, bytes);
+            self.peers.gave_many(msgs, bytes);
             let link = self.sends.borrow().get(s).cloned().flatten();
             if let Some(link) = link {
                 link.send(batch).await;

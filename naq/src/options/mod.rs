@@ -57,11 +57,19 @@ pub struct Options {
     /// How long a client has to authenticate, from the moment it connects
     /// (`authorization { timeout }`).
     pub auth_timeout: Duration,
-    /// Port for monitoring over HTTP (`http_port`): `/healthz`, `/varz`,
-    /// `/connz`, `/leafz`. `None` serves none; 0 picks a free port.
+    /// Port for monitoring over HTTP (`http_port`, `http`): the endpoints
+    /// of `nats-server`, such as `/healthz`, `/varz` and `/connz`. `None`
+    /// serves none; 0 picks a free port. Not with [`Options::https_port`].
     pub http_port: Option<u16>,
-    /// Host for monitoring; `None` for [`Options::host`] (`http`).
+    /// Port for monitoring over HTTPS (`https_port`, `https`), with the
+    /// certificate of [`Options::tls`], which it needs. Clients present no
+    /// certificate.
+    pub https_port: Option<u16>,
+    /// Host for monitoring; `None` for [`Options::host`] (`http`, `https`).
     pub http_host: Option<String>,
+    /// The path monitoring is served under (`http_base_path`): `/mon`
+    /// serves `/mon/varz`. Empty for the root.
+    pub http_base_path: String,
     /// TLS for every client (`tls`).
     pub tls: Option<Tls>,
     /// WebSocket clients, on a port of their own (`websocket`).
@@ -541,7 +549,9 @@ impl Default for Options {
             resolver: None,
             resolver_preload: Vec::new(),
             http_port: None,
+            https_port: None,
             http_host: None,
+            http_base_path: String::new(),
             tls: None,
             websocket: None,
             log: Logging::default(),

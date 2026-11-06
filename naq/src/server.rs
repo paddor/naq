@@ -51,8 +51,12 @@ pub(crate) struct Shared {
     pub(crate) log: crate::log::Log,
     /// It shuts down: no new connections.
     pub(crate) stopping: std::sync::atomic::AtomicBool,
-    /// Message counts of each lane.
+    /// Message counts of the clients of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
+    /// Message counts of the links and routes of each lane.
+    pub(crate) peer_counts: Box<[stats::Shared]>,
+    /// What monitoring keeps.
+    pub(crate) monitor: crate::monitor::State,
     /// Slow consumers and stale clients so far.
     pub(crate) events: stats::Events,
     /// When the server started.
@@ -167,6 +171,7 @@ impl Server {
         let (ports, at) = bind_all(&ctx, opts)?;
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
         let keys = Keys::new();
+        let started = std::time::SystemTime::now();
         let shared = Arc::new(Shared {
             id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
             opts: opts.clone(),
@@ -192,8 +197,10 @@ impl Server {
             log,
             stopping: std::sync::atomic::AtomicBool::new(false),
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
+            peer_counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
+            monitor: crate::monitor::State::new(opts, started, at.monitor),
             events: stats::Events::default(),
-            started: std::time::SystemTime::now(),
+            started,
             gone: AtomicU64::new(0),
             tls: setup.tls,
             ws: door(opts, at.ws, setup.ws_tls),
@@ -203,7 +210,8 @@ impl Server {
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });
-        let mesh = run(&ctx, &shared, rxs, ports)?;
+        let mesh = run(&ctx, &shared, rxs, ports, setup.monitor_tls)?;
+        let _ = shared.monitor.mesh.set(mesh);
         let ports = announce(&shared, &at, &mesh)?;
         Ok(Server {
             _ctx: ctx,
@@ -359,6 +367,8 @@ struct Setup {
     imports: Box<[crate::imports::Imports]>,
     /// The directory resolver, if there is one.
     resolver: Option<crate::resolver::Dir>,
+    /// For the HTTPS monitoring port.
+    monitor_tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 /// Checks `opts` and reads the TLS files they name: for the client port,
@@ -368,6 +378,7 @@ fn check(opts: &Options) -> Result<Setup, Error> {
     let imports = crate::imports::link(opts).map_err(Error::Options)?;
     crate::leaf::validate(opts).map_err(Error::Options)?;
     crate::mesh::validate(opts).map_err(Error::Options)?;
+    crate::monitor::validate(opts)?;
     if let Some(w) = &opts.websocket {
         crate::ws::validate(w).map_err(Error::Options)?;
     }
@@ -389,6 +400,7 @@ fn check(opts: &Options) -> Result<Setup, Error> {
         leaf_tls,
         imports,
         resolver: crate::resolver::Dir::open(opts).map_err(Error::Options)?,
+        monitor_tls: crate::monitor::acceptor(opts)?,
     })
 }
 
@@ -406,6 +418,7 @@ fn run(
     shared: &Arc<Shared>,
     rxs: Vec<lane::LaneRx>,
     ports: Ports,
+    monitor_tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<crate::mesh::Bound, Error> {
     let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
     for (l, rx) in lanes.iter().zip(rxs) {
@@ -417,7 +430,7 @@ fn run(
     if let Some(m) = ports.monitor {
         let s = shared.clone();
         first
-            .spawn(move || crate::monitor::serve(m, s))
+            .spawn(move || crate::monitor::serve(m, s, monitor_tls))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     if let Some(w) = ports.ws {
@@ -487,7 +500,6 @@ fn lanes(wanted: usize) -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
-/// Binds the monitoring port, if `opts` want one.
 /// Where a server's listeners are bound.
 struct Addrs {
     client: SocketAddr,
@@ -517,8 +529,9 @@ fn bind_all(ctx: &Context, opts: &Options) -> Result<(Ports, Addrs), Error> {
     Ok((ports, at))
 }
 
+/// Binds the monitoring port, HTTP or HTTPS, if `opts` want one.
 fn bind_monitor(ctx: &Context, opts: &Options) -> Result<Option<(Listener, SocketAddr)>, Error> {
-    let Some(port) = opts.http_port else {
+    let Some(port) = opts.http_port.or(opts.https_port) else {
         return Ok(None);
     };
     let host = opts.http_host.as_deref().unwrap_or(&opts.host);

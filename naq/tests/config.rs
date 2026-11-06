@@ -391,7 +391,31 @@ fn monitoring_takes_a_port_or_a_host_and_port() {
         (Some(8444), Some("127.0.0.1"))
     );
     assert!("http: nope\n".parse::<Options>().is_err());
-    assert!("http_port: -1\n".parse::<Options>().is_err());
+    // As in nats-server: -1 picks a free port, 0 serves none.
+    let port = |text: &str| text.parse::<Options>().unwrap();
+    assert_eq!(port("http_port: -1\n").http_port, Some(0));
+    assert_eq!(port("http_port: 0\n").http_port, None);
+    assert_eq!(port("http: \"127.0.0.1:-1\"\n").http_port, Some(0));
+    let o = port("https: \"[::1]:8443\"\nhttp_base_path: mon\n");
+    assert_eq!(
+        (
+            o.https_port,
+            o.http_host.as_deref(),
+            o.http_base_path.as_str()
+        ),
+        (Some(8443), Some("::1"), "mon")
+    );
+    assert_eq!(port("https_port: 8443\n").https_port, Some(8443));
+    assert_eq!(port("http: 8222\n").http_port, Some(8222));
+    for bad in [
+        "http_port: 70000\n",
+        "https_port: x\n",
+        "https: \"h:x\"\n",
+        "https: true\n",
+        "http_base_path: 1\n",
+    ] {
+        assert!(bad.parse::<Options>().is_err(), "{bad:?}");
+    }
 }
 
 #[test]

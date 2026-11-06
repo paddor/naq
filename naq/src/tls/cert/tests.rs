@@ -265,3 +265,28 @@ fn a_certificate_of_no_subject_names_its_client_by_its_alternative_names() {
     );
     assert_eq!(n.user(|_| false, &[]), None);
 }
+
+#[test]
+fn a_certificate_tells_when_it_expires() {
+    let key = KeyPair::generate().unwrap();
+    let rfc = |p: &CertificateParams| {
+        let der = p.self_signed(&key).unwrap().der().to_vec();
+        not_after(&der).map(crate::times::rfc3339_nano)
+    };
+    let mut p = CertificateParams::new(vec!["a".to_owned()]).unwrap();
+    // UTCTime before 2050, GeneralizedTime from it.
+    p.not_after = rcgen::date_time_ymd(2031, 2, 3);
+    assert_eq!(rfc(&p).as_deref(), Some("2031-02-03T00:00:00Z"));
+    p.not_after = rcgen::date_time_ymd(2071, 12, 31);
+    assert_eq!(rfc(&p).as_deref(), Some("2071-12-31T00:00:00Z"));
+    assert_eq!(not_after(b"\x30\x00"), None);
+    assert_eq!(
+        asn1_time(0x17, b"991231235959Z")
+            .map(crate::times::rfc3339_nano)
+            .as_deref(),
+        Some("1999-12-31T23:59:59Z")
+    );
+    assert_eq!(asn1_time(0x17, b"9912312359Z"), None);
+    assert_eq!(asn1_time(0x18, b"2031020300000x"), None);
+    assert_eq!(asn1_time(0x04, b"991231235959Z"), None);
+}

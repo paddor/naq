@@ -44,6 +44,8 @@ nix.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+# Paused time for tests of timeouts.
+tokio = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true
 
 [lints]

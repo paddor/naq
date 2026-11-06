@@ -58,6 +58,7 @@ mod signals;
 mod stats;
 mod stop;
 mod sys;
+mod times;
 mod tls;
 mod ws;
 

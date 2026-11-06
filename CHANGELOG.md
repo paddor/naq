@@ -41,11 +41,24 @@ Notable changes to naq. The format follows
   `-v`, `--user`, `--pass`, `--auth`, the `--tls*` flags, `--cluster`,
   `--cluster_name` and `--routes`. Flags of `nats-server` naq does not
   serve say so.
+- `naq`: monitoring served as `nats-server` serves it: HTTP/1.1 with
+  keep-alive, any method, and Go's answers to requests it cannot read and
+  to paths that are not clean; JSON in Go's layout and escaping; query
+  options read as Go reads them, refused with its texts. `/varz` has all
+  of Go's fields that apply, `/healthz` takes its options, and `/jsz`,
+  `/gatewayz`, `/ipqueuesz`, `/raftz` and `/debug/vars` answer as Go does
+  without JetStream, gateways or Raft.
+- `naq`: `Options::https_port` (`https_port`, `https`, `-ms`): monitoring
+  over HTTPS with the certificate of the client port, and
+  `Options::http_base_path` (`http_base_path`).
 
 ### Changed
 
 - `naq` binary: a configuration it cannot use exits 1, as `nats-server`;
   flags it cannot read exit 2.
+- `naq`: a monitoring port of -1 picks a free one and 0 serves none, as
+  in `nats-server` (`http_port`, `https_port`, `-m`, `-ms`); `listen`
+  addresses take port -1.
 
 ### Fixed
 

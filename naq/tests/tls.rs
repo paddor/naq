@@ -276,3 +276,77 @@ fn auto_mode_takes_tls_first_or_falls_back_to_info_first() {
     assert!(t.handshake_first);
     assert_eq!(t.fallback, Some(Duration::from_millis(300)));
 }
+
+#[test]
+fn monitoring_over_https_asks_no_client_certificate() {
+    let pki = Pki::new("https");
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        tls: Some(pki.tls(true, false)),
+        https_port: Some(0),
+        ..Options::default()
+    })
+    .unwrap();
+    let at = s.monitor_addr().unwrap();
+    let t = TcpStream::connect(at).unwrap();
+    t.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut tls = wrap(pki.client(false), t);
+    tls.write_all(b"GET /varz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut got = String::new();
+    let _ = tls.read_to_string(&mut got);
+    assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "{got}");
+    let port = format!("\"https_port\": {}", at.port());
+    assert!(
+        got.contains(&port) && got.contains("\"http_port\": 0"),
+        "{got}"
+    );
+    // Plain HTTP gets Go's answer.
+    let mut plain = TcpStream::connect(at).unwrap();
+    plain
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    plain
+        .write_all(b"GET /varz HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let mut got = String::new();
+    let _ = plain.read_to_string(&mut got);
+    assert_eq!(
+        got,
+        "HTTP/1.0 400 Bad Request\r\n\r\nClient sent an HTTP request to an HTTPS server.\n"
+    );
+    // Neither HTTP nor TLS: closed.
+    let mut junk = TcpStream::connect(at).unwrap();
+    junk.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    junk.write_all(b"\x17\x03\x03\x00\x01x").unwrap();
+    let mut got = Vec::new();
+    let _ = junk.read_to_end(&mut got);
+    assert!(!got.starts_with(b"HTTP"), "{got:?}");
+}
+
+#[test]
+fn https_needs_tls_and_no_http_port() {
+    let pki = Pki::new("https-bad");
+    let err = Server::start(&Options {
+        https_port: Some(0),
+        ..Options::default()
+    })
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::Options(ref e) if e == "TLS cert and key required for HTTPS"),
+        "{err}"
+    );
+    let err = Server::start(&Options {
+        tls: Some(pki.tls(false, false)),
+        http_port: Some(0),
+        https_port: Some(0),
+        ..Options::default()
+    })
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::Options(ref e) if e.starts_with("can't specify both HTTP")),
+        "{err}"
+    );
+}

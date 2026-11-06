@@ -41,6 +41,15 @@ pub fn websocket(data: &[u8]) {
     crate::ws::fuzz(data);
 }
 
+/// Reads a request to the monitoring port.
+///
+/// # Panics
+///
+/// When a path cleaned for a redirect is not clean.
+pub fn monitor(data: &[u8]) {
+    crate::monitor::fuzz(data);
+}
+
 /// Decodes a JWT as each kind of claims.
 pub fn jwt(data: &[u8]) {
     let Ok(token) = std::str::from_utf8(data) else {
@@ -109,5 +118,13 @@ mod tests {
         websocket(b"GET / HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n\x02\x82\x80\0\0\0\0\x89\x80\0\0\0\0");
         websocket(b"\x16\x03\x01\n");
         websocket(b"");
+    }
+
+    #[test]
+    fn monitoring_requests_are_read_without_panics() {
+        monitor(b"GET //a/../varz?subs=1&limit=x HTTP/1.1\r\nHost: h\r\n\r\n");
+        monitor(b"GET /varz HTTP/1.1\r\nHost: h\r\n\r\n");
+        monitor(b"BAD\r\n\r\n");
+        monitor(b"");
     }
 }

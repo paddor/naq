@@ -15,7 +15,9 @@ server:
   -a, --addr HOST          host to listen on (0.0.0.0)
   -p, --port PORT          client port (4222); -1 picks a free one
   -n, --name NAME          server name (naq)
-  -m, --http_port PORT     monitoring port
+  -m, --http_port PORT     monitoring port; -1 picks a free one
+  -ms, --https_port PORT   monitoring port over HTTPS, with the TLS of
+                           clients
   --lanes N                IO lanes, one thread each (one per core)
   -P, --pid FILE           write the process ID to FILE
   --ports_file_dir DIR     write the ports the server listens on to DIR
@@ -67,10 +69,18 @@ TLS for clients:
 
 Any TLS flag replaces the tls block of the configuration file.";
 
+/// A monitoring port as `nats-server` takes it: 0 is none, -1 picks a
+/// free one.
+fn monitor_port(val: &str) -> Result<Option<u16>, ()> {
+    match val.parse::<i32>().map_err(|_| ())? {
+        0 => Ok(None),
+        -1 => Ok(Some(0)),
+        n => u16::try_from(n).map(Some).map_err(|_| ()),
+    }
+}
+
 /// Flags of `nats-server` naq does not serve.
 const UNSERVED: &[&str] = &[
-    "ms",
-    "https_port",
     "js",
     "jetstream",
     "client_advertise",
@@ -256,7 +266,8 @@ fn value(
         "P" | "pid" => o.pid_file = Some(val.into()),
         "ports_file_dir" => o.ports_file_dir = Some(val.into()),
         "lanes" => o.lanes = val.parse().map_err(|_| bad())?,
-        "m" | "http_port" => o.http_port = Some(val.parse().map_err(|_| bad())?),
+        "m" | "http_port" => o.http_port = monitor_port(val).map_err(|()| bad())?,
+        "ms" | "https_port" => o.https_port = monitor_port(val).map_err(|()| bad())?,
         "l" | "log" => o.log.to = Some(LogTo::File(val.into())),
         "r" | "remote_syslog" => o.log.prefer(LogTo::RemoteSyslog(val.into())),
         "log_size_limit" => o.log.size_limit = val.parse().map_err(|_| bad())?,
@@ -507,5 +518,16 @@ mod tests {
         assert!(matches!(bad(&["-D=maybe"]), Bad::Usage(_)));
         assert!(matches!(bad(&["--profile", "1"]), Bad::Usage(e) if e.contains("not served")));
         assert!(matches!(bad(&["-c"]), Bad::Usage(_)));
+    }
+
+    #[test]
+    fn monitoring_ports_take_0_for_none_and_minus_1_for_any() {
+        assert_eq!(serve(&["-m", "8222"]).http_port, Some(8222));
+        assert_eq!(serve(&["-m=-1"]).http_port, Some(0));
+        assert_eq!(serve(&["-m", "0"]).http_port, None);
+        assert_eq!(serve(&["-ms", "8443"]).https_port, Some(8443));
+        assert_eq!(serve(&["--https_port=-1"]).https_port, Some(0));
+        assert!(matches!(bad(&["-m", "70000"]), Bad::Usage(_)));
+        assert!(matches!(bad(&["-ms", "x"]), Bad::Usage(_)));
     }
 }

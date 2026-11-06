@@ -72,8 +72,8 @@ pub(crate) enum Control {
     /// The server shuts down: every client and link closes; answered once
     /// they are gone, or after a while.
     Shutdown(oneshot::Sender<()>),
-    /// Answered with the lane's clients, for monitoring.
-    Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
+    /// Work for monitoring, run on the lane.
+    Ask(crate::monitor::Ask),
     /// The server in slot `server` has `weight` members in `subject` of
     /// `account`, in `queue` if given; none to remove them.
     Server {
@@ -107,13 +107,6 @@ pub(crate) enum Control {
         id: Box<[u8]>,
         endpoints: Vec<String>,
     },
-    /// Answered with the lane's leaf node links, for monitoring.
-    Links(oneshot::Sender<crate::monitor::Links>),
-    /// Answered by lane 0 with the routes of the cluster, for monitoring.
-    Routes(
-        crate::monitor::Subs,
-        oneshot::Sender<Vec<crate::monitor::RouteInfo>>,
-    ),
 }
 
 /// The ways into a lane, for every lane.
@@ -179,8 +172,10 @@ pub(crate) struct Lane {
     spent: RefCell<Vec<Spent>>,
     /// State of the random numbers for queue picks.
     rng: Cell<u64>,
-    /// Messages in and out on this lane.
+    /// Messages in from its clients and out to them.
     pub(crate) tally: Tally,
+    /// Messages in from links and other servers, and out to them.
+    pub(crate) peers: Tally,
     /// Clients on this lane, by ID.
     pub(crate) clients: RefCell<FxHashMap<u64, Rc<Client>>>,
     /// Read buffers of its clients that batches may still refer to.
@@ -292,6 +287,7 @@ impl Lane {
     /// publishes the lane's counts.
     pub(crate) fn flush(&self) {
         self.tally.publish(&self.shared.counts[self.id]);
+        self.peers.publish(&self.shared.peer_counts[self.id]);
         let mut dirty = self.dirty.take();
         for c in dirty.drain(..) {
             c.dirty.set(false);
@@ -406,9 +402,7 @@ impl Lane {
                 }
             }
             Control::Shutdown(done) => crate::stop::lane(self, done),
-            Control::Clients(answer) => {
-                let _ = answer.send(crate::monitor::conns(self));
-            }
+            Control::Ask(ask) => ask.run(self),
             Control::Server {
                 account,
                 subject,
@@ -456,12 +450,6 @@ impl Lane {
                     crate::mesh::hub(&me, slot, &id, &endpoints);
                 }
             }
-            Control::Links(answer) => {
-                let _ = answer.send(crate::monitor::links(self));
-            }
-            Control::Routes(subs, answer) => {
-                let _ = answer.send(crate::monitor::routes(self, subs));
-            }
         }
     }
 }
@@ -489,6 +477,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         spent: RefCell::default(),
         rng: Cell::new(seed()),
         tally: Tally::default(),
+        peers: Tally::default(),
         clients: RefCell::default(),
         reads: SpentReads::default(),
         batches: SpentReads::default(),

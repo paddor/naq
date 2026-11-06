@@ -28,7 +28,7 @@ use crate::auth::Creds;
 use crate::lane::{self, Lane, Outs};
 use crate::perms::Held;
 use crate::server::Shared;
-use crate::stats::{Events, Tally};
+use crate::stats::Tally;
 
 /// How long a closed connection's writer may take to write what is left,
 /// such as to a client that stopped reading.
@@ -468,7 +468,7 @@ where
     lane.clients.borrow_mut().insert(client.id, client.clone());
     let opts = &lane.shared.opts;
     let shared = lane.shared.clone();
-    let slow = move || Events::note(&shared.events.slow_consumers);
+    let slow = move || shared.events.slow_clients.note();
     let deadline = lane.shared.opts.write_deadline;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, deadline, slow));
     client.wake_writer();

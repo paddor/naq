@@ -48,7 +48,12 @@ fn ports_json(opts: &Options, at: &Bound) -> serde_json::Value {
     m.insert("nats".into(), url(scheme, &opts.host, at.client));
     if let Some(a) = at.monitor {
         let host = opts.http_host.as_deref().unwrap_or(&opts.host);
-        m.insert("monitoring".into(), url("http", host, a));
+        let scheme = if opts.https_port.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        m.insert("monitoring".into(), url(scheme, host, a));
     }
     if let (Some(a), Some(c)) = (at.cluster, &opts.cluster) {
         m.insert("cluster".into(), url("nats", &c.host, a));
@@ -80,6 +85,16 @@ mod tests {
         assert_eq!(
             ports_json(&o, &at).to_string(),
             r#"{"monitoring":["http://[::1]:8222"],"nats":["nats://[::1]:4222"]}"#
+        );
+        let o = Options {
+            https_port: Some(0),
+            http_host: Some("127.0.0.1".into()),
+            ..o
+        };
+        assert!(
+            ports_json(&o, &at)
+                .to_string()
+                .contains(r#""monitoring":["https://127.0.0.1:8222"]"#)
         );
     }
 }

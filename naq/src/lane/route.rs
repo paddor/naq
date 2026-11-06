@@ -184,7 +184,7 @@ impl Lane {
         let opts = &self.shared.opts;
         if len > opts.max_pending {
             // A slow consumer.
-            crate::stats::Events::note(&self.shared.events.slow_consumers);
+            self.shared.events.slow_clients.note();
             c.kick(crate::conn::Close::SlowPending);
         } else if len > opts.max_pending / 4 * 3 {
             *stalled = Some(c.clone());

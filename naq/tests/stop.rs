@@ -56,10 +56,18 @@ fn a_shutdown_closes_clients_after_what_they_were_sent() {
     let mut sub = subscriber(&s);
     let mut publisher = TcpStream::connect(addr).unwrap();
     publisher
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    publisher
         .write_all(b"CONNECT {}\r\nPUB foo 2\r\nhi\r\nPING\r\n")
         .unwrap();
-    let mut pong = [0; 64];
-    let _ = publisher.read(&mut pong).unwrap();
+    // The PONG says the server read the publish.
+    let mut publisher = BufReader::new(publisher);
+    let mut line = String::new();
+    while line != "PONG\r\n" {
+        line.clear();
+        assert!(publisher.read_line(&mut line).unwrap() > 0, "closed");
+    }
     s.shutdown();
     let mut rest = String::new();
     sub.read_to_string(&mut rest).unwrap();

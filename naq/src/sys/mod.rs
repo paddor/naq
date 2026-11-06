@@ -123,7 +123,7 @@ fn server_info(shared: &Shared) -> Value {
         "jetstream": false,
         "flags": 0,
         "seq": seq,
-        "time": crate::imports::latency::rfc3339_nano(std::time::SystemTime::now()),
+        "time": crate::times::rfc3339_nano(std::time::SystemTime::now()),
     });
     if let Some(c) = &shared.opts.cluster {
         info["cluster"] = c.name.clone().into();

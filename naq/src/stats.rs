@@ -111,19 +111,34 @@ impl Shared {
     }
 }
 
-/// Events across the server, rare enough for atomics.
+/// A count of events rare enough for an atomic, read now and then.
 #[derive(Debug, Default)]
-pub(crate) struct Events {
-    pub(crate) slow_consumers: AtomicU64,
-    pub(crate) stale: AtomicU64,
+pub(crate) struct Counter(AtomicU64);
+
+impl Counter {
+    /// Counts one more.
+    pub(crate) fn note(&self) {
+        // Relaxed: a counter, read now and then; no other data hangs on it.
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn get(&self) -> u64 {
+        // Relaxed: see `note`.
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
-impl Events {
-    /// Counts one more.
-    pub(crate) fn note(counter: &AtomicU64) {
-        // Relaxed: a counter, read now and then.
-        counter.fetch_add(1, Ordering::Relaxed);
-    }
+/// Events across the server.
+#[derive(Debug, Default)]
+pub(crate) struct Events {
+    /// Clients closed as slow consumers.
+    pub(crate) slow_clients: Counter,
+    /// Links to Go hubs closed as slow consumers.
+    pub(crate) slow_leafs: Counter,
+    /// Clients closed as stale.
+    pub(crate) stale_clients: Counter,
+    /// Times a publisher waited for a subscriber past the stall mark.
+    pub(crate) stalls: Counter,
 }
 
 #[cfg(test)]

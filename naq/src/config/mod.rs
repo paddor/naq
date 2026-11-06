@@ -129,16 +129,9 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "ping_max" => o.max_pings_out = int(item).ok_or_else(|| bad("expected a count"))?,
             "write_deadline" => o.write_deadline = duration(item).map_err(|e| bad(&e))?,
             "authorization" => auth::authorization(o, item)?,
-            "http" => {
-                let (host, port) = listen(item).ok_or_else(|| bad("expected host:port"))?;
-                o.http_host = host;
-                o.http_port = Some(port);
-            }
+            k if MONITORING.contains(&k) => monitoring(o, k, item)?,
             "tls" => o.tls = Some(tls(item)?),
             "websocket" | "ws" => o.websocket = ws::websocket(item)?,
-            "http_port" | "monitor_port" => {
-                o.http_port = Some(int(item).ok_or_else(|| bad("expected a port"))?);
-            }
             "accounts" => auth::accounts(o, item)?,
             "leafnodes" | "leaf" => leaf::leafnodes(o, item)?,
             "cluster" => o.cluster = Some(cluster::cluster(item)?),
@@ -273,9 +266,77 @@ pub(super) fn listen(item: &Item) -> Option<(Option<String>, u16)> {
         Value::Int(_) => Some((None, int(item)?)),
         Value::Str(s) => {
             let (host, port) = s.rsplit_once(':')?;
-            let port = port.parse().ok()?;
+            // -1 picks a free port, as 0 does here.
+            let port = if port == "-1" { 0 } else { port.parse().ok()? };
             let host = host.trim_start_matches('[').trim_end_matches(']');
             Some(((!host.is_empty()).then(|| host.to_owned()), port))
+        }
+        _ => None,
+    }
+}
+
+/// The keys of where monitoring is served.
+const MONITORING: [&str; 6] = [
+    "http",
+    "https",
+    "http_port",
+    "monitor_port",
+    "https_port",
+    "http_base_path",
+];
+
+/// One of [`MONITORING`].
+fn monitoring(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    let bad = |reason: &str| (item.line, format!("{key}: {reason}"));
+    let https = key.starts_with("https");
+    let port = match key {
+        "http_base_path" => {
+            o.http_base_path = string(item).ok_or_else(|| bad("expected a string"))?;
+            return Ok(());
+        }
+        "http" | "https" => {
+            let (host, port) = monitor_listen(item).ok_or_else(|| bad("expected host:port"))?;
+            o.http_host = host;
+            port
+        }
+        _ => int(item)
+            .and_then(Port::of)
+            .ok_or_else(|| bad("expected a port"))?,
+    };
+    if https {
+        o.https_port = port.0;
+    } else {
+        o.http_port = port.0;
+    }
+    Ok(())
+}
+
+/// A monitoring port as `nats-server` takes it: 0 is none, and -1 picks
+/// a free one, as 0 does in [`Options`].
+struct Port(Option<u16>);
+
+impl Port {
+    const fn of(n: i64) -> Option<Port> {
+        match n {
+            0 => Some(Port(None)),
+            -1 => Some(Port(Some(0))),
+            1..=65535 => Some(Port(Some(n as u16))),
+            _ => None,
+        }
+    }
+}
+
+/// A monitoring `host:port` or port, its port as [`Port`] takes it.
+fn monitor_listen(item: &Item) -> Option<(Option<String>, Port)> {
+    match &item.value {
+        Value::Int(n) => Some((None, Port::of(*n)?)),
+        Value::Str(s) => {
+            let (host, port) = s.rsplit_once(':')?;
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            Some((
+                (!host.is_empty()).then(|| host.to_owned()),
+                Port::of(port.parse().ok()?)?,
+            ))
         }
         _ => None,
     }
@@ -360,6 +421,10 @@ mod tests {
             Some((Some("::1".into()), 4333))
         );
         assert_eq!(listen(&item(Value::Int(4333))), Some((None, 4333)));
+        assert_eq!(
+            listen(&item(Value::Str("127.0.0.1:-1".into()))),
+            Some((Some("127.0.0.1".into()), 0))
+        );
         assert_eq!(listen(&item(Value::Str("nohost".into()))), None);
         assert_eq!(listen(&item(Value::Bool(true))), None);
     }

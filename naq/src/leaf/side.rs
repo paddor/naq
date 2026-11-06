@@ -172,12 +172,12 @@ impl LinkSide {
             out.len()
         };
         let size = m.payload.len() + headers.map_or(0, <[u8]>::len);
-        lane.tally.gave(size);
+        lane.peers.gave(size);
         c.tally.gave(size);
         lane.mark(c);
         let opts = &lane.shared.opts;
         if len > opts.max_pending {
-            crate::stats::Events::note(&lane.shared.events.slow_consumers);
+            lane.shared.events.slow_leafs.note();
             c.close();
         } else if len > opts.max_pending / 4 * 3 {
             *stalled = Some(c.clone());

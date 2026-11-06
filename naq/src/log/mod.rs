@@ -306,7 +306,7 @@ impl Parts {
         let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
         let secs = d.as_secs();
         let (days, rest) = (secs / 86_400, secs % 86_400);
-        let (year, month, day) = crate::monitor::civil(days.cast_signed());
+        let (year, month, day) = crate::times::civil(days.cast_signed());
         Parts {
             year,
             month,

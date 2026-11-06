@@ -2,8 +2,6 @@
 
 use std::net::SocketAddr;
 
-use sha2::Digest as _;
-
 use crate::server::Shared;
 use crate::{Login, Options};
 
@@ -33,9 +31,12 @@ pub(crate) fn log(shared: &Shared, at: &Bound) {
         ));
     }
     if let Some(path) = &o.config_file {
-        let digest = std::fs::read(path)
-            .map(|b| format!(" (sha256:{})", hex(&sha2::Sha256::digest(b))))
-            .unwrap_or_default();
+        let digest = &shared.monitor.digest;
+        let digest = if digest.is_empty() {
+            String::new()
+        } else {
+            format!(" ({digest})")
+        };
         log.info(format_args!(
             "Using configuration file: {}{digest}",
             path.display()
@@ -44,7 +45,12 @@ pub(crate) fn log(shared: &Shared, at: &Bound) {
     let host = |h: Option<&str>, a: SocketAddr| join(h.unwrap_or(&o.host), a.port());
     if let Some(m) = at.monitor {
         let h = host(o.http_host.as_deref(), m);
-        log.info(format_args!("Starting http monitor on {h}"));
+        let scheme = if o.https_port.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        log.info(format_args!("Starting {scheme} monitor on {h}"));
     }
     if let (Some(w), Some(ws)) = (at.websocket, &o.websocket) {
         let scheme = if ws.tls.is_some() { "wss" } else { "ws" };
@@ -84,15 +90,6 @@ fn join(host: &str, port: u16) -> String {
     } else {
         format!("{host}:{port}")
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    use std::fmt::Write as _;
-    b.iter()
-        .fold(String::with_capacity(b.len() * 2), |mut s, x| {
-            let _ = write!(s, "{x:02x}");
-            s
-        })
 }
 
 #[cfg(test)]

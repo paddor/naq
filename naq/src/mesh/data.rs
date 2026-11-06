@@ -200,7 +200,7 @@ async fn take(lane: &Lane, out: &mut Outs, chunk: Bytes, from: From) {
     // A subscriber past the stall mark slows the sender to its pace: its
     // link fills up meanwhile.
     if let Some(sub) = stalled {
-        conn::stall(&sub, mark).await;
+        conn::stall(&sub, mark, &lane.shared.events.stalls).await;
     }
 }
 
@@ -232,7 +232,6 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
             payload: r.payload,
         };
         let size = p.payload.len() + p.headers.map_or(0, <[u8]>::len);
-        lane.tally.took(size);
         msgs += 1;
         bytes += size as u64;
         let Some(found) = index.matches(p.subject) else {
@@ -258,6 +257,7 @@ fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Cli
             stalled = Some(s);
         }
     }
+    lane.peers.took_many(msgs, bytes);
     if let Some(s) = link {
         slots.tally(s).took_many(msgs, bytes);
     }

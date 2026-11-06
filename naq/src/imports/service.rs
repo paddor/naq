@@ -719,7 +719,7 @@ fn details(lane: &Lane, c: &Client) -> ClientInfo {
     let mut ci = ClientInfo {
         account: lane.shared.accounts.name(c.account.get()).to_owned(),
         rtt: u64::try_from(c.rtt.get().as_nanos()).unwrap_or(u64::MAX),
-        start: Some(crate::monitor::rfc3339(meta.start)),
+        start: Some(crate::times::rfc3339(meta.start)),
         host: meta.ip.clone(),
         id: c.id,
         user: meta.user.clone().unwrap_or_default(),

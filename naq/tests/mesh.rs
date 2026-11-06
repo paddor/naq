@@ -484,6 +484,14 @@ fn clients_hear_where_the_clients_of_the_others_connect() {
     let mut want: Vec<String> = servers[1..].iter().map(|s| s.addr().to_string()).collect();
     want.sort();
     assert_eq!(others, want);
+    // /varz lists them as INFO does, with the routes up.
+    let varz = get(&servers[0], "/varz");
+    assert_eq!(varz["connect_urls"], info["connect_urls"]);
+    assert_eq!(
+        (varz["routes"].as_u64(), varz["remotes"].as_u64()),
+        (Some(2), Some(2))
+    );
+    assert_eq!(varz["cluster"]["name"], "c");
 }
 
 #[test]
