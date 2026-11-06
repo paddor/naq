@@ -307,8 +307,9 @@ impl Sent {
     /// headers only from a client that takes them.
     fn new(rng: &mut Rng, n: usize, headers: bool) -> Sent {
         let kind = rng.below(4);
+        let subject = *rng.pick(SUBJECTS);
         Sent {
-            subject: rng.pick(SUBJECTS),
+            subject,
             reply: (kind & 1 != 0).then(|| format!("re.{n}")),
             headers: (headers && kind & 2 != 0).then(|| format!("NATS/1.0\r\nSim: {n}\r\n\r\n")),
         }
