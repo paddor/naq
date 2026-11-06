@@ -1,6 +1,8 @@
 //! Monitoring over HTTP or HTTPS, as `nats-server` serves it: its
 //! endpoints under `http_base_path`, their options, and its JSON.
 
+mod accountz;
+mod accstatz;
 mod conns;
 mod connz;
 mod http;
@@ -105,6 +107,8 @@ pub(crate) struct State {
     cpu: Mutex<Option<varz::Cpu>>,
     /// The connections that closed last.
     closed: conns::Closed,
+    /// What the connections of each account that closed did.
+    gone: accstatz::Gone,
 }
 
 impl State {
@@ -127,6 +131,7 @@ impl State {
             mesh: OnceLock::new(),
             cpu: Mutex::new(None),
             closed: conns::Closed::new(opts.max_closed_clients),
+            gone: accstatz::Gone::default(),
         }
     }
 
@@ -331,7 +336,8 @@ impl http::Handler for Pages {
                 links::answer(s, &q).await
             }
             Page::Subsz => subsz::answer(s, &q).await,
-            Page::Accountz | Page::Accstatz => Ok(Response::not_found()),
+            Page::Accountz => accountz::answer(s, &q).await,
+            Page::Accstatz => accstatz::answer(s, &q).await,
             Page::Jsz => {
                 s.monitor.count(Counted::Jsz);
                 pages::jsz(s, &q)

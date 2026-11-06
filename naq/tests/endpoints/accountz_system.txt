@@ -1,0 +1,99 @@
+# With the system account: /accountz names it, and service exports show
+# their latency samples. Go gives every account imports of the services
+# of the system account, and subscriptions for them: left out here.
+#! accounts {
+#!   A {
+#!     users [{user: a, password: p}]
+#!     exports [
+#!       {service: svc.>, latency: {sampling: 50, subject: lat.a}}
+#!       {service: hdr.>, latency: {sampling: headers, subject: lat.h}}
+#!     ]
+#!   }
+#!   B { imports [{service: {account: A, subject: svc.x}}] }
+#! }
+#= accounts
+#= exports
+#- imports
+#- sublist_stats
+#~ subscriptions
+GET /accountz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "$SYS",
+<   "accounts": [
+<     "$G",
+<     "$SYS",
+<     "A",
+<     "B"
+<   ]
+< }
+GET /accountz?acc=A
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "$SYS",
+<   "account_detail": {
+<     "account_name": "A",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 0,
+<     "subscriptions": ~,
+<     "exports": [
+<       {
+<         "subject": "hdr.\u003e",
+<         "type": "service",
+<         "response_type": "Singleton",
+<         "service_latency": {
+<           "sampling": "headers",
+<           "results": "lat.h"
+<         }
+<       },
+<       {
+<         "subject": "svc.\u003e",
+<         "type": "service",
+<         "response_type": "Singleton",
+<         "service_latency": {
+<           "sampling": 50,
+<           "results": "lat.a"
+<         }
+<       }
+<     ],
+<     "name_tag": "A"
+<   }
+< }
+GET /accountz?acc=B
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "$SYS",
+<   "account_detail": {
+<     "account_name": "B",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 0,
+<     "subscriptions": ~,
+<     "name_tag": "B"
+<   }
+< }

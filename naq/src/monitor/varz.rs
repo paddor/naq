@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::Serialize;
 
 use super::http::Response;
+use super::json::Ordered;
 use super::{ask_all, pretty};
 use crate::lane::Lane;
 use crate::server::Shared;
@@ -73,6 +74,8 @@ struct Varz<'a> {
     http_req_stats: BTreeMap<&'static str, u64>,
     config_load_time: String,
     config_digest: &'a str,
+    #[serde(flatten)]
+    operators: Operators<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_account: Option<&'a str>,
     slow_consumer_stats: Kinds,
@@ -80,6 +83,25 @@ struct Varz<'a> {
     disk_io_wait_stats: DiskIo,
     #[serde(skip_serializing_if = "Option::is_none")]
     tls_cert_not_after: Option<String>,
+}
+
+/// The operators a server trusts, by their JWTs.
+#[derive(Debug, Serialize)]
+struct Operators<'a> {
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    trusted_operators_jwt: &'a [String],
+    /// The claims of each, as its JWT writes them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    trusted_operators_claim: Vec<Ordered>,
+}
+
+impl Operators<'_> {
+    fn of(jwts: &[String]) -> Operators<'_> {
+        Operators {
+            trusted_operators_jwt: jwts,
+            trusted_operators_claim: jwts.iter().filter_map(|j| Ordered::of_jwt(j)).collect(),
+        }
+    }
 }
 
 /// The counts of `/varz`, in Go's order.
@@ -298,6 +320,7 @@ fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
         http_req_stats: s.monitor.stats(),
         config_load_time: rfc3339_nano(s.monitor.loaded),
         config_digest: &s.monitor.digest,
+        operators: Operators::of(&o.operators),
         system_account: s.system.map(|a| s.accounts.name(a)),
         slow_consumer_stats: Kinds {
             clients: s.events.slow_clients.get(),

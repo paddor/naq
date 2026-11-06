@@ -17,13 +17,13 @@ const LIMIT: i64 = 1024;
 
 /// What a lane finds of the subscriptions of some accounts.
 #[derive(Debug, Default)]
-struct Found {
+pub(super) struct Found {
     /// Subscriptions in its index: of its clients, and on lane 0 those of
     /// routes and links, which every lane has.
-    subs: u64,
+    pub(super) subs: u64,
     /// Subscriptions of its clients added and removed so far.
-    inserts: u64,
-    removes: u64,
+    pub(super) inserts: u64,
+    pub(super) removes: u64,
     list: Vec<Listed>,
 }
 
@@ -49,7 +49,7 @@ fn groups(i: &Interest) -> impl Iterator<Item = (Option<&[u8]>, &Group)> {
 /// The subscriptions of `accounts` on `lane`; those of its clients listed
 /// if `list`, and only those that take a message on `test`, if not
 /// empty.
-fn found(lane: &Lane, accounts: &[u32], list: bool, test: &[u8]) -> Found {
+pub(super) fn found(lane: &Lane, accounts: &[u32], list: bool, test: &[u8]) -> Found {
     let mut f = Found::default();
     for &a in accounts {
         let index = lane.index(a).borrow();
@@ -98,10 +98,22 @@ fn listed_of(lane: &Lane, filter: &[u8], queue: Option<&[u8]>, e: &Entry) -> Lis
     }
 }
 
+/// The subscriptions `nats-server` has in account `id` that naq's index
+/// does not: one for each service import, and one for the replies of
+/// requests into it, once there was one.
+pub(super) fn extra(shared: &Shared, id: u32) -> u64 {
+    // Imports are few: their count fits.
+    let n = |a: &crate::accounts::Account| a.imports().services.len() as u64;
+    shared
+        .accounts
+        .get(id)
+        .map_or(0, |a| n(a) + u64::from(a.responses.asked()))
+}
+
 /// What `nats-server` tells of its sublist and its cache of matches.
 /// naq's index keeps no such cache: those counts are 0.
 #[derive(Debug, Default, Serialize)]
-struct Stats {
+pub(super) struct Stats {
     num_subscriptions: u64,
     num_cache: u32,
     num_inserts: u64,
@@ -110,6 +122,18 @@ struct Stats {
     cache_hit_rate: f64,
     max_fanout: u32,
     avg_fanout: f64,
+}
+
+impl Stats {
+    /// Of `subs` subscriptions, after `inserts` and `removes`.
+    pub(super) fn of(subs: u64, inserts: u64, removes: u64) -> Stats {
+        Stats {
+            num_subscriptions: subs,
+            num_inserts: inserts,
+            num_removes: removes,
+            ..Stats::default()
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -148,16 +172,17 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
     } else {
         shared.accounts.id(acc).into_iter().collect()
     };
+    let extra: u64 = accounts.iter().map(|&a| extra(shared, a)).sum();
     let lanes = ask_all(shared, move |lane| {
         found(lane, &accounts, list, test.as_bytes())
     })
     .await;
-    let mut stats = Stats::default();
+    let (mut subs, mut inserts, mut removes) = (extra, extra, 0);
     let mut all = Vec::new();
     for f in lanes {
-        stats.num_subscriptions += f.subs;
-        stats.num_inserts += f.inserts;
-        stats.num_removes += f.removes;
+        subs += f.subs;
+        inserts += f.inserts;
+        removes += f.removes;
         all.extend(f.list);
     }
     // `nats-server` lists them in no set order.
@@ -169,7 +194,7 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
     Ok(pretty(&Subsz {
         server_id: &shared.server_id,
         now: now(),
-        stats,
+        stats: Stats::of(subs, inserts, removes),
         total: n,
         offset,
         limit,

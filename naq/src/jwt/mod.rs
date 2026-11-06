@@ -178,6 +178,13 @@ fn decoded<T: DeserializeOwned + Default>(
     Ok(claims)
 }
 
+/// The claims of `token`, a JWT, as its JSON writes them; `None` if it is
+/// not one.
+pub(crate) fn payload(token: &str) -> Option<Vec<u8>> {
+    let payload = token.trim().split('.').nth(1)?;
+    base64(payload).ok()
+}
+
 fn base64(part: &str) -> Result<Vec<u8>, Invalid> {
     BASE64URL_NOPAD
         .decode(part.as_bytes())

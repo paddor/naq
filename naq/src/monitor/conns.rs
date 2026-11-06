@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use super::accstatz::Traffic;
 use super::query::Subs;
 use crate::conn::Client;
 use crate::lane::Lane;
@@ -262,6 +263,8 @@ pub(crate) fn closed(lane: &Lane, c: &Client, why: &'static str) {
     if let Some(t) = &mut conn.tls {
         t.peers.clear();
     }
+    let traffic = Traffic::closed(conn.totals, false, why);
+    lane.shared.monitor.gone.add(c.account.get(), traffic);
     lane.shared.monitor.closed.push(conn);
 }
 
@@ -270,6 +273,8 @@ pub(crate) fn closed(lane: &Lane, c: &Client, why: &'static str) {
 pub(crate) fn link_closed(lane: &Lane, l: &crate::leaf::LinkSide, why: &'static str) {
     let mut conn = link(lane, l, Subs::Detail);
     conn.stop = Some((SystemTime::now(), why));
+    let traffic = Traffic::closed(conn.totals, true, why);
+    lane.shared.monitor.gone.add(l.account, traffic);
     lane.shared.monitor.closed.push(conn);
 }
 

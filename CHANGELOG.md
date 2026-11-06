@@ -58,6 +58,13 @@ Notable changes to naq. The format follows
   by account, and the subscriptions of clients, paged and tested against
   a subject. `/routez` and `/leafz` in Go's fields: when a route came up
   and was last heard from, what it sent, round trips of links to Go hubs.
+- `naq`: `/accountz` and `/accstatz` as `nats-server` serves them: the
+  accounts, and one in detail with its exports, imports, connections and
+  subscriptions; what the clients and links of each account sent and got,
+  those that closed too. Subscription counts take in those `nats-server`
+  makes for service imports and their replies. Accounts of JWTs show
+  once in use, with their JWT, claims and revoked users; `/varz` shows
+  the trusted operators and their claims.
 - `naq`: `Options::https_port` (`https_port`, `https`, `-ms`): monitoring
   over HTTPS with the certificate of the client port, and
   `Options::http_base_path` (`http_base_path`).

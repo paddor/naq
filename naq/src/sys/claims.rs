@@ -26,6 +26,7 @@ pub(super) fn update(lane: &Lane, out: &mut Outs, m: &Pub<'_>) -> bool {
     };
     let status = trust.update(&key, &String::from_utf8_lossy(m.payload));
     if let Status::Updated(id) = status {
+        shared.accounts.get(id).map(crate::accounts::Account::touch);
         for l in &shared.lanes {
             l.control(Control::Refresh { account: id });
         }

@@ -1,0 +1,172 @@
+# /accstatz counts what the clients of $G publish and get, with headers.
+#! no_system_account: true
+#= account_statz
+x> CONNECT {"headers":true}
+x> SUB foo 1
+x> SUB bar 2
+y> CONNECT {"headers":true}
+y> SUB foo 1
+y> PUB foo 5
+y> hello
+y> HPUB bar 12 14
+y> NATS/1.0\r\n\r\nhi
+GET /accstatz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": [
+<     {
+<       "acc": "$G",
+<       "name": "$G",
+<       "conns": 2,
+<       "leafnodes": 0,
+<       "total_conns": 2,
+<       "num_subscriptions": 3,
+<       "sent": {
+<         "msgs": 3,
+<         "bytes": 24,
+<         "gateways": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "routes": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "leafs": {
+<           "msgs": 0,
+<           "bytes": 0
+<         }
+<       },
+<       "received": {
+<         "msgs": 2,
+<         "bytes": 19,
+<         "gateways": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "routes": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "leafs": {
+<           "msgs": 0,
+<           "bytes": 0
+<         }
+<       },
+<       "slow_consumers": 0
+<     }
+<   ]
+< }
+y.
+GET /accstatz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": [
+<     {
+<       "acc": "$G",
+<       "name": "$G",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 2,
+<       "sent": {
+<         "msgs": 3,
+<         "bytes": 24,
+<         "gateways": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "routes": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "leafs": {
+<           "msgs": 0,
+<           "bytes": 0
+<         }
+<       },
+<       "received": {
+<         "msgs": 2,
+<         "bytes": 19,
+<         "gateways": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "routes": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "leafs": {
+<           "msgs": 0,
+<           "bytes": 0
+<         }
+<       },
+<       "slow_consumers": 0
+<     }
+<   ]
+< }
+GET /accstatz?unused=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": [
+<     {
+<       "acc": "$G",
+<       "name": "$G",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 2,
+<       "sent": {
+<         "msgs": 3,
+<         "bytes": 24,
+<         "gateways": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "routes": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "leafs": {
+<           "msgs": 0,
+<           "bytes": 0
+<         }
+<       },
+<       "received": {
+<         "msgs": 2,
+<         "bytes": 19,
+<         "gateways": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "routes": {
+<           "msgs": 0,
+<           "bytes": 0
+<         },
+<         "leafs": {
+<           "msgs": 0,
+<           "bytes": 0
+<         }
+<       },
+<       "slow_consumers": 0
+<     }
+<   ]
+< }

@@ -212,4 +212,76 @@ fn a_publisher_that_outruns_its_subscriber_is_stalled_and_counted() {
         }
         publisher.get_mut().write_all(batch.as_bytes()).unwrap();
     }
+    // Its account counts it once the connection is gone.
+    loop {
+        let (_, statz) = get(s.monitor_addr().unwrap(), "/accstatz");
+        if statz["account_statz"][0]["slow_consumers"] == 1 {
+            assert_eq!(statz["account_statz"][0]["conns"], 1, "{statz}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{statz}");
+        std::thread::yield_now();
+    }
+}
+
+/// A client logged in as `user` with password `p`, after a round trip.
+fn login(s: &Server, user: &str, then: &str) -> BufReader<TcpStream> {
+    let mut c = TcpStream::connect(s.addr()).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let out = format!(
+        "CONNECT {{\"verbose\":false,\"user\":\"{user}\",\"pass\":\"p\"}}\r\n{then}PING\r\n"
+    );
+    c.write_all(out.as_bytes()).unwrap();
+    let mut r = BufReader::new(c);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        r.read_line(&mut line).unwrap();
+        if line == "PONG\r\n" {
+            return r;
+        }
+    }
+}
+
+#[test]
+fn accounts_count_what_their_own_clients_publish_and_get() {
+    let mut opts: Options = "no_system_account: true\naccounts { A { users [{user: a, password: p}] }, B { users [{user: b, password: p}] } }"
+        .parse()
+        .unwrap();
+    opts.host = "127.0.0.1".into();
+    opts.port = 0;
+    opts.lanes = 2;
+    opts.http_port = Some(0);
+    let s = Server::start(&opts).unwrap();
+    let _a = login(&s, "a", "SUB x 1\r\nPUB x 3\r\none\r\nPUB x 3\r\ntwo\r\n");
+    let b = login(&s, "b", "PUB y 5\r\nthree\r\n");
+    drop(b);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let statz = loop {
+        let (_, statz) = get(s.monitor_addr().unwrap(), "/accstatz?unused=1");
+        let all = statz["account_statz"].as_array().unwrap().clone();
+        let b = all.iter().find(|a| a["acc"] == "B").unwrap();
+        if b["conns"] == 0 {
+            break all;
+        }
+        assert!(std::time::Instant::now() < deadline, "{statz}");
+        std::thread::yield_now();
+    };
+    let seen: Vec<_> = statz
+        .iter()
+        .map(|a| {
+            let (r, s) = (&a["received"], &a["sent"]);
+            (
+                a["acc"].as_str().unwrap().to_owned(),
+                r["msgs"].clone(),
+                r["bytes"].clone(),
+                s["msgs"].clone(),
+            )
+        })
+        .collect();
+    let want = |acc: &str, r: u64, rb: u64, s: u64| (acc.to_owned(), r.into(), rb.into(), s.into());
+    assert_eq!(
+        seen,
+        [want("$G", 0, 0, 0), want("A", 2, 6, 2), want("B", 1, 5, 0)]
+    );
 }

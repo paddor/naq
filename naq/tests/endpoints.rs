@@ -5,7 +5,8 @@
 //!
 //! A script line is one of:
 //!
-//! - `a> text`: client `a` sends `text` and CRLF. It connects on first use.
+//! - `a> text`: client `a` sends `text`, with `\r`, `\n` and `\\` escapes,
+//!   and CRLF. It connects on first use.
 //!   Before the next request, every client's lines go out with a `PING`,
 //!   and its replies are read up to the `PONG` and dropped.
 //! - `a.`: client `a` sends what it has, then closes its connection, and
@@ -56,6 +57,7 @@ const MASKED: &[&str] = &[
     "rtt",
     "last_activity",
     "stop",
+    "update_time",
     "mem",
     "cpu",
     "cores",
@@ -242,7 +244,7 @@ impl Script {
                 let c = clients
                     .entry(name.to_owned())
                     .or_insert_with(|| Client::new(client));
-                c.pending += sent;
+                c.pending += &unescape(sent);
                 c.pending += "\r\n";
                 continue;
             }

@@ -24,8 +24,9 @@ replies.
 - Clusters of naq servers, meshed over OMQ, and naq leaf nodes of naq
   hubs.
 - Monitoring over HTTP or HTTPS, as `nats-server` serves it: `/varz`,
-  `/healthz`, `/connz`, `/routez`, `/leafz`, `/subsz`, and the endpoints of
-  JetStream, gateways and Raft as it shows them without.
+  `/healthz`, `/connz`, `/routez`, `/leafz`, `/subsz`, `/accountz`,
+  `/accstatz`, and the endpoints of JetStream, gateways and Raft as it
+  shows them without.
 - Logs as `nats-server` writes them, to stderr, a file (rotated by size)
   or a syslog, with debug lines and protocol traces on request.
 - Signals, `--signal`, pid and ports files, and a shutdown that lets

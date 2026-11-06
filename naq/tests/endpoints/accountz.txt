@@ -1,0 +1,368 @@
+# /accountz lists the accounts; with acc, one in detail: its exports,
+# imports, connections and subscriptions.
+#! no_system_account: true
+#! accounts {
+#!   A {
+#!     users [{user: a, password: p}]
+#!     exports [
+#!       {service: svc.>}
+#!       {service: req.a, accounts: [B, C], response_type: stream}
+#!       {service: chunk.a, response_type: chunked}
+#!       {stream: feed.>}
+#!       {stream: priv.>, accounts: [B]}
+#!     ]
+#!   }
+#!   B {
+#!     users [{user: b, password: p}]
+#!     imports [
+#!       {service: {account: A, subject: svc.x}, to: local.svc}
+#!       {service: {account: A, subject: req.a}, share: true}
+#!       {stream: {account: A, subject: feed.>}, prefix: in}
+#!       {stream: {account: A, subject: priv.>}}
+#!     ]
+#!   }
+#!   C { users [{user: c, password: p}] }
+#! }
+#= accounts
+#= exports
+#= imports
+#= approved_accounts
+a> CONNECT {"user":"a","pass":"p"}
+a> SUB svc.> 1
+a> SUB feed.> 2
+b> CONNECT {"user":"b","pass":"p"}
+b> SUB in.feed.> 1
+b> SUB priv.> 2
+GET /accountz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "accounts": [
+<     "$G",
+<     "A",
+<     "B",
+<     "C"
+<   ]
+< }
+GET /accountz?acc=A
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_detail": {
+<     "account_name": "A",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 1,
+<     "subscriptions": 4,
+<     "exports": [
+<       {
+<         "subject": "chunk.a",
+<         "type": "service",
+<         "response_type": "Chunked"
+<       },
+<       {
+<         "subject": "feed.\u003e",
+<         "type": "stream"
+<       },
+<       {
+<         "subject": "priv.\u003e",
+<         "type": "stream",
+<         "approved_accounts": [
+<           "B"
+<         ]
+<       },
+<       {
+<         "subject": "req.a",
+<         "type": "service",
+<         "response_type": "Streamed",
+<         "approved_accounts": [
+<           "B",
+<           "C"
+<         ]
+<       },
+<       {
+<         "subject": "svc.\u003e",
+<         "type": "service",
+<         "response_type": "Singleton"
+<       }
+<     ],
+<     "name_tag": "A",
+<     "sublist_stats": {
+<       "num_subscriptions": 4,
+<       "num_cache": 0,
+<       "num_inserts": 4,
+<       "num_removes": 0,
+<       "num_matches": 0,
+<       "cache_hit_rate": 0,
+<       "max_fanout": 0,
+<       "avg_fanout": 0
+<     }
+<   }
+< }
+GET /accountz?acc=B
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_detail": {
+<     "account_name": "B",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 1,
+<     "subscriptions": 4,
+<     "imports": [
+<       {
+<         "subject": "feed.\u003e",
+<         "account": "A",
+<         "local_subject": "in.feed.\u003e",
+<         "type": "stream",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "priv.\u003e",
+<         "account": "A",
+<         "local_subject": "priv.\u003e",
+<         "type": "stream",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "req.a",
+<         "account": "A",
+<         "to": "req.a",
+<         "local_subject": "req.a",
+<         "type": "service",
+<         "invalid": false,
+<         "share": true,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "svc.x",
+<         "account": "A",
+<         "to": "local.svc",
+<         "local_subject": "local.svc",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       }
+<     ],
+<     "name_tag": "B",
+<     "sublist_stats": {
+<       "num_subscriptions": 4,
+<       "num_cache": 0,
+<       "num_inserts": 4,
+<       "num_removes": 0,
+<       "num_matches": 0,
+<       "cache_hit_rate": 0,
+<       "max_fanout": 0,
+<       "avg_fanout": 0
+<     }
+<   }
+< }
+GET /accountz?acc=C
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_detail": {
+<     "account_name": "C",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 0,
+<     "subscriptions": 0,
+<     "name_tag": "C",
+<     "sublist_stats": {
+<       "num_subscriptions": 0,
+<       "num_cache": 0,
+<       "num_inserts": 0,
+<       "num_removes": 0,
+<       "num_matches": 0,
+<       "cache_hit_rate": 0,
+<       "max_fanout": 0,
+<       "avg_fanout": 0
+<     }
+<   }
+< }
+GET /accountz?acc=$G
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_detail": {
+<     "account_name": "$G",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 0,
+<     "subscriptions": 0,
+<     "name_tag": "$G",
+<     "sublist_stats": {
+<       "num_subscriptions": 0,
+<       "num_cache": 0,
+<       "num_inserts": 0,
+<       "num_removes": 0,
+<       "num_matches": 0,
+<       "cache_hit_rate": 0,
+<       "max_fanout": 0,
+<       "avg_fanout": 0
+<     }
+<   }
+< }
+GET /accountz?acc=nope
+< HTTP/1.1 400 Bad Request
+< connection: close
+< content-type: text/plain; charset=utf-8
+<
+< Account nope does not exist
+GET /accountz?acc=
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "accounts": [
+<     "$G",
+<     "A",
+<     "B",
+<     "C"
+<   ]
+< }
+GET /accountz?unused=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "accounts": [
+<     "$G",
+<     "A",
+<     "B",
+<     "C"
+<   ]
+< }
+GET /varz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": ~,
+<   "version": ~,
+<   "proto": 1,
+<   "go": ~,
+<   "host": "127.0.0.1",
+<   "port": ~,
+<   "auth_required": true,
+<   "max_connections": 65536,
+<   "ping_interval": 120000000000,
+<   "ping_max": 2,
+<   "http_host": "127.0.0.1",
+<   "http_port": ~,
+<   "http_base_path": "",
+<   "https_port": ~,
+<   "auth_timeout": 2,
+<   "max_control_line": 4096,
+<   "max_payload": 1048576,
+<   "max_pending": 67108864,
+<   "cluster": {},
+<   "gateway": {},
+<   "leaf": {},
+<   "mqtt": {},
+<   "websocket": {},
+<   "jetstream": {},
+<   "tls_timeout": 2,
+<   "write_deadline": 10000000000,
+<   "start": ~,
+<   "now": ~,
+<   "uptime": ~,
+<   "mem": ~,
+<   "cores": ~,
+<   "gomaxprocs": ~,
+<   "cpu": ~,
+<   "connections": 2,
+<   "total_connections": 2,
+<   "routes": 0,
+<   "remotes": 0,
+<   "leafnodes": 0,
+<   "in_msgs": 0,
+<   "in_bytes": 0,
+<   "in_client_msgs": 0,
+<   "in_client_bytes": 0,
+<   "out_msgs": 0,
+<   "out_bytes": 0,
+<   "out_client_msgs": 0,
+<   "out_client_bytes": 0,
+<   "slow_consumers": 0,
+<   "stale_connections": 0,
+<   "stalled_clients": 0,
+<   "subscriptions": ~,
+<   "http_req_stats": {
+<     "/accountz": 8,
+<     "/varz": 1
+<   },
+<   "config_load_time": ~,
+<   "config_digest": ~,
+<   "slow_consumer_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "stale_connection_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "disk_io_wait_stats": {
+<     "waiters": 0,
+<     "waits": 0,
+<     "wait_time": 0,
+<     "max_wait_time": 0
+<   }
+< }

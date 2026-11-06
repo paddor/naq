@@ -2338,7 +2338,31 @@ fn a_link_to_a_go_hub_shows_in_leafz_as_that_of_a_go_leaf() {
     for (at_leaf, at_hub) in at_leafs.iter_mut().zip(&mut at_hubs) {
         both_ways(at_leaf, at_hub);
     }
-    let go_side = first_link(&raw(go_leaf_http, "/leafz?subs=1"));
+    shows_as_go_does(go_leaf_http, naq_http);
+}
+
+/// `/leafz` and the `$G` entry of `/accstatz` at monitoring port
+/// `naq_http` are those at `go_http`.
+fn shows_as_go_does(go_http: u16, naq_http: u16) {
+    let go_side = first_link(&raw(go_http, "/leafz?subs=1"));
     let naq_side = first_link(&raw(naq_http, "/leafz?subs=1"));
     assert_eq!(naq_side, go_side);
+    let go_side = global_statz(&raw(go_http, "/accstatz"));
+    let naq_side = global_statz(&raw(naq_http, "/accstatz"));
+    assert_eq!(naq_side, go_side);
+    let over_link = (
+        &naq_side["leafnodes"],
+        &naq_side["received"]["leafs"]["msgs"],
+    );
+    assert_eq!(over_link, (&1.into(), &1.into()), "{naq_side}");
+}
+
+/// The entry of `$G` in `/accstatz` body `body`, without its count of
+/// subscriptions: Go's counts those of its system account's services.
+fn global_statz(body: &str) -> serde_json::Value {
+    let z: serde_json::Value = serde_json::from_str(body).unwrap();
+    let all = z["account_statz"].as_array().unwrap();
+    let mut g = all.iter().find(|a| a["acc"] == "$G").unwrap().clone();
+    g["num_subscriptions"] = serde_json::Value::Null;
+    g
 }

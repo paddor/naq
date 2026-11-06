@@ -74,6 +74,10 @@ impl Dir {
 pub(crate) fn stored(lane: &Lane, key: &str, jwt: &str) {
     let trust = lane.shared.auth.as_ref().and_then(crate::auth::Auth::trust);
     if let Some(Status::Updated(id)) = trust.map(|t| t.stored(key, jwt)) {
+        lane.shared
+            .accounts
+            .get(id)
+            .map(crate::accounts::Account::touch);
         for l in &lane.shared.lanes {
             l.control(Control::Refresh { account: id });
         }

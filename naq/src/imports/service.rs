@@ -4,6 +4,7 @@
 //! Both are taps: interest an index holds on every lane, the same on each,
 //! that the lane a message comes in on acts on once it routed it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -56,6 +57,9 @@ pub(crate) struct Responses {
     /// requests into the account.
     prefix: [u8; 11],
     pending: Mutex<FxHashMap<[u8; 6], Response>>,
+    /// A request went in: `nats-server` then has a subscription to the
+    /// replies.
+    asked: AtomicBool,
 }
 
 /// Where the responses to one request go.
@@ -86,6 +90,7 @@ impl Responses {
         Responses {
             prefix,
             pending: Mutex::default(),
+            asked: AtomicBool::new(false),
         }
     }
 
@@ -94,6 +99,12 @@ impl Responses {
         let mut f = self.prefix.to_vec();
         f.push(b'>');
         f
+    }
+
+    /// Whether a request went in.
+    pub(crate) fn asked(&self) -> bool {
+        // Relaxed: see `wait`.
+        self.asked.load(Ordering::Relaxed)
     }
 
     /// Drops the requests older than their threshold at `now`. Returns
@@ -138,6 +149,8 @@ impl Responses {
         };
         let tracked = r.track.is_some();
         pending.insert(token, r);
+        // Relaxed: monitoring reads it now and then; nothing hangs on it.
+        self.asked.store(true, Ordering::Relaxed);
         out.extend_from_slice(&self.prefix);
         out.extend_from_slice(&token);
         if let Some(node) = node.filter(|_| tracked) {

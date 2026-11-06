@@ -3,8 +3,9 @@
 //! account, once added, stays where it is: readers hold no lock.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustc_hash::FxHashMap;
 
@@ -63,6 +64,8 @@ pub(crate) struct Account {
     pub(crate) conns: Mutex<BTreeSet<u64>>,
     /// Its loop detection subject on leaf node links.
     pub(crate) lds: String,
+    /// When it was added or last updated, in nanoseconds since the epoch.
+    updated: AtomicU64,
 }
 
 /// The imports of an account that has none.
@@ -80,7 +83,31 @@ impl Account {
             responses: Arc::new(responses),
             conns: Mutex::default(),
             lds: crate::leaf::lds(),
+            updated: AtomicU64::new(0),
         }
+        .touched()
+    }
+
+    /// It, updated now.
+    fn touched(self) -> Account {
+        self.touch();
+        self
+    }
+
+    /// Notes it updated now.
+    pub(crate) fn touch(&self) {
+        let since = SystemTime::now().duration_since(UNIX_EPOCH);
+        // Nanoseconds fit until the year 2554.
+        let nanos = since.map_or(0, |d| d.as_nanos() as u64);
+        // Relaxed: monitoring reads it now and then; nothing else hangs
+        // on it.
+        self.updated.store(nanos, Ordering::Relaxed);
+    }
+
+    /// When it was added or last updated.
+    pub(crate) fn updated(&self) -> SystemTime {
+        // Relaxed: see `touch`.
+        UNIX_EPOCH + Duration::from_nanos(self.updated.load(Ordering::Relaxed))
     }
 
     /// Its imports: none until they are set.

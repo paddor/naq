@@ -2,9 +2,11 @@
 //! U+2029 escaped, floats without a needless `.0`, and `MarshalIndent`'s
 //! layout.
 
-use std::io;
+use std::{fmt, io};
 
-use serde::Serialize;
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::ser::{CompactFormatter, Formatter, PrettyFormatter};
 
 /// `v` as `json.MarshalIndent(v, "", indent)` writes it.
@@ -117,6 +119,101 @@ impl<F: Formatter> Formatter for Go<F> {
     }
 }
 
+/// JSON as it was written: the keys of its objects stay in their order.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Ordered {
+    Null,
+    Bool(bool),
+    Number(serde_json::Number),
+    String(String),
+    Array(Vec<Ordered>),
+    Object(Vec<(String, Ordered)>),
+}
+
+impl Ordered {
+    /// The claims of JWT `token`, in their order; `None` if they are not
+    /// JSON.
+    pub(crate) fn of_jwt(token: &str) -> Option<Ordered> {
+        serde_json::from_slice(&crate::jwt::payload(token)?).ok()
+    }
+}
+
+impl<'de> Deserialize<'de> for Ordered {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Ordered, D::Error> {
+        d.deserialize_any(Visit)
+    }
+}
+
+/// Reads [`Ordered`] values.
+struct Visit;
+
+impl<'de> Visitor<'de> for Visit {
+    type Value = Ordered;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JSON")
+    }
+
+    fn visit_unit<E>(self) -> Result<Ordered, E> {
+        Ok(Ordered::Null)
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Ordered, E> {
+        Ok(Ordered::Bool(v))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Ordered, E> {
+        Ok(Ordered::Number(v.into()))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Ordered, E> {
+        Ok(Ordered::Number(v.into()))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Ordered, E> {
+        Ok(serde_json::Number::from_f64(v).map_or(Ordered::Null, Ordered::Number))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Ordered, E> {
+        Ok(Ordered::String(v.to_owned()))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Ordered, A::Error> {
+        let mut all = Vec::new();
+        while let Some(v) = a.next_element()? {
+            all.push(v);
+        }
+        Ok(Ordered::Array(all))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Ordered, A::Error> {
+        let mut all = Vec::new();
+        while let Some(kv) = a.next_entry()? {
+            all.push(kv);
+        }
+        Ok(Ordered::Object(all))
+    }
+}
+
+impl Serialize for Ordered {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Ordered::Null => s.serialize_unit(),
+            Ordered::Bool(b) => s.serialize_bool(*b),
+            Ordered::Number(n) => n.serialize(s),
+            Ordered::String(t) => s.serialize_str(t),
+            Ordered::Array(all) => all.serialize(s),
+            Ordered::Object(all) => {
+                let mut m = s.serialize_map(Some(all.len()))?;
+                for (k, v) in all {
+                    m.serialize_entry(k, v)?;
+                }
+                m.end()
+            }
+        }
+    }
+}
+
 /// `v` as Go writes a `float64`: the shortest digits that read back as
 /// it, in exponent form below 1e-6 and from 1e21.
 fn float(v: f64) -> String {
@@ -169,6 +266,22 @@ mod tests {
             assert_eq!(float(v), want, "{v}");
         }
         assert_eq!(compact(&2.5f32), b"2.5");
+    }
+
+    #[test]
+    fn ordered_json_keeps_the_order_of_its_keys() {
+        let text = r#"{"z":1,"a":[true,null,-2,1.5,"x>"],"m":{"b":{},"a":[]}}"#;
+        let v: Ordered = serde_json::from_str(text).unwrap();
+        assert_eq!(compact(&v), text.replace('>', "\\u003e").as_bytes());
+        assert_eq!(Ordered::of_jwt("no jwt"), None);
+        let jwt = format!(
+            "h.{}.s",
+            data_encoding::BASE64URL_NOPAD.encode(b"{\"b\":1,\"a\":2}")
+        );
+        assert_eq!(
+            compact(&Ordered::of_jwt(&jwt).unwrap()),
+            br#"{"b":1,"a":2}"#
+        );
     }
 
     #[test]
