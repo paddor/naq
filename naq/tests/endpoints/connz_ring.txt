@@ -1,0 +1,67 @@
+# The ring keeps the newest closed connections, max_closed_clients of them.
+#! max_closed_clients: 2
+#~ pending_bytes
+a> CONNECT {"verbose":false,"name":"a"}
+a.
+b> CONNECT {"verbose":false,"name":"b"}
+b.
+c> CONNECT {"verbose":false,"name":"c"}
+c.
+GET /connz?state=closed
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 2,
+<   "total": 2,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "c"
+<     }
+<   ]
+< }

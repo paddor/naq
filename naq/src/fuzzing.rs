@@ -67,10 +67,15 @@ pub fn jwt(data: &[u8]) {
 ///
 /// # Panics
 ///
-/// When a DN is not the same as itself, or a certificate names a user
-/// that is empty.
+/// When a DN is not the same as itself, a certificate names a user that
+/// is empty, or its key info is longer than it.
 pub fn cert(data: &[u8]) {
     let names = crate::tls::cert::Names::of(data);
+    let _ = crate::tls::cert::not_after(data);
+    let _ = crate::tls::cert::subject_text(data);
+    if let Some(spki) = crate::tls::cert::spki(data) {
+        assert!(spki.len() <= data.len(), "more than the certificate");
+    }
     let user = names.user(|_| true, &[]);
     assert!(user.is_none_or(|u| !u.is_empty()), "an empty name");
     if let Some(dn) = crate::tls::dn::Dn::parse(&String::from_utf8_lossy(data)) {

@@ -2,6 +2,7 @@
 //! endpoints under `http_base_path`, their options, and its JSON.
 
 mod conns;
+mod connz;
 mod http;
 pub(crate) mod json;
 mod links;
@@ -20,6 +21,8 @@ use sha2::Digest as _;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use zzq_tokio::transport::{Listener, Stream};
+
+pub(crate) use conns::{closed, link_closed};
 
 use crate::lane::{Control, Lane};
 use crate::server::Shared;
@@ -99,6 +102,8 @@ pub(crate) struct State {
     pub(crate) mesh: OnceLock<crate::mesh::Bound>,
     /// The process's CPU time at the last sample.
     cpu: Mutex<Option<varz::Cpu>>,
+    /// The connections that closed last.
+    closed: conns::Closed,
 }
 
 impl State {
@@ -120,6 +125,7 @@ impl State {
             loaded: now,
             mesh: OnceLock::new(),
             cpu: Mutex::new(None),
+            closed: conns::Closed::new(opts.max_closed_clients),
         }
     }
 
@@ -313,7 +319,7 @@ impl http::Handler for Pages {
                 s.monitor.count(Counted::Varz);
                 Ok(varz::answer(s).await)
             }
-            Page::Connz => conns::answer(s, &q).await,
+            Page::Connz => connz::answer(s, &q).await,
             Page::Routez => routes::answer(s, &q).await,
             Page::Gatewayz => {
                 s.monitor.count(Counted::Gatewayz);

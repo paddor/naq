@@ -1,0 +1,73 @@
+# A token's user is redacted.
+#! authorization { token: s3cr3t }
+a> CONNECT {"verbose":false,"auth_token":"s3cr3t"}
+GET /connz?auth=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 1,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "authorized_user": "[REDACTED]",
+<       "name_tag": "$G"
+<     }
+<   ]
+< }
+GET /connz?user=[REDACTED]
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 1,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0
+<     }
+<   ]
+< }

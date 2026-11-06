@@ -203,6 +203,30 @@ fn parts(mut der: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
     Some((issuer, subject, tbs))
 }
 
+/// The subject of certificate `der`, as Go writes it out of the names it
+/// knows; empty for one it cannot read.
+pub(crate) fn subject_text(der: &[u8]) -> String {
+    Names::of(der).written()
+}
+
+/// The subject public key info of certificate `der`, its tag and length
+/// with it.
+pub(crate) fn spki(mut der: &[u8]) -> Option<&[u8]> {
+    let mut cert = expect(&mut der, 0x30)?;
+    let mut tbs = expect(&mut cert, 0x30)?;
+    let (tag, _) = element(&mut tbs)?;
+    if tag == 0xa0 {
+        element(&mut tbs)?;
+    }
+    // The signature algorithm, issuer, validity and subject.
+    for _ in 0..4 {
+        expect(&mut tbs, 0x30)?;
+    }
+    let all = tbs;
+    expect(&mut tbs, 0x30)?;
+    Some(&all[..all.len() - tbs.len()])
+}
+
 /// When certificate `der` expires: the end of its validity.
 pub(crate) fn not_after(mut der: &[u8]) -> Option<SystemTime> {
     let mut cert = expect(&mut der, 0x30)?;

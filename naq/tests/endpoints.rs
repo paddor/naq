@@ -8,21 +8,29 @@
 //! - `a> text`: client `a` sends `text` and CRLF. It connects on first use.
 //!   Before the next request, every client's lines go out with a `PING`,
 //!   and its replies are read up to the `PONG` and dropped.
+//! - `a.`: client `a` sends what it has, then closes its connection, and
+//!   the harness waits until `/connz?state=closed` lists it. Before the
+//!   next request,
+//!   the harness waits until `/connz?state=closed` lists every client that
+//!   closed or was closed; those requests are not in the transcript.
 //! - `GET /path?query`: a request to the monitoring port, any method;
-//!   `HEAD /path` too. `RAW text` sends `text` as it is, with `\r`, `\n`
+//!   `HEAD /path` too. `$CID_a` in it is the ID of client `a`, as its
+//!   `INFO` gave it. `RAW text` sends `text` as it is, with `\r`, `\n`
 //!   and `\\` escapes, and records all that comes back.
 //! - `< text`: a line of the answer. The status line, then the headers
 //!   that do not change between runs, sorted, a blank line and the body.
 //!   In an indented JSON body, the values of keys that change between
-//!   runs or servers are `~`, and the keys naq leaves out are gone.
+//!   runs or servers are `~`, and the keys naq leaves out are gone. Lists
+//!   in an order Go leaves open are sorted.
 //! - `#` comments and blank lines, kept as they are. `#! text` is also a
 //!   line of the configuration file both servers run with; `$CERTS` in it
 //!   is a directory with a CA (`ca.pem`) and a certificate for 127.0.0.1
 //!   (`server.pem`, `server-key.pem`). `#~ key` masks one more key for
-//!   the script, `#- key` drops one.
+//!   the script, `#- key` drops one, `#= key` sorts its list.
 //!
 //! `NAQ_GO=<path to nats-server>` also replays every script against Go.
-//! With `NAQ_BLESS=1`, Go's answers are written into the scripts. A
+//! With `NAQ_BLESS=1`, Go's answers are written into the scripts, and
+//! naq is not replayed. A
 //! transcript that differs is written to `CARGO_TARGET_TMPDIR/endpoints/`.
 //! `NAQ_ENDPOINTS=<text>` replays only the scripts whose names hold it.
 
@@ -70,6 +78,9 @@ const TOP_MASKED: &[&str] = &["version", "go", "subscriptions"];
 /// Keys naq leaves out, wherever they are: Go facts naq has no part of.
 const DROPPED: &[&str] = &["git_commit", "feature_flags", "pool_size"];
 
+/// Keys of lists in an order Go leaves open: they are sorted.
+const UNORDERED: &[&str] = &["subscriptions_list", "subscriptions_list_detail"];
+
 /// Headers a transcript keeps.
 const HEADERS: &[&str] = &[
     "access-control-allow-origin",
@@ -90,13 +101,13 @@ fn naq_answers_as_nats_server_does() {
         let text = std::fs::read_to_string(&path).unwrap();
         let mut script = Script::parse(&text);
         script.conf = script.conf.replace("$CERTS", &certs.display().to_string());
-        let mut want = text.clone();
+        let want = text.clone();
         if let Some(go) = &go {
             let server = GoServer::start(go, &path, &script);
             let got = script.replay(server.client, server.monitor);
             if bless {
                 std::fs::write(&path, &got).unwrap();
-                want = got;
+                continue;
             } else if got != text {
                 failed += &mismatch(&path, "nats-server", &text, &got);
             }
@@ -186,6 +197,7 @@ struct Script {
     conf: String,
     masked: Vec<String>,
     dropped: Vec<String>,
+    unordered: Vec<String>,
 }
 
 impl Script {
@@ -195,6 +207,7 @@ impl Script {
             conf: String::new(),
             masked: MASKED.iter().map(|&k| k.to_owned()).collect(),
             dropped: DROPPED.iter().map(|&k| k.to_owned()).collect(),
+            unordered: UNORDERED.iter().map(|&k| k.to_owned()).collect(),
         };
         for line in text.lines() {
             if let Some(c) = line.strip_prefix("#!") {
@@ -204,6 +217,8 @@ impl Script {
                 s.masked.push(k.to_owned());
             } else if let Some(k) = line.strip_prefix("#- ") {
                 s.dropped.push(k.to_owned());
+            } else if let Some(k) = line.strip_prefix("#= ") {
+                s.unordered.push(k.to_owned());
             }
             if !line.starts_with('<') {
                 s.steps.push(line.to_owned());
@@ -231,15 +246,29 @@ impl Script {
                 c.pending += "\r\n";
                 continue;
             }
+            if let Some(name) = step.strip_suffix('.')
+                && let Some(c) = clients.get_mut(name)
+            {
+                c.sync();
+                c.close();
+                until_closed(monitor, c.cid);
+                c.listed = true;
+                continue;
+            }
             let request = match step.split_once(' ') {
                 Some(("RAW", raw)) => unescape(raw),
                 Some((method, target)) if method.bytes().all(|b| b.is_ascii_uppercase()) => {
+                    let target = cids(target, &clients);
                     format!("{method} {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 }
                 _ => continue,
             };
             for c in clients.values_mut() {
                 c.sync();
+                if c.gone && !c.listed {
+                    until_closed(monitor, c.cid);
+                    c.listed = true;
+                }
             }
             let answer = self.request(monitor, &request, step.split_once(' ').map(|(m, _)| m));
             for line in answer.lines() {
@@ -312,6 +341,58 @@ impl Script {
         if !body.starts_with("{\n") {
             return body.to_owned();
         }
+        self.sorted(&self.masked_lines(body))
+    }
+
+    /// `body` with the lists of [`Script::unordered`] keys sorted.
+    fn sorted(&self, body: &str) -> String {
+        let lines: Vec<&str> = body.lines().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            out += line;
+            out.push('\n');
+            i += 1;
+            let t = line.trim_start();
+            let open = self.unordered.iter().any(|k| t == format!("\"{k}\": ["));
+            if !open {
+                continue;
+            }
+            let indent = line.len() - t.len();
+            let close = format!("{}]", " ".repeat(indent));
+            let inner = " ".repeat(indent + 2);
+            let mut items: Vec<String> = Vec::new();
+            while i < lines.len() && !lines[i].starts_with(&close) {
+                let l = lines[i].trim_end_matches(',');
+                if lines[i].starts_with(&inner)
+                    && !lines[i][inner.len()..].starts_with(' ')
+                    && !l.trim_start().starts_with('}')
+                {
+                    items.push(String::new());
+                }
+                if let Some(item) = items.last_mut() {
+                    *item += lines[i];
+                    item.push('\n');
+                }
+                i += 1;
+            }
+            let mut items: Vec<String> = items
+                .iter()
+                .map(|t| t.trim_end_matches('\n').trim_end_matches(',').to_owned())
+                .collect();
+            items.sort();
+            let n = items.len();
+            for (j, item) in items.into_iter().enumerate() {
+                out += &item;
+                out += if j + 1 < n { ",\n" } else { "\n" };
+            }
+        }
+        out
+    }
+
+    /// `body` with the values of masked keys `~` and dropped keys gone.
+    fn masked_lines(&self, body: &str) -> String {
         let mut out = String::new();
         let mut skip_until: Option<String> = None;
         for line in body.lines() {
@@ -397,18 +478,39 @@ struct Client {
     w: TcpStream,
     r: BufReader<TcpStream>,
     pending: String,
+    /// Its ID, from its `INFO`.
+    cid: u64,
+    /// Its connection closed.
+    gone: bool,
+    /// Closed connections list it.
+    listed: bool,
 }
 
 impl Client {
     fn new(at: SocketAddr) -> Client {
         let w = TcpStream::connect(at).unwrap();
         w.set_read_timeout(Some(WAIT)).unwrap();
-        let r = BufReader::new(w.try_clone().unwrap());
+        let mut r = BufReader::new(w.try_clone().unwrap());
+        let mut info = String::new();
+        r.read_line(&mut info).unwrap();
+        let cid = info
+            .split_once("\"client_id\":")
+            .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|n| n.parse().ok())
+            .unwrap();
         Client {
             w,
             r,
             pending: String::new(),
+            cid,
+            gone: false,
+            listed: false,
         }
+    }
+
+    fn close(&mut self) {
+        let _ = self.w.shutdown(std::net::Shutdown::Both);
+        self.gone = true;
     }
 
     /// Sends what is pending with a `PING`, and reads up to the `PONG`.
@@ -417,17 +519,58 @@ impl Client {
             return;
         }
         let sent = std::mem::take(&mut self.pending) + "PING\r\n";
-        self.w.write_all(sent.as_bytes()).unwrap();
+        if self.gone || self.w.write_all(sent.as_bytes()).is_err() {
+            self.gone = true;
+            return;
+        }
         let mut line = String::new();
         loop {
             line.clear();
-            if self.r.read_line(&mut line).unwrap() == 0 {
+            // Closed by the server, or reset.
+            if self.r.read_line(&mut line).unwrap_or(0) == 0 {
+                self.gone = true;
                 return;
             }
             if line == "PONG\r\n" {
                 return;
             }
         }
+    }
+}
+
+/// `target` with `$CID_a` for the ID of each client `a`.
+fn cids(target: &str, clients: &BTreeMap<String, Client>) -> String {
+    let mut t = target.to_owned();
+    // Longest names first, so that `$CID_ab` is not taken for `$CID_a`.
+    let mut names: Vec<&String> = clients.keys().collect();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    for n in names {
+        t = t.replace(&format!("$CID_{n}"), &clients[n].cid.to_string());
+    }
+    t
+}
+
+/// Waits until the monitoring port at `at` lists client `cid` among the
+/// closed connections.
+fn until_closed(at: SocketAddr, cid: u64) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let mut c = TcpStream::connect(at).unwrap();
+        c.set_read_timeout(Some(WAIT)).unwrap();
+        let req = format!(
+            "GET /connz?state=closed&cid={cid} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        );
+        c.write_all(req.as_bytes()).unwrap();
+        let mut got = String::new();
+        let _ = c.read_to_string(&mut got);
+        if got.contains("\"num_connections\": 1") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client {cid} not listed as closed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

@@ -63,6 +63,57 @@ pub(crate) struct User {
     pub(crate) account_expires: Option<SystemTime>,
     /// What it keeps to check itself again once its account changes.
     pub(crate) kept: Option<Box<live::Kept>>,
+    /// What monitoring shows of it.
+    pub(crate) shown: Box<Shown>,
+}
+
+/// What monitoring shows of a user of a JWT, as `nats-server` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Shown {
+    /// Its JWT; `None` for a bearer token, which is not shown.
+    pub(crate) jwt: Option<String>,
+    /// The key that signed it: its account or a signing key.
+    pub(crate) issuer: String,
+    pub(crate) tags: Vec<String>,
+    /// The name of its account: in the account's JWT, else its key.
+    pub(crate) account_name: String,
+    /// The name in its JWT.
+    pub(crate) user_name: String,
+}
+
+impl Shown {
+    /// What monitoring shows of `user`, which an auth callout let in
+    /// without a JWT of its own, in account `account`.
+    pub(crate) fn placed(user: &Claims<claims::User>, account: &str) -> Shown {
+        Shown {
+            jwt: None,
+            issuer: user.iss.clone(),
+            tags: user.nats.tags.clone(),
+            account_name: account.to_owned(),
+            user_name: user.name.clone(),
+        }
+    }
+
+    /// What monitoring shows of `user`, logged in with `jwt` to account
+    /// `a`: its JWT unless a bearer token.
+    fn of(
+        user: &Claims<claims::User>,
+        jwt: &str,
+        bearer: bool,
+        a: &Claims<claims::Account>,
+    ) -> Shown {
+        Shown {
+            jwt: (!bearer).then(|| jwt.to_owned()),
+            ..Shown::placed(user, account_name(a))
+        }
+    }
+}
+
+/// The name of account `a`: in its JWT, else its key.
+fn account_name(a: &Claims<claims::Account>) -> &str {
+    Some(a.name.as_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&a.sub)
 }
 
 impl PartialEq for User {
@@ -310,6 +361,7 @@ impl Trust {
             expires,
             account_expires: expiry(a),
             kept: Some(Box::new(kept)),
+            shown: Box::new(Shown::of(&user, jwt, bearer, a)),
         })
     }
 }
@@ -439,6 +491,7 @@ impl Trust {
             expires: [exp, end].into_iter().flatten().min(),
             account_expires: expiry(a),
             kept: Some(Box::new(kept)),
+            shown: Box::new(Shown::placed(user, account_name(a))),
         })
     }
 }

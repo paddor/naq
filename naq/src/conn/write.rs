@@ -31,6 +31,7 @@ pub(crate) async fn writer<W: AsyncWrite + Unpin>(
         // Cancel-safe enough: on a timeout the client closes, and what was
         // left unwritten no longer matters.
         match tokio::time::timeout(deadline, put(&mut w, &buf)).await {
+            Ok(Ok(())) if !idle => client.seen.active(),
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 client.kick(super::Close::WriteError);

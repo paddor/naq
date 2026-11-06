@@ -350,3 +350,70 @@ fn https_needs_tls_and_no_http_port() {
         "{err}"
     );
 }
+
+/// The JSON of `GET path` on plain monitoring at `at`.
+fn monitor(at: std::net::SocketAddr, path: &str) -> serde_json::Value {
+    let mut c = TcpStream::connect(at).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut text = String::new();
+    c.read_to_string(&mut text).unwrap();
+    serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+#[test]
+fn connz_shows_the_tls_of_a_client_and_its_certificate_with_auth() {
+    use sha2::Digest as _;
+    let pki = Pki::new("connz");
+    let server = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        http_port: Some(0),
+        tls: Some(pki.tls(true, false)),
+        ..Options::default()
+    })
+    .unwrap();
+    let mut plain = tcp(&server);
+    until(&mut plain, "\r\n");
+    let mut tls = wrap(pki.client(true), plain);
+    tls.write_all(b"CONNECT {\"verbose\":false}\r\nPING\r\n")
+        .unwrap();
+    until(&mut tls, "PONG\r\n");
+    let m = server.monitor_addr().unwrap();
+    let z = monitor(m, "/connz");
+    let c = &z["connections"][0];
+    assert_eq!(c["tls_version"], "1.3", "{z}");
+    assert_eq!(c["tls_cipher_suite"], "TLS_AES_256_GCM_SHA384", "{z}");
+    assert!(
+        c.get("tls_peer_certs").is_none() && c.get("tls_first").is_none(),
+        "{z}"
+    );
+    let z = monitor(m, "/connz?auth=1");
+    let certs = &z["connections"][0]["tls_peer_certs"];
+    let der = CertificateDer::from_pem_file(pki.path("client.pem")).unwrap();
+    let sum = sha2::Sha256::digest(der.as_ref());
+    let hex = sum.iter().fold(String::new(), |mut h, b| {
+        use std::fmt::Write as _;
+        let _ = write!(h, "{b:02x}");
+        h
+    });
+    assert_eq!(certs[0]["cert_sha256"], hex.as_str(), "{z}");
+    assert_eq!(certs[0]["subject"], "CN=rcgen self signed cert", "{z}");
+    assert_eq!(certs[0]["spki_sha256"].as_str().unwrap().len(), 64, "{z}");
+    // A closed client keeps its TLS, not its certificates.
+    drop(tls);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let z = loop {
+        let z = monitor(m, "/connz?state=closed&auth=1");
+        if z["num_connections"] == 1 {
+            break z;
+        }
+        assert!(std::time::Instant::now() < deadline, "{z}");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let c = &z["connections"][0];
+    assert_eq!(c["tls_version"], "1.3", "{z}");
+    assert!(c.get("tls_peer_certs").is_none(), "{z}");
+}

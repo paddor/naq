@@ -48,6 +48,11 @@ Notable changes to naq. The format follows
   of Go's fields that apply, `/healthz` takes its options, and `/jsz`,
   `/gatewayz`, `/ipqueuesz`, `/raftz` and `/debug/vars` answer as Go does
   without JetStream, gateways or Raft.
+- `naq`: `/connz` as `nats-server` serves it: every option, sort and
+  page; activity, round trips, stalls, TLS and its client certificates,
+  users, accounts and what issued a JWT user; links to hubs among the
+  connections; and the connections that closed, with why, the newest
+  `max_closed_clients` (`Options::max_closed_clients`) of them.
 - `naq`: `Options::https_port` (`https_port`, `https`, `-ms`): monitoring
   over HTTPS with the certificate of the client port, and
   `Options::http_base_path` (`http_base_path`).
@@ -62,6 +67,10 @@ Notable changes to naq. The format follows
 
 ### Fixed
 
+- `naq`: a client that breaks the protocol is closed as `Protocol
+  Violation`, as by `nats-server`, in the log and in the WebSocket close
+  frame; a client without credentials is the `no_auth_user` in the user
+  service imports tell of.
 - `naq`: plain subscriptions get a message from another server of the
   cluster, or from a naq hub or leaf, once, not twice, where a queue group
   of theirs matches it too and gets its pick there.

@@ -142,17 +142,7 @@ impl Acceptor {
         tls: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     ) -> crate::callout::request::TlsInfo {
         let conn = tls.get_ref().1;
-        let version = match conn.protocol_version() {
-            Some(rustls::ProtocolVersion::TLSv1_3) => "1.3",
-            Some(rustls::ProtocolVersion::TLSv1_2) => "1.2",
-            _ => "",
-        };
-        // Go names TLS 1.3 suites without the version.
-        let cipher = conn
-            .negotiated_cipher_suite()
-            .and_then(|s| s.suite().as_str())
-            .map(|n| n.replacen("TLS13_", "TLS_", 1))
-            .unwrap_or_default();
+        let (version, cipher) = negotiated(conn);
         let sent = conn.peer_certificates().unwrap_or_default();
         let root = sent
             .last()
@@ -185,6 +175,81 @@ impl Acceptor {
     }
 }
 
+/// The TLS version and cipher suite `conn` agreed on, as Go names them.
+fn negotiated(conn: &rustls::ServerConnection) -> (&'static str, String) {
+    let version = match conn.protocol_version() {
+        Some(rustls::ProtocolVersion::TLSv1_3) => "1.3",
+        Some(rustls::ProtocolVersion::TLSv1_2) => "1.2",
+        _ => "",
+    };
+    // Go names TLS 1.3 suites without the version.
+    let cipher = conn
+        .negotiated_cipher_suite()
+        .and_then(|s| s.suite().as_str())
+        .map(|n| n.replacen("TLS13_", "TLS_", 1))
+        .unwrap_or_default();
+    (version, cipher)
+}
+
+/// What monitoring shows of a client's TLS, as `nats-server` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Facts {
+    /// `1.2` or `1.3`.
+    pub(crate) version: &'static str,
+    /// The IANA name of the cipher suite.
+    pub(crate) cipher: String,
+    /// The handshake came before `INFO`.
+    pub(crate) first: bool,
+    /// The certificates the client presented.
+    pub(crate) peers: Vec<PeerCert>,
+}
+
+/// A certificate a client presented, as `nats-server` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PeerCert {
+    /// Its subject, as Go writes a name.
+    pub(crate) subject: String,
+    /// The SHA-256 of its public key info, and of all of it, in hex.
+    pub(crate) spki_sha256: String,
+    pub(crate) cert_sha256: String,
+}
+
+impl Facts {
+    /// The facts of the TLS of `tls`, whose handshake came first if `first`.
+    pub(crate) fn of(
+        tls: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        first: bool,
+    ) -> Facts {
+        let conn = tls.get_ref().1;
+        let (version, cipher) = negotiated(conn);
+        let peers = conn
+            .peer_certificates()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| PeerCert::of(c))
+            .collect();
+        Facts {
+            version,
+            cipher,
+            first,
+            peers,
+        }
+    }
+}
+
+impl PeerCert {
+    /// The facts of certificate `der`.
+    pub(crate) fn of(der: &[u8]) -> PeerCert {
+        use sha2::Digest as _;
+        let sum = |b: &[u8]| crate::monitor::hex(&sha2::Sha256::digest(b));
+        PeerCert {
+            subject: cert::subject_text(der),
+            spki_sha256: cert::spki(der).map(sum).unwrap_or_default(),
+            cert_sha256: sum(der),
+        }
+    }
+}
+
 /// Runs a TLS client:  `info` goes out in the clear before the handshake, or
 /// over TLS after it, as the server is set up.
 pub(crate) async fn serve(lane: Rc<Lane>, mut hello: Hello, info: Vec<u8>, stream: Stream) {
@@ -199,6 +264,7 @@ pub(crate) async fn serve(lane: Rc<Lane>, mut hello: Hello, info: Vec<u8>, strea
         hello.client.out.borrow_mut().extend_from_slice(&info);
     }
     hello.via.cert = acc.names(&tls);
+    hello.client.meta.borrow_mut().tls = Some(Box::new(Facts::of(&tls, !sent)));
     if lane.shared.callouts.is_some() {
         hello.via.tls = Some(Box::new(acc.info(&tls)));
     }

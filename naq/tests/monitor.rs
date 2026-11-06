@@ -79,7 +79,6 @@ fn health_vars_and_connections_come_as_nats_server_writes_them() {
     assert_eq!(conns[0]["out_msgs"], 3);
     assert_eq!(conns[0]["subscriptions"], 1);
     assert_eq!(conns[0]["lang"], "rust");
-    assert_eq!(conns[0]["account"], "$G");
     let (status, _) = get(m, "/nothing");
     assert_eq!(status, "HTTP/1.1 404 Not Found");
 }

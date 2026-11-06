@@ -290,3 +290,21 @@ fn a_certificate_tells_when_it_expires() {
     assert_eq!(asn1_time(0x18, b"2031020300000x"), None);
     assert_eq!(asn1_time(0x04, b"991231235959Z"), None);
 }
+
+#[test]
+fn the_key_info_of_a_certificate_is_taken_whole() {
+    let key = KeyPair::generate().unwrap();
+    let der = CertificateParams::new(vec!["a".to_owned()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap()
+        .der()
+        .to_vec();
+    let info = spki(&der).unwrap();
+    assert_eq!(info[0], 0x30);
+    assert!(der.windows(info.len()).any(|w| w == info));
+    assert_eq!(spki(&der[..der.len() / 2]), None);
+    assert_eq!(spki(b"\x30\x03\x30\x01\x05"), None);
+    assert_eq!(subject_text(&der), "CN=rcgen self signed cert");
+    assert_eq!(subject_text(b"junk"), "");
+}

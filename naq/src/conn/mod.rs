@@ -8,6 +8,7 @@ mod read;
 mod trace;
 mod write;
 
+pub(crate) use log::How;
 pub(crate) use read::{READ_CHUNK, SpentReads, make_room, stall};
 pub(crate) use write::writer;
 
@@ -61,6 +62,8 @@ pub(crate) struct Client {
     pub(crate) rtt: Cell<Duration>,
     /// Who it is, for monitoring.
     pub(crate) meta: RefCell<Meta>,
+    /// When it came and was last active, for monitoring.
+    pub(crate) seen: Seen,
     closed: Cell<bool>,
     /// Its account changed: the read loop checks it again.
     refresh: Cell<bool>,
@@ -98,7 +101,10 @@ impl Client {
                 name: None,
                 lang: None,
                 version: None,
+                tls: None,
+                jwt: None,
             }),
+            seen: Seen::new(),
             closed: Cell::new(false),
             refresh: Cell::new(false),
             ended: Cell::new(None),
@@ -205,6 +211,55 @@ pub(crate) struct Meta {
     pub(crate) name: Option<String>,
     pub(crate) lang: Option<String>,
     pub(crate) version: Option<String>,
+    /// Its TLS, if it came over TLS.
+    pub(crate) tls: Option<Box<crate::tls::Facts>>,
+    /// Its user JWT, if it logged in with one.
+    pub(crate) jwt: Option<Box<crate::jwt::trust::Shown>>,
+}
+
+impl Meta {
+    /// Who it logged in as, as `nats-server` names a user in monitoring:
+    /// its user name or NKey, a JWT user's key, `[REDACTED]` for a token,
+    /// else no one.
+    pub(crate) fn raw_user(&self) -> &str {
+        match (&self.user, self.how) {
+            (Some(u), _) => u,
+            (None, Some(log::How::Token)) => "[REDACTED]",
+            _ => "",
+        }
+    }
+}
+
+/// When a client came and was last active, and how often its publishes
+/// waited for a subscriber.
+#[derive(Debug)]
+pub(crate) struct Seen {
+    /// When it was accepted, on the monotonic clock.
+    pub(crate) born: std::time::Instant,
+    /// When it last sent messages or interest, or got output.
+    pub(crate) last: Cell<std::time::Instant>,
+    pub(crate) stalls: Cell<u64>,
+}
+
+impl Seen {
+    fn new() -> Seen {
+        let now = std::time::Instant::now();
+        Seen {
+            born: now,
+            last: Cell::new(now),
+            stalls: Cell::new(0),
+        }
+    }
+
+    /// It is active now.
+    pub(crate) fn active(&self) {
+        self.last.set(std::time::Instant::now());
+    }
+
+    /// When it was last active, on the clock it came at `start` of.
+    pub(crate) fn last_at(&self, start: std::time::SystemTime) -> std::time::SystemTime {
+        start + (self.last.get() - self.born)
+    }
 }
 
 /// A subscription of a client.
@@ -283,8 +338,7 @@ impl Close {
             Close::Shutdown => "Server Shutdown",
             Close::Parse(ParseError::MaxPayload(_)) => "Maximum Message Payload Exceeded",
             Close::Parse(ParseError::ControlLine) => "Maximum Control Line Exceeded",
-            Close::Parse(_) | Close::Connect => "Parse Error",
-            Close::NoHeaders => "Protocol Violation",
+            Close::Parse(_) | Close::Connect | Close::NoHeaders => "Protocol Violation",
             Close::Refused(text) if text == BAD_PROTOCOL => "Bad Client Protocol Version",
             Close::Refused(_) => "No Responders Requires Headers",
             Close::Stale => "Stale Connection",
@@ -586,6 +640,7 @@ impl Conn {
             self.error(text);
         }
         self.log_closed(close);
+        crate::monitor::closed(&self.lane, &self.client, close.reason());
         let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
         for sid in sids {
             self.client.unsubscribe(&self.lane, &sid);

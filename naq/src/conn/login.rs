@@ -64,6 +64,7 @@ impl Conn {
     /// Applies a `CONNECT`.
     #[inline(never)]
     pub(super) fn connect(&mut self, json: &[u8]) -> Result<Step, Close> {
+        self.client.seen.active();
         let (mut creds, names) = self.opts.apply(json).map_err(|_| Close::Connect)?;
         if let Some(cookies) = &self.via.cookies {
             creds.fill(cookies);
@@ -101,7 +102,12 @@ impl Conn {
             (meta.name, meta.lang, meta.version) = names;
             meta.websocket = self.via.ws;
             meta.how = super::log::How::of(&creds);
-            meta.user = creds.user.or(creds.nkey);
+            // A client without credentials is the no_auth_user, if any.
+            let free = auth
+                .filter(|_| creds.is_blank())
+                .and_then(|a| a.id_of(&creds))
+                .map(str::to_owned);
+            meta.user = creds.user.or(creds.nkey).or(free);
         }
         // A user of the service may not ask for others in its account.
         let own = |account: u32, perms: Option<std::sync::Arc<crate::perms::Perms>>| match hook {
@@ -349,7 +355,9 @@ impl Conn {
             // The taps of an account added since this lane was told.
             crate::imports::service::install_account(&self.lane, u.account);
         }
-        self.client.meta.borrow_mut().user = Some(u.key.clone());
+        let mut meta = self.client.meta.borrow_mut();
+        meta.user = Some(u.key.clone());
+        meta.jwt = Some(u.shown.clone());
         Ok(())
     }
 

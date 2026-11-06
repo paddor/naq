@@ -1,0 +1,915 @@
+# Open connections: their counts, subscriptions, sorts and paging.
+a> CONNECT {"verbose":false,"name":"a","lang":"rust","version":"1.0"}
+a> SUB foo 1
+a> SUB bar q 2
+a> UNSUB 2 5
+b> CONNECT {"verbose":false,"name":"b"}
+c> CONNECT {"verbose":false}
+c> SUB baz 1
+# Every subscription is in place before the messages.
+GET /healthz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {"status":"ok"}
+b> PUB foo 2
+b> hi
+b> PUB foo 3
+b> abc
+b> PUB baz 1
+b> x
+c> PUB bar 10
+c> 0123456789
+GET /connz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     }
+<   ]
+< }
+GET /connz?subs=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0",
+<       "subscriptions_list": [
+<         "bar",
+<         "foo"
+<       ]
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1,
+<       "subscriptions_list": [
+<         "baz"
+<       ]
+<     }
+<   ]
+< }
+GET /connz?subs=DETAIL&cid=$CID_a
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0",
+<       "subscriptions_list_detail": [
+<         {
+<           "subject": "bar",
+<           "qgroup": "q",
+<           "sid": "2",
+<           "msgs": 1,
+<           "max": 5,
+<           "cid": ~
+<         },
+<         {
+<           "subject": "foo",
+<           "sid": "1",
+<           "msgs": 2,
+<           "cid": ~
+<         }
+<       ]
+<     }
+<   ]
+< }
+GET /connz?sort=subs
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     }
+<   ]
+< }
+GET /connz?sort=msgs_to
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     }
+<   ]
+< }
+GET /connz?sort=msgs_from
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     }
+<   ]
+< }
+GET /connz?sort=bytes_to
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     }
+<   ]
+< }
+GET /connz?sort=bytes_from
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     }
+<   ]
+< }
+GET /connz?sort=uptime
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     }
+<   ]
+< }
+GET /connz?sort=start&offset=1&limit=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 3,
+<   "offset": 1,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     }
+<   ]
+< }
+GET /connz?offset=-5&limit=0
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 0,
+<       "out_msgs": 3,
+<       "in_bytes": 0,
+<       "out_bytes": 15,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "lang": "rust",
+<       "version": "1.0"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1
+<     }
+<   ]
+< }
+GET /connz?offset=7
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 0,
+<   "total": 3,
+<   "offset": 7,
+<   "limit": 1024,
+<   "connections": []
+< }
+GET /connz?cid=$CID_b
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 3,
+<       "out_msgs": 0,
+<       "in_bytes": 6,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     }
+<   ]
+< }
+GET /connz?cid=99999
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 0,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": []
+< }
+GET /connz?state=closed
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 0,
+<   "total": 0,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": []
+< }
+GET /connz?auth=1&cid=$CID_c
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": 0,
+<       "in_msgs": 1,
+<       "out_msgs": 1,
+<       "in_bytes": 10,
+<       "out_bytes": 1,
+<       "subscriptions": 1,
+<       "name_tag": "$G"
+<     }
+<   ]
+< }
+GET /connz?mqtt_client=x
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 0,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": []
+< }

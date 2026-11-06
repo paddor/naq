@@ -58,9 +58,7 @@ impl Conn {
         loop {
             let limits = self.bounds.limits;
             let (at, stop) = self.parse(&buf, &limits);
-            if std::mem::take(&mut self.busy) {
-                self.ping.active(Instant::now());
-            }
+            self.note_busy();
             self.lane.flush();
             self.lane.expire();
             self.ship(&mut buf, at).await;
@@ -69,8 +67,11 @@ impl Conn {
                 Ok(None) => continue,
                 Err(close) => return close,
             };
-            if let Some(sub) = self.stalled.take() {
-                stall(&sub, stall_mark, &self.lane.shared.events.stalls).await;
+            if let Some(sub) = self.stalled.take()
+                && stall(&sub, stall_mark, &self.lane.shared.events.stalls).await
+            {
+                let stalls = &self.client.seen.stalls;
+                stalls.set(stalls.get() + 1);
             }
             // Lets the writers just woken run before the next read, so output
             // leaves in step with input instead of in bursts.
@@ -108,6 +109,16 @@ impl Conn {
                     Ok(_) => {}
                 },
             }
+        }
+    }
+
+    /// Notes that the client was active, if the read just parsed held
+    /// messages, subscriptions or a `PING`.
+    fn note_busy(&mut self) {
+        if std::mem::take(&mut self.busy) {
+            let now = Instant::now();
+            self.ping.active(now);
+            self.client.seen.last.set(now.into_std());
         }
     }
 
@@ -581,16 +592,18 @@ impl SpentReads {
 
 /// Waits up to [`STALL_MAX`] while `sub` has more than `mark` bytes queued,
 /// so its publisher slows to its pace, and counts the wait in `stalls`.
-pub(crate) async fn stall(sub: &Rc<Client>, mark: usize, stalls: &crate::stats::Counter) {
+/// Tells whether it waited.
+pub(crate) async fn stall(sub: &Rc<Client>, mark: usize, stalls: &crate::stats::Counter) -> bool {
     let drained = sub.drained.notified();
     tokio::pin!(drained);
     // Registered before the check, so a drain after it is not missed.
     drained.as_mut().enable();
     if sub.is_closed() || sub.out.borrow().len() <= mark {
-        return;
+        return false;
     }
     stalls.note();
     let _ = tokio::time::timeout(STALL_MAX, drained).await;
+    true
 }
 
 #[cfg(test)]

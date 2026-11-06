@@ -116,7 +116,7 @@ impl Creds {
         }
     }
 
-    const fn is_blank(&self) -> bool {
+    pub(crate) const fn is_blank(&self) -> bool {
         self.user.is_none()
             && self.pass.is_none()
             && self.token.is_none()

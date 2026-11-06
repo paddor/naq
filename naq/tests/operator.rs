@@ -131,7 +131,7 @@ fn user(issuer: &KeyPair, user: &KeyPair, nats: &Value, more: &Value) -> String 
 /// A server running `conf`: naq, or `nats-server`.
 enum Target {
     Naq(Server),
-    Go { _go: GoServer, port: u16 },
+    Go { _go: GoServer, port: u16, http: u16 },
 }
 
 impl Target {
@@ -141,6 +141,49 @@ impl Target {
             Target::Go { port, .. } => SocketAddr::from(([127, 0, 0, 1], *port)),
         }
     }
+
+    /// The JSON of `GET path` on its monitoring port.
+    fn monitor(&self, path: &str) -> Value {
+        let at = match self {
+            Target::Naq(s) => s.monitor_addr().unwrap(),
+            Target::Go { http, .. } => SocketAddr::from(([127, 0, 0, 1], *http)),
+        };
+        let mut c = TcpStream::connect(at).unwrap();
+        c.set_read_timeout(Some(WAIT)).unwrap();
+        write!(
+            c,
+            "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut text = String::new();
+        c.read_to_string(&mut text).unwrap();
+        let (head, mut body) = text.split_once("\r\n\r\n").unwrap_or(("", ""));
+        // Go chunks a long body.
+        let mut whole = String::new();
+        if head.contains("Transfer-Encoding: chunked") {
+            while let Some((size, rest)) = body.split_once("\r\n") {
+                let n = usize::from_str_radix(size, 16).unwrap_or(0);
+                whole += &rest[..n];
+                body = &rest[n..];
+                body = body.strip_prefix("\r\n").unwrap_or(body);
+                if n == 0 {
+                    break;
+                }
+            }
+            body = &whole;
+        }
+        serde_json::from_str(body)
+            .map_err(|e| format!("{path}: {e}: {text:?}"))
+            .unwrap()
+    }
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 /// naq, then `nats-server` if `NAQ_GO` names one, each running `conf`.
@@ -149,17 +192,18 @@ fn targets(conf: &str) -> Vec<(&'static str, Target)> {
     opts.host = "127.0.0.1".into();
     opts.port = 0;
     opts.lanes = 2;
+    opts.http_port = Some(0);
     let mut all = vec![("naq", Target::Naq(Server::start(&opts).unwrap()))];
     if let Some(bin) = std::env::var_os("NAQ_GO").map(PathBuf::from) {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let (port, http) = (free_port(), free_port());
         let dir = std::env::temp_dir().join(format!("naq-operator-{}-{port}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("go.conf");
-        std::fs::write(&path, format!("listen: 127.0.0.1:{port}\n{conf}")).unwrap();
+        std::fs::write(
+            &path,
+            format!("listen: 127.0.0.1:{port}\nhttp: 127.0.0.1:{http}\n{conf}"),
+        )
+        .unwrap();
         let child = Command::new(bin)
             .arg("-c")
             .arg(&path)
@@ -173,7 +217,14 @@ fn targets(conf: &str) -> Vec<(&'static str, Target)> {
             assert!(Instant::now() < deadline, "nats-server did not start");
             std::thread::sleep(Duration::from_millis(20));
         }
-        all.push(("go", Target::Go { _go: go, port }));
+        all.push((
+            "go",
+            Target::Go {
+                _go: go,
+                port,
+                http,
+            },
+        ));
     }
     all
 }
@@ -712,4 +763,99 @@ fn a_strict_operator_takes_only_what_its_signing_keys_signed() {
             "account by the operator key",
         );
     }
+}
+
+/// The connection of `/connz` at `t` named `n`, open or `closed`, once
+/// it is there.
+fn conn_named(t: &Target, n: &str, closed: bool) -> Value {
+    let path = if closed {
+        "/connz?state=closed"
+    } else {
+        "/connz?auth=1"
+    };
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let z = t.monitor(path);
+        // Go keeps the probe that saw it start among the closed too.
+        let found = z["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == n)
+            .cloned();
+        if let Some(c) = found {
+            return c;
+        }
+        assert!(Instant::now() < deadline, "no {n} in {z}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn connz_shows_what_issued_a_jwt_user() {
+    let w = World::new();
+    let conf = w.conf();
+    for (name, t) in targets(&conf) {
+        let u = KeyPair::new_user();
+        let tags = json!({"tags": ["t1", "t2"]});
+        let jwt = user(&w.a, &u, &tags, &json!({"name": "alice"}));
+        let mut c = Client::login(&t, Some(&u), &jwt, ",\"name\":\"c1\"");
+        logged_in(&mut c, name, &w.a.public_key(), 1 << 20);
+        let signed = KeyPair::new_user();
+        let of_s = json!({"issuer_account": w.s.public_key()});
+        let by_signer = user(&w.signer, &signed, &of_s, &json!({}));
+        let mut c2 = Client::login(&t, Some(&signed), &by_signer, ",\"name\":\"c2\"");
+        logged_in(&mut c2, name, &w.s.public_key(), 1 << 20);
+        let bearer = KeyPair::new_user();
+        let token = user(&w.a, &bearer, &json!({"bearer_token": true}), &json!({}));
+        let mut c3 = Client::login(&t, None, &token, ",\"name\":\"c3\"");
+        logged_in(&mut c3, name, &w.a.public_key(), 1 << 20);
+        let a = w.a.public_key();
+        let one = conn_named(&t, "c1", false);
+        let shown = |c: &Value, k: &str| c[k].as_str().unwrap_or_default().to_owned();
+        let keys = [
+            "authorized_user",
+            "account",
+            "jwt",
+            "issuer_key",
+            "name_tag",
+        ];
+        let got: Vec<String> = keys.iter().map(|k| shown(&one, k)).collect();
+        assert_eq!(
+            got,
+            [u.public_key(), a.clone(), jwt.clone(), a.clone(), a.clone()],
+            "{name}: {one}"
+        );
+        assert_eq!(one["tags"], json!(["t1", "t2"]), "{name}: {one}");
+        let two = conn_named(&t, "c2", false);
+        assert_eq!(
+            shown(&two, "issuer_key"),
+            w.signer.public_key(),
+            "{name}: {two}"
+        );
+        assert_eq!(shown(&two, "account"), w.s.public_key(), "{name}: {two}");
+        let three = conn_named(&t, "c3", false);
+        assert!(
+            three.get("jwt").is_none(),
+            "{name}: a bearer JWT shows: {three}"
+        );
+        let plain = t.monitor("/connz");
+        assert!(
+            plain["connections"][0].get("jwt").is_none(),
+            "{name}: {plain}"
+        );
+        drop(c);
+        closed_keeps_its_issuer(&t, name, &jwt, &a);
+    }
+}
+
+/// Client `c1` of user JWT `jwt` of account `a` at `t`, closed, keeps
+/// what issued it, and the name in its JWT.
+fn closed_keeps_its_issuer(t: &Target, name: &str, jwt: &str, a: &str) {
+    let closed = conn_named(t, "c1", true);
+    let shown = |k: &str| closed[k].as_str().unwrap_or_default().to_owned();
+    let keys = ["jwt", "issuer_key", "name_tag", "authorized_user"];
+    let got: Vec<String> = keys.iter().map(|k| shown(k)).collect();
+    assert_eq!(got, [jwt, a, "alice", ""], "{name}: {closed}");
+    assert_eq!(closed["tags"], json!(["t1", "t2"]), "{name}: {closed}");
 }

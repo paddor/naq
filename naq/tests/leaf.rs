@@ -2172,3 +2172,50 @@ fn a_hub_that_cannot_be_reached_is_logged_with_each_attempt() {
     drop(s);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn connz_lists_a_link_to_a_hub_as_a_leafnode_and_keeps_it_once_closed() {
+    let hub = Hub::new();
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        http_port: Some(0),
+        remotes: vec![Remote {
+            urls: vec![format!("127.0.0.1:{}", hub.port())],
+            ..Remote::default()
+        }],
+        ..Options::default()
+    })
+    .unwrap();
+    let http = s.monitor_addr().unwrap().port();
+    let mut p = hub.accept();
+    p.send("INFO {\"server_id\":\"HUB\",\"name\":\"hub1\",\"client_id\":5,\"headers\":true,\"info_on_connect\":true} \r\n");
+    assert!(p.line().starts_with("CONNECT "));
+    p.send("INFO {\"connect_info\":true}\r\nLS+ foo\r\nLS+ bar q 2\r\nPING\r\n");
+    while p.line() != "PONG" {}
+    let z = until(http, "/connz?subs=1&auth=1", |z| z["num_connections"] == 1);
+    let c = &z["connections"][0];
+    assert_eq!(c["kind"], "Leafnode", "{z}");
+    assert!(c.get("type").is_none(), "{z}");
+    assert_eq!(c["subscriptions"], 2, "{z}");
+    assert_eq!(
+        c["subscriptions_list"],
+        serde_json::json!(["bar", "foo"]),
+        "{z}"
+    );
+    assert_eq!(c["name_tag"], "$G", "{z}");
+    let plain = get(http, "/connz");
+    assert!(
+        plain["connections"][0].get("subscriptions_list").is_none(),
+        "{plain}"
+    );
+    drop(p);
+    let z = until(http, "/connz?state=closed", |z| z["num_connections"] == 1);
+    let c = &z["connections"][0];
+    assert_eq!(
+        (c["kind"].as_str(), c["reason"].as_str()),
+        (Some("Leafnode"), Some("Client Closed")),
+        "{z}"
+    );
+}

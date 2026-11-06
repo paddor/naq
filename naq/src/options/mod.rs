@@ -67,6 +67,9 @@ pub struct Options {
     pub https_port: Option<u16>,
     /// Host for monitoring; `None` for [`Options::host`] (`http`, `https`).
     pub http_host: Option<String>,
+    /// Closed connections monitoring keeps for `/connz` (`max_closed_clients`):
+    /// the newest that many. 0 keeps 10000, the default.
+    pub max_closed_clients: usize,
     /// The path monitoring is served under (`http_base_path`): `/mon`
     /// serves `/mon/varz`. Empty for the root.
     pub http_base_path: String,
@@ -552,6 +555,7 @@ impl Default for Options {
             https_port: None,
             http_host: None,
             http_base_path: String::new(),
+            max_closed_clients: 10_000,
             tls: None,
             websocket: None,
             log: Logging::default(),

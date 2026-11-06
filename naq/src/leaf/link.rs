@@ -501,11 +501,12 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             "{label} - Leafnode connection created for account: {name} "
         ));
         let end = self.read_loop(&side, lds).await;
-        self.lane.links.borrow_mut().retain(|l| l.id != side.id);
-        side.forget_hub(self.lane);
         let why = client
             .ended()
             .map_or("Client Closed", crate::conn::Close::reason);
+        crate::monitor::link_closed(self.lane, &side, why);
+        self.lane.links.borrow_mut().retain(|l| l.id != side.id);
+        side.forget_hub(self.lane);
         shared.log.info(format_args!(
             "{label} - Leafnode connection closed: {why} - Remote: {}",
             side.facts.name

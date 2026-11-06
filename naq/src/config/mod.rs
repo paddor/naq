@@ -130,6 +130,10 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "write_deadline" => o.write_deadline = duration(item).map_err(|e| bad(&e))?,
             "authorization" => auth::authorization(o, item)?,
             k if MONITORING.contains(&k) => monitoring(o, k, item)?,
+            "max_closed_clients" => {
+                o.max_closed_clients =
+                    size(item, i32::MAX).ok_or_else(|| bad("expected a count"))?;
+            }
             "tls" => o.tls = Some(tls(item)?),
             "websocket" | "ws" => o.websocket = ws::websocket(item)?,
             "accounts" => auth::accounts(o, item)?,
