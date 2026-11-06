@@ -1,0 +1,988 @@
+# Requests about accounts and users on $SYS: other accounts reach them
+# through the imports every account has, scoped to themselves; the system
+# account asks about any account. Go counts the first publish of each
+# client in $G (its account before CONNECT): `received` is left out.
+#! server_name: s1
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#!   A {
+#!     users [{user: a, password: p, permissions: {
+#!       publish: {allow: ["foo.>", "$SYS.REQ.>", "_R.>"]},
+#!       subscribe: {deny: ["bar"]}
+#!     }}]
+#!   }
+#!   B { users [{user: b, password: p}, {user: c, password: p, permissions: {allow_responses: true}}] }
+#! }
+#! system_account: SYS
+#~ id
+#~ time
+#~ seq
+#~ ver
+#~ timestamp
+#~ update_time
+#~ out_bytes
+#~ bytes
+#~ subscriptions
+#~ pending_bytes
+#~ num_cache
+#~ num_matches
+#~ cache_hit_rate
+#~ max_fanout
+#~ avg_fanout
+#~ num_subscriptions
+#- sublist_stats
+#- received
+#= allow
+#= account_statz
+#= exports
+#= imports
+a> CONNECT {"user":"a","pass":"p","headers":true,"no_responders":true}
+a> SUB _R.> 1
+b> CONNECT {"user":"b","pass":"p","headers":true,"no_responders":true}
+b> SUB _R.> 1
+b> SUB foo 2
+s> CONNECT {"user":"sys","pass":"p","headers":true,"no_responders":true}
+s> SUB _R.> 1
+a> PUB $SYS.REQ.USER.INFO _R.1 0
+a>
+a< 1
+< MSG _R.1 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "user": "a",
+<     "account": "A",
+<     "account_name": "A",
+<     "permissions": {
+<       "publish": {
+<         "allow": [
+<           "$SYS.REQ.\u003e",
+<           "_R.\u003e",
+<           "foo.\u003e"
+<         ]
+<       },
+<       "subscribe": {
+<         "deny": [
+<           "bar"
+<         ]
+<       }
+<     }
+<   }
+< }
+b> PUB $SYS.REQ.USER.INFO _R.1 0
+b>
+b< 1
+< MSG _R.1 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "user": "b",
+<     "account": "B",
+<     "account_name": "B"
+<   }
+< }
+s> PUB $SYS.REQ.USER.INFO _R.1 0
+s>
+s< 1
+< MSG _R.1 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "user": "sys",
+<     "account": "SYS",
+<     "account_name": "SYS"
+<   }
+< }
+s> PUB $SYS.REQ.USER.A.INFO _R.2 0
+s>
+s< 1
+< MSG _R.2 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "user": "",
+<     "account": ""
+<   }
+< }
+a> PUB $SYS.REQ.SERVER.PING.CONNZ _R.2 23
+a> {"acc":"B","auth":true}
+a< 1
+< MSG _R.2 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_connections": 1,
+<     "total": 1,
+<     "offset": 0,
+<     "limit": 1024,
+<     "connections": [
+<       {
+<         "cid": ~,
+<         "kind": "Client",
+<         "type": "nats",
+<         "ip": "127.0.0.1",
+<         "port": ~,
+<         "start": ~,
+<         "last_activity": ~,
+<         "rtt": ~,
+<         "uptime": ~,
+<         "idle": ~,
+<         "pending_bytes": ~,
+<         "in_msgs": 2,
+<         "out_msgs": 1,
+<         "in_bytes": 23,
+<         "out_bytes": ~,
+<         "subscriptions": ~,
+<         "authorized_user": "a",
+<         "account": "A",
+<         "name_tag": "A"
+<       }
+<     ]
+<   }
+< }
+a> PUB $SYS.REQ.ACCOUNT.PING.CONNZ _R.3 0
+a>
+a< 1
+< MSG _R.3 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_connections": 1,
+<     "total": 1,
+<     "offset": 0,
+<     "limit": 1024,
+<     "connections": [
+<       {
+<         "cid": ~,
+<         "kind": "Client",
+<         "type": "nats",
+<         "ip": "127.0.0.1",
+<         "port": ~,
+<         "start": ~,
+<         "last_activity": ~,
+<         "rtt": ~,
+<         "uptime": ~,
+<         "idle": ~,
+<         "pending_bytes": ~,
+<         "in_msgs": 3,
+<         "out_msgs": 2,
+<         "in_bytes": 23,
+<         "out_bytes": ~,
+<         "subscriptions": ~
+<       }
+<     ]
+<   }
+< }
+a> PUB $SYS.REQ.ACCOUNT.PING.STATZ _R.4 18
+a> {"accounts":["B"]}
+a< 1
+< MSG _R.4 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "account_statz": [
+<       {
+<         "acc": "A",
+<         "name": "A",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 3,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       }
+<     ]
+<   }
+< }
+a> PUB $SYS.REQ.SERVER.PING.VARZ _R.5 0
+a>
+a< 1
+< HMSG _R.5 1
+< NATS/1.0 503
+< Nats-Subject: $SYS.REQ.SERVER.PING.VARZ
+s> PUB $SYS.REQ.ACCOUNT.A.INFO _R.3 0
+s>
+s< 1
+< MSG _R.3 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "account_name": "A",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 1,
+<     "subscriptions": ~,
+<     "imports": [
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.CONNZ",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.CONNZ",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.STATZ",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.USER.A.INFO",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.USER.INFO",
+<         "local_subject": "$SYS.REQ.USER.INFO",
+<         "type": "service",
+<         "invalid": false,
+<         "share": true,
+<         "tracking": false
+<       }
+<     ],
+<     "name_tag": "A"
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.ZZ.INFO _R.4 0
+s>
+s< 1
+< MSG _R.4 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": null,
+<   "error": {
+<     "code": 500,
+<     "description": "Account ZZ does not exist"
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.B.SUBSZ _R.5 28
+s> {"account":"A","test":"foo"}
+s< 1
+< MSG _R.5 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_subscriptions": ~,
+<     "num_cache": ~,
+<     "num_inserts": 6,
+<     "num_removes": 0,
+<     "num_matches": ~,
+<     "cache_hit_rate": ~,
+<     "max_fanout": ~,
+<     "avg_fanout": ~,
+<     "total": 1,
+<     "offset": 0,
+<     "limit": 1024,
+<     "subscriptions_list": [
+<       {
+<         "account": "B",
+<         "account_tag": "B",
+<         "subject": "foo",
+<         "sid": "2",
+<         "msgs": 0,
+<         "cid": ~
+<       }
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.A.CONNZ _R.6 11
+s> {"acc":"B"}
+s< 1
+< MSG _R.6 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_connections": 1,
+<     "total": 1,
+<     "offset": 0,
+<     "limit": 1024,
+<     "connections": [
+<       {
+<         "cid": ~,
+<         "kind": "Client",
+<         "type": "nats",
+<         "ip": "127.0.0.1",
+<         "port": ~,
+<         "start": ~,
+<         "last_activity": ~,
+<         "rtt": ~,
+<         "uptime": ~,
+<         "idle": ~,
+<         "pending_bytes": ~,
+<         "in_msgs": 5,
+<         "out_msgs": 4,
+<         "in_bytes": 41,
+<         "out_bytes": ~,
+<         "subscriptions": ~
+<       }
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.ZZ.CONNZ _R.7 0
+s>
+s< 1
+< MSG _R.7 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_connections": 0,
+<     "total": 0,
+<     "offset": 0,
+<     "limit": 1024,
+<     "connections": null
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.PING.CONNZ _R.8 0
+s>
+s< 1
+< MSG _R.8 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "num_connections": 0,
+<     "total": 0,
+<     "offset": 0,
+<     "limit": 1024,
+<     "connections": null
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.A.LEAFZ _R.9 0
+s>
+s< 1
+< MSG _R.9 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "leafnodes": 0,
+<     "leafs": []
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.A.JSZ _R.10 0
+s>
+s< 1
+< MSG _R.10 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": null,
+<   "error": {
+<     "code": 500,
+<     "description": "jetstream not enabled"
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.B.STATZ _R.11 18
+s> {"accounts":["A"]}
+s< 1
+< MSG _R.11 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "account_statz": [
+<       {
+<         "acc": "B",
+<         "name": "B",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 1,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       }
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.ZZ.STATZ _R.12 0
+s>
+s< 0
+s> PUB $SYS.REQ.ACCOUNT.PING.STATZ _R.13 0
+s>
+s< 1
+< MSG _R.13 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "account_statz": [
+<       {
+<         "acc": "A",
+<         "name": "A",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 4,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       },
+<       {
+<         "acc": "B",
+<         "name": "B",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 1,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       },
+<       {
+<         "acc": "SYS",
+<         "name": "SYS",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 11,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       }
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.PING.STATZ _R.14 23
+s> {"include_unused":true}
+s< 1
+< MSG _R.14 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "data": {
+<     "server_id": ~,
+<     "now": ~,
+<     "account_statz": [
+<       {
+<         "acc": "$G",
+<         "name": "$G",
+<         "conns": 0,
+<         "leafnodes": 0,
+<         "total_conns": 0,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 0,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       },
+<       {
+<         "acc": "A",
+<         "name": "A",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 4,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       },
+<       {
+<         "acc": "B",
+<         "name": "B",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 1,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       },
+<       {
+<         "acc": "SYS",
+<         "name": "SYS",
+<         "conns": 1,
+<         "leafnodes": 0,
+<         "total_conns": 1,
+<         "num_subscriptions": ~,
+<         "sent": {
+<           "msgs": 12,
+<           "bytes": ~,
+<           "gateways": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "routes": {
+<             "msgs": 0,
+<             "bytes": ~
+<           },
+<           "leafs": {
+<             "msgs": 0,
+<             "bytes": ~
+<           }
+<         },
+<         "slow_consumers": 0
+<       }
+<     ]
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.B.CONNS _R.15 0
+s>
+s< 1
+< MSG _R.15 1
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "B",
+<   "name": "B",
+<   "conns": 1,
+<   "leafnodes": 0,
+<   "total_conns": 1,
+<   "num_subscriptions": ~,
+<   "sent": {
+<     "msgs": 1,
+<     "bytes": ~,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": ~
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": ~
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": ~
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+s> PUB $SYS.REQ.ACCOUNT.B.CONNS _R.16 11
+s> {"acc":"A"}
+s< 0
+s> PUB $SYS.REQ.ACCOUNT.ZZ.CONNS _R.17 0
+s>
+s< 0
+s> PUB $SYS.REQ.ACCOUNT.SYS.STATZ _R.18 20
+s> {"server_name":"zz"}
+s< 0
+s> PUB $SYS.REQ.ACCOUNT.A.INFO _R.19 1
+s> {
+s< 1
+< MSG _R.19 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 400,
+<     "description": "unexpected end of JSON input"
+<   }
+< }
+s> PUB $SYS.REQ.ACCOUNT.A.INFO 0
+s>
+s< 0
+s> HPUB $SYS.REQ.USER.A.INFO _R.20 34 34
+s> NATS/1.0\r\nNats-Request-Info: {\r\n\r\n
+s< 1
+< MSG _R.20 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 400
+<   }
+< }
+s> PUB $SYS.REQ.USER.INFO 0
+s>
+s< 0
+c> CONNECT {"user":"c","pass":"p","headers":true,"no_responders":true}
+c> SUB _R.> 1
+c> PUB $SYS.REQ.USER.INFO _R.1 0
+c>
+c< 1
+GET /accountz?acc=A
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "SYS",
+<   "account_detail": {
+<     "account_name": "A",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 1,
+<     "subscriptions": ~,
+<     "imports": [
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.CONNZ",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.CONNZ",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.STATZ",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.USER.A.INFO",
+<         "account": "SYS",
+<         "to": "$SYS.REQ.USER.INFO",
+<         "local_subject": "$SYS.REQ.USER.INFO",
+<         "type": "service",
+<         "invalid": false,
+<         "share": true,
+<         "tracking": false
+<       }
+<     ],
+<     "name_tag": "A"
+<   }
+< }

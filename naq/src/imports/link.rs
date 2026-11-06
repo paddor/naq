@@ -14,8 +14,11 @@ pub(crate) fn link(opts: &Options) -> Result<Box<[Imports]>, String> {
     let names: Vec<&str> = all_names.iter().map(String::as_str).collect();
     let all = names.iter().map(|_| Imports::default()).collect();
     let mut defs = defs::of(opts, &all_names);
-    let system = crate::auth::system(opts, &all_names).is_some();
-    check_exports(&mut defs, system)?;
+    let system = crate::auth::system(opts, &all_names);
+    if let Some(s) = system {
+        super::system::add(&mut defs, s as usize);
+    }
+    check_exports(&mut defs, system.is_some())?;
     let mut l = Linker {
         defs: &defs,
         names,
@@ -29,11 +32,14 @@ pub(crate) fn link(opts: &Options) -> Result<Box<[Imports]>, String> {
 }
 
 /// The imports of every account of `defs`, by id, all from JWTs: as
-/// `link` links them, leaving out what does not hold. Latency samples
-/// need a `system` account.
-pub(crate) fn relink(mut defs: Vec<Def>, system: bool) -> Vec<Imports> {
+/// `link` links them, leaving out what does not hold, with the services
+/// of the `system` account if there is one.
+pub(crate) fn relink(mut defs: Vec<Def>, system: Option<u32>) -> Vec<Imports> {
+    if let Some(s) = system {
+        super::system::add(&mut defs, s as usize);
+    }
     // Lenient: nothing is an error.
-    let _ = check_exports(&mut defs, system);
+    let _ = check_exports(&mut defs, system.is_some());
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     let all = names.iter().map(|_| Imports::default()).collect();
     let mut l = Linker {
@@ -130,6 +136,31 @@ fn allows(exporter: &Def, at: u32, importer: &str, subject: &str, token: Option<
         .is_none_or(|a| a.is_empty() || a.iter().any(|x| x == importer))
 }
 
+/// What service import of `remote` as `local`, `wild` if `remote` is a
+/// filter, takes requests on, and how it rewrites their subjects.
+fn rewrite(local: &str, remote: &str, wild: bool) -> Result<(String, Rewrite), String> {
+    Ok(if !wild {
+        (
+            local.to_owned(),
+            if local == remote {
+                Rewrite::Same
+            } else {
+                Rewrite::Fixed(remote.as_bytes().into())
+            },
+        )
+    } else if local == remote {
+        (local.to_owned(), Rewrite::Same)
+    } else {
+        let remote = transform::untokenize(remote);
+        let tr = Transform::new(&remote, &transform::tokenize(local))
+            .map_err(|e| format!("cannot map {local:?} to {remote:?}: {e}"))?;
+        let tr = tr
+            .reverse()
+            .ok_or_else(|| format!("cannot map {local:?} to {remote:?}"))?;
+        (transform::untokenize(local), Rewrite::Map(tr))
+    })
+}
+
 /// The id of account `name`.
 fn id(names: &[&str], name: &str) -> Result<u32, String> {
     names
@@ -178,13 +209,15 @@ impl Linker<'_> {
     fn services(&mut self) -> Result<(), String> {
         let defs = self.defs;
         for (i, d) in defs.iter().enumerate() {
-            for (im, token) in &d.imports {
-                let ImportKind::Service { share } = im.kind else {
+            let own = d.imports.len() - d.added;
+            for (k, (im, token)) in d.imports.iter().enumerate() {
+                let ImportKind::Service { .. } = im.kind else {
                     continue;
                 };
-                let s = match self.service(&d.name, im, share, token.as_deref()) {
+                let added = k >= own;
+                let s = match self.service(&d.name, im, token.as_deref(), added) {
                     Ok(s) => s,
-                    Err(_) if d.lenient => continue,
+                    Err(_) if d.lenient || added => continue,
                     Err(e) => {
                         return Err(format!(
                             "account {:?}: service import {:?}: {e}",
@@ -309,9 +342,10 @@ impl Linker<'_> {
         &self,
         importer: &str,
         im: &crate::Import,
-        share: bool,
         token: Option<&str>,
+        added: bool,
     ) -> Result<ServiceImport, String> {
+        let share = matches!(im.kind, ImportKind::Service { share: true });
         let (names, all) = (&self.names[..], &self.all[..]);
         let to = id(names, &im.account)?;
         // `subject` is the exporter's side, `from` the importer's.
@@ -324,11 +358,16 @@ impl Linker<'_> {
         }
         let exporter = &self.defs[to as usize];
         let Some((at, export)) = export_of(exporter, remote, true)
-            .filter(|&(at, _)| allows(exporter, at, importer, remote, token))
+            .filter(|&(at, _)| added || allows(exporter, at, importer, remote, token))
         else {
             return Err("not authorized".into());
         };
-        let me = id(names, importer)?;
+        // `$G` imports only what the server adds.
+        let me = names
+            .iter()
+            .position(|n| *n == importer)
+            .map(|i| i as u32)
+            .ok_or_else(|| format!("no account {importer:?}"))?;
         let wild = !subject::is_literal(remote.as_bytes());
         let checked = if wild {
             transform::untokenize(&local)
@@ -338,26 +377,7 @@ impl Linker<'_> {
         if service_cycle(all, to, &checked, &mut vec![me]) {
             return Err("the import forms a cycle".into());
         }
-        let (from, rewrite) = if !wild {
-            (
-                local.clone(),
-                if local == *remote {
-                    Rewrite::Same
-                } else {
-                    Rewrite::Fixed(remote.as_bytes().into())
-                },
-            )
-        } else if local == *remote {
-            (local.clone(), Rewrite::Same)
-        } else {
-            let remote = transform::untokenize(remote);
-            let tr = Transform::new(&remote, &transform::tokenize(&local))
-                .map_err(|e| format!("cannot map {local:?} to {remote:?}: {e}"))?;
-            let tr = tr
-                .reverse()
-                .ok_or_else(|| format!("cannot map {local:?} to {remote:?}"))?;
-            (transform::untokenize(&local), Rewrite::Map(tr))
-        };
+        let (from, rewrite) = rewrite(&local, remote, wild)?;
         let service = match &export.kind {
             ExportKind::Service(s) => s.clone(),
             ExportKind::Stream => ServiceExport::default(),

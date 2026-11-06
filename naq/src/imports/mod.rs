@@ -7,6 +7,7 @@ pub(crate) mod latency;
 pub(crate) mod link;
 pub(crate) mod service;
 pub(crate) mod shadow;
+pub(crate) mod system;
 mod transform;
 
 pub(crate) use link::link;

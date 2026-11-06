@@ -148,6 +148,9 @@ impl GoHub {
                 urls: vec![format!("nats-leaf://127.0.0.1:{}", self.proxies[k].port)],
                 ..Remote::default()
             }],
+            // What links tell is then the interest of clients, without the
+            // server's own: the imports of the system account's services.
+            no_system_account: true,
             ..Options::default()
         };
         self.leafs[k] = Some(Server::start(&o).unwrap());

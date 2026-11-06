@@ -219,18 +219,20 @@ impl Interest {
 
     /// The taps that count as plain interest: see [`Index::taps_told`].
     pub(crate) fn taps_told(&self, to_routes: bool) -> u64 {
-        let counts = |t: &&Tap| {
-            !to_routes
-                || matches!(
-                    t,
-                    Tap::Responses(_)
-                        | Tap::Callout(_)
-                        | Tap::Sys(_)
-                        | Tap::Shadow {
-                            to_routes: true,
-                            ..
-                        }
-                )
+        let counts = |t: &&Tap| match t {
+            // Interest only the server itself has.
+            Tap::Sys(s) if s.local() => false,
+            _ if !to_routes => true,
+            _ => matches!(
+                t,
+                Tap::Responses(_)
+                    | Tap::Callout(_)
+                    | Tap::Sys(_)
+                    | Tap::Shadow {
+                        to_routes: true,
+                        ..
+                    }
+            ),
         };
         self.taps.iter().filter(counts).count() as u64
     }

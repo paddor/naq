@@ -224,11 +224,13 @@ fn system_name(opts: &Options) -> Option<String> {
 /// it has one.
 pub(crate) fn system(opts: &Options, names: &[String]) -> Option<u32> {
     let chosen = system_name(opts);
+    let defined = opts.accounts.iter().any(|a| a.name == SYSTEM);
     let name = match &chosen {
         Some(n) => n.as_str(),
-        None if opts.no_system_account && !opts.accounts.iter().any(|a| a.name == SYSTEM) => {
-            return None;
-        }
+        // In operator mode, `nats-server` makes none: its `$SYS` is there
+        // before it would make it the system account.
+        None if !opts.operators.is_empty() => return None,
+        None if opts.no_system_account && !defined => return None,
         None => SYSTEM,
     };
     // Accounts are few: their count fits.

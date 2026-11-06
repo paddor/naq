@@ -26,6 +26,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use zzq_tokio::transport::{Listener, Stream};
 
+pub(crate) use accountz::{in_use, name_tag};
+pub(crate) use accstatz::{conns, statz};
 pub(crate) use conns::{closed, link_closed};
 pub(crate) use pages::health;
 pub(crate) use statsz::{ServerStats, statsz};
@@ -453,6 +455,23 @@ pub(crate) fn fuzz(data: &[u8]) {
     http::fuzz(data);
     let base = base_path(&String::from_utf8_lossy(data));
     assert_eq!(http::path_clean(&base), base, "{base:?} is not clean");
+}
+
+/// What `/accountz` shows of account `name` in detail, as `nats-server`
+/// answers a `$SYS` `INFO` request: compact. Or why it cannot.
+pub(crate) async fn account_info(shared: &Shared, name: &str) -> Result<Vec<u8>, Refused> {
+    let q = Query::of_pairs(vec![("acc".into(), name.into())]);
+    let r = accountz::answer(shared, &q).await?;
+    // The endpoint writes JSON: it reads back.
+    let page: json::Ordered = serde_json::from_slice(&r.body).map_err(|e| e.to_string())?;
+    let json::Ordered::Object(fields) = page else {
+        return Err(format!("Account {name} does not exist"));
+    };
+    fields
+        .into_iter()
+        .find(|(k, _)| k == "account_detail")
+        .map(|(_, d)| json::compact(&d))
+        .ok_or_else(|| format!("Account {name} does not exist"))
 }
 
 /// Text of `b`, as monitoring shows bytes it holds.

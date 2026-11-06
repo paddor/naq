@@ -36,6 +36,9 @@ fn leaf_named(name: &str, remote: Remote) -> Server {
         server_name: name.into(),
         leaf_reconnect: Duration::from_millis(50),
         remotes: vec![remote],
+        // What links tell is then the interest of clients, without the
+        // server's own: the imports of the system account's services.
+        no_system_account: true,
         ..Options::default()
     })
     .unwrap()

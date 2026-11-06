@@ -35,6 +35,9 @@ pub(crate) struct ClientInfo {
     pub(crate) server: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) cluster: String,
+    /// The name in the requester's user JWT.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) name_tag: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]

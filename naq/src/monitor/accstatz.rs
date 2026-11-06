@@ -267,6 +267,48 @@ impl AccountStat<'_> {
     }
 }
 
+/// What a `$SYS` request finds of accounts `names`, in their order, or of
+/// every account: those with connections here, or each one with
+/// `unused`. The data of its answer, and how many it found.
+pub(crate) async fn statz(
+    shared: &Shared,
+    names: Option<&[String]>,
+    unused: bool,
+) -> (usize, Vec<u8>) {
+    let all = uses(shared, Which::All(shared.accounts.len())).await;
+    let ids: Vec<u32> = match names {
+        Some(n) => n.iter().filter_map(|a| shared.accounts.id(a)).collect(),
+        None => (0..shared.accounts.len()).collect(),
+    };
+    let stats: Vec<AccountStat<'_>> = ids
+        .into_iter()
+        .filter_map(|id| Some((shared.accounts.get(id)?, all.get(id as usize)?)))
+        .filter(|(a, u)| (unused || u.clients + u.leafs > 0) && accountz::in_use(shared, &a.name))
+        .map(|(a, u)| AccountStat::of(shared, &a.name, u))
+        .collect();
+    let n = stats.len();
+    let body = super::json::compact(&AccountStatz {
+        server_id: &shared.server_id,
+        now: now(),
+        account_statz: stats,
+    });
+    (n, body)
+}
+
+/// What account `name` counts here, as `$SYS` tells it in `CONNS`: its
+/// clients, and its fields as JSON, without their braces. `None` for an
+/// account the server does not have.
+pub(crate) async fn conns(shared: &Shared, name: &str) -> Option<(usize, Vec<u8>)> {
+    let id = shared
+        .accounts
+        .id(name)
+        .filter(|_| accountz::in_use(shared, name))?;
+    let u = uses(shared, Which::One(id)).await.pop()?;
+    let stat = super::json::compact(&AccountStat::of(shared, name, &u));
+    let inner = stat.get(1..stat.len() - 1)?.to_vec();
+    Some((u.clients, inner))
+}
+
 #[derive(Debug, Serialize)]
 #[expect(clippy::struct_field_names, reason = "the keys nats-server writes")]
 struct AccountStatz<'a> {

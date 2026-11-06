@@ -432,9 +432,13 @@ impl Script {
                 }
                 i += 1;
             }
+            // Lists in an item are sorted first.
             let mut items: Vec<String> = items
                 .iter()
-                .map(|t| t.trim_end_matches('\n').trim_end_matches(',').to_owned())
+                .map(|t| {
+                    let t = self.sorted(t);
+                    t.trim_end_matches('\n').trim_end_matches(',').to_owned()
+                })
                 .collect();
             items.sort();
             let n = items.len();

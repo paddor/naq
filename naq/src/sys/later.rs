@@ -18,6 +18,7 @@ const MOST: usize = 64;
 /// A request, as it came.
 #[derive(Debug, Clone)]
 pub(crate) struct Asked {
+    pub(crate) subject: Vec<u8>,
     pub(crate) reply: Vec<u8>,
     pub(crate) headers: Vec<u8>,
     pub(crate) body: Vec<u8>,
@@ -26,6 +27,7 @@ pub(crate) struct Asked {
 impl Asked {
     pub(crate) fn of(m: &Pub<'_>) -> Asked {
         Asked {
+            subject: m.subject.to_vec(),
             reply: m.reply.unwrap_or_default().to_vec(),
             headers: m.headers.unwrap_or_default().to_vec(),
             body: m.payload.to_vec(),
@@ -133,7 +135,13 @@ pub(crate) async fn send(lane: &Rc<Lane>, a: &Answer) {
         return;
     };
     let mut out = Outs::new(lane);
-    send_now(lane, &mut out, sys, a);
+    let m = Pub {
+        subject: &a.to,
+        reply: Some(b""),
+        headers: a.headers.as_deref(),
+        payload: &a.payload,
+    };
+    crate::lane::inject_through(lane, &mut out, sys, &m);
     lane.flush();
     lane.ship_imported(&mut out).await;
 }

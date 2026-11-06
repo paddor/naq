@@ -1,6 +1,7 @@
 //! The server's own services in the system account: requests on `$SYS`
 //! subjects it answers, as `nats-server` answers them.
 
+mod account;
 mod claims;
 mod directory;
 mod encode;
@@ -50,6 +51,12 @@ pub(crate) enum Service {
     Server(Z),
     /// `$SYS.REQ.SERVER.PING`: `STATSZ` by its old subject.
     Ping,
+    /// A request about an account, for what its last token names.
+    Account(account::X),
+    /// `$SYS.REQ.ACCOUNT.PING.STATZ`: the statistics of every account.
+    AccountPing,
+    /// A user's request for its own details.
+    UserInfo,
     /// An account JWT to take in place of the account's.
     ClaimsUpdate,
     /// An account JWT for a directory resolver to store.
@@ -67,6 +74,24 @@ pub(crate) enum Service {
     Packed,
     /// Answers to the lookups of JWTs this server sent the others.
     Lookups,
+}
+
+/// An event ID as `nats-server` makes them: 22 letters or digits.
+fn event_id() -> String {
+    let mut raw = [0u8; 22];
+    // Without randomness, the IDs only repeat.
+    let _ = getrandom::getrandom(&mut raw);
+    raw.iter()
+        .map(|&b| char::from(crate::imports::service::base62(u64::from(b) % 62)))
+        .collect()
+}
+
+impl Service {
+    /// Whether only the server a client is on answers it: other servers
+    /// do not hear of its interest.
+    pub(crate) const fn local(self) -> bool {
+        matches!(self, Service::UserInfo)
+    }
 }
 
 /// Reads `data` as the body of each server request, as Go reads it.
@@ -92,6 +117,7 @@ pub(crate) fn install(lane: &Lane) {
     };
     let mut index = lane.index(sys).borrow_mut();
     server::install(&mut index, &shared.server_id);
+    account::install(&mut index);
     if trust(shared).is_none() {
         return;
     }
@@ -119,11 +145,21 @@ fn trust(shared: &Shared) -> Option<&crate::jwt::trust::Trust> {
 }
 
 /// Answers request `m` for `service`, which came in the system account on
-/// `lane`; what goes on is held in `out`. Whether it took it.
-pub(crate) fn answer(lane: &Lane, out: &mut Outs, service: Service, m: &Pub<'_>) -> bool {
+/// `lane` from client `from`, if a client sent it; what goes on is held in
+/// `out`. Whether it took it.
+pub(crate) fn answer(
+    lane: &Lane,
+    out: &mut Outs,
+    service: Service,
+    m: &Pub<'_>,
+    from: Option<&crate::conn::Client>,
+) -> bool {
     match service {
         Service::Server(z) => server::take(lane, out, z, m),
         Service::Ping => server::take(lane, out, Z::Statsz, m),
+        Service::Account(x) => account::take(lane, Some(x), m),
+        Service::AccountPing => account::take(lane, None, m),
+        Service::UserInfo => account::user_info(lane, m, from),
         Service::ClaimsUpdate if lane.shared.resolver.is_some() => {
             let key = claims::account_of(m.subject);
             key.is_some_and(|k| directory::update(lane, out, m, Some(&k)))

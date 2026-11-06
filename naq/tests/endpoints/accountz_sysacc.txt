@@ -1,0 +1,75 @@
+# The system account in /accountz: the services it exports to every
+# account. Go's own subscriptions in it are not naq's: their counts are
+# masked.
+#! accounts {
+#!   A {
+#!     users [{user: a, password: p}]
+#!     exports [
+#!       {service: svc.>, latency: {sampling: 50, subject: lat.a}}
+#!       {service: hdr.>, latency: {sampling: headers, subject: lat.h}}
+#!     ]
+#!   }
+#!   B { imports [{service: {account: A, subject: svc.x}}] }
+#! }
+#= accounts
+#= exports
+#= imports
+#~ subscriptions
+#- sublist_stats
+GET /accountz?acc=$SYS
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "$SYS",
+<   "account_detail": {
+<     "account_name": "$SYS",
+<     "update_time": ~,
+<     "is_system": true,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 0,
+<     "subscriptions": ~,
+<     "exports": [
+<       {
+<         "subject": "$SYS.DEBUG.SUBSCRIBERS",
+<         "type": "service",
+<         "response_type": "Singleton"
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.*.CONNZ",
+<         "type": "service",
+<         "response_type": "Streamed"
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.*.STATZ",
+<         "type": "service",
+<         "response_type": "Streamed"
+<       },
+<       {
+<         "subject": "$SYS.REQ.USER.*.INFO",
+<         "type": "service",
+<         "response_type": "Singleton"
+<       }
+<     ],
+<     "imports": [
+<       {
+<         "subject": "$SYS.REQ.USER.$SYS.INFO",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.USER.INFO",
+<         "local_subject": "$SYS.REQ.USER.INFO",
+<         "type": "service",
+<         "invalid": false,
+<         "share": true,
+<         "tracking": false
+<       }
+<     ],
+<     "name_tag": "$SYS"
+<   }
+< }

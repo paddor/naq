@@ -171,7 +171,7 @@ fn link(lane: &Lane, added: &[u32]) {
             )
         })
         .collect();
-    let mut all = crate::imports::link::relink(defs, shared.system.is_some());
+    let mut all = crate::imports::link::relink(defs, shared.system);
     for &id in added {
         let (Some(a), Some(imports)) = (shared.accounts.get(id), all.get_mut(id as usize)) else {
             continue;

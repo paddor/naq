@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(crate) use data::{Batch, Imported, Outs, Source};
-pub(crate) use publish::{Routing, inject};
+pub(crate) use publish::{Routing, inject, inject_through};
 pub(crate) use route::{Queue, Queued};
 #[cfg(test)]
 pub(crate) use slots::Linked;

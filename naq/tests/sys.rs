@@ -21,7 +21,7 @@ fn free_port() -> u16 {
 }
 
 /// Server `n<i>` of a cluster on `ports`, with a user `sys` of the system
-/// account.
+/// account and a user `a` of account `A`.
 fn member(i: usize, ports: &[u16]) -> Server {
     let routes: Vec<String> = (0..ports.len())
         .filter(|&j| j != i)
@@ -29,7 +29,7 @@ fn member(i: usize, ports: &[u16]) -> Server {
         .collect();
     let conf = format!(
         "server_name: n{i}\n\
-         accounts {{ SYS {{ users [{{user: sys, password: p}}] }} }}\n\
+         accounts {{ SYS {{ users [{{user: sys, password: p}}] }}, A {{ users [{{user: a, password: p}}] }} }}\n\
          system_account: SYS\n\
          cluster {{ name: c, listen: \"127.0.0.1:{}\", routes: [{}] }}\n",
         ports[i],
@@ -61,6 +61,11 @@ struct Sys {
 
 impl Sys {
     fn new(at: SocketAddr) -> Sys {
+        Sys::of(at, "sys")
+    }
+
+    /// A client of user `user`.
+    fn of(at: SocketAddr, user: &str) -> Sys {
         let w = TcpStream::connect(at).unwrap();
         let mut r = BufReader::new(w.try_clone().unwrap());
         let mut info = String::new();
@@ -73,7 +78,9 @@ impl Sys {
             server_id: info["server_id"].as_str().unwrap().to_owned(),
             next: 0,
         };
-        s.send("CONNECT {\"user\":\"sys\",\"pass\":\"p\"}\r\nSUB _R.> 1\r\n");
+        s.send(&format!(
+            "CONNECT {{\"user\":\"{user}\",\"pass\":\"p\"}}\r\nSUB _R.> 1\r\nPING\r\n"
+        ));
         s
     }
 
@@ -216,4 +223,28 @@ fn a_ping_without_a_reply_has_each_server_send_its_statsz() {
     }
     from.sort();
     assert_eq!(from, ["n0", "n1"]);
+}
+
+#[test]
+fn accounts_ask_every_server_of_a_cluster_of_themselves() {
+    let servers = cluster(3);
+    let mut a = Sys::of(servers[0].addr(), "a");
+    let _far = Sys::of(servers[1].addr(), "a");
+    let conns = a.ask_all("$SYS.REQ.SERVER.PING.CONNZ", 3);
+    let mut held: Vec<u64> = conns
+        .iter()
+        .map(|c| c["data"]["num_connections"].as_u64().unwrap())
+        .collect();
+    held.sort_unstable();
+    assert_eq!(held, [0, 1, 1]);
+    // Only the servers where the account has clients tell of it.
+    let statz = a.ask_all("$SYS.REQ.ACCOUNT.PING.STATZ", 2);
+    assert_eq!(names(&statz, "/server/name"), ["n0", "n1"]);
+    for z in &statz {
+        assert_eq!(z["data"]["account_statz"][0]["acc"], "A");
+    }
+    // Only its own server answers who a user is.
+    let me = a.ask("$SYS.REQ.USER.INFO", 3, Duration::from_millis(500));
+    assert_eq!(names(&me, "/server/name"), ["n0"]);
+    assert_eq!(me[0]["data"]["account"], "A");
 }

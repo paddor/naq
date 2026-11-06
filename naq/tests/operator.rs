@@ -979,3 +979,39 @@ fn holds(all: &Value, part: &Value) -> bool {
         _ => all == part,
     }
 }
+
+#[test]
+fn a_jwt_user_asks_who_it_is_as_of_nats_server() {
+    let w = World::new();
+    let conf = format!("{}system_account: {}\n", w.conf(), w.s.public_key());
+    let mut seen = Vec::new();
+    for (name, t) in targets(&conf) {
+        let u = KeyPair::new_user();
+        let perms = json!({"pub": {"allow": ["x.>", "$SYS.REQ.>"]}, "sub": {"deny": ["y"]}});
+        let more = json!({"name": "alice", "exp": now() + 3600});
+        let jwt = user(&w.a, &u, &perms, &more);
+        let mut c = Client::login(&t, Some(&u), &jwt, "");
+        logged_in(&mut c, name, &w.a.public_key(), 1 << 20);
+        c.send("SUB _R.1 1\r\nPUB $SYS.REQ.USER.INFO _R.1 0\r\n\r\n");
+        assert!(c.line().starts_with("MSG _R.1 1 "), "{name}");
+        let mut answer: Value = serde_json::from_str(&c.line()).unwrap();
+        let data = answer["data"].as_object_mut().unwrap();
+        assert_eq!(data["user_name"], "alice", "{name}");
+        assert_eq!(data["account"], w.a.public_key().as_str(), "{name}");
+        assert_eq!(
+            data.remove("user").unwrap(),
+            u.public_key().as_str(),
+            "{name}"
+        );
+        // Whole seconds, a little less than an hour.
+        let left = data.remove("expires").unwrap().as_u64().unwrap();
+        assert!(
+            left.is_multiple_of(1_000_000_000) && left > 3_500 * 1_000_000_000,
+            "{name}: {left}"
+        );
+        seen.push(answer["data"].clone());
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go);
+    }
+}

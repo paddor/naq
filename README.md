@@ -31,9 +31,9 @@ replies.
   or a syslog, with debug lines and protocol traces on request.
 - Signals, `--signal`, pid and ports files, and a shutdown that lets
   connections write what is left, as `nats-server`.
-- The server requests on `$SYS` (`$SYS.REQ.SERVER.PING`, `PING.<Z>`,
-  `<id>.<Z>`), answered by every server of a cluster as `nats-server`
-  answers them.
+- The server and account requests on `$SYS`, answered by every server of
+  a cluster as `nats-server` answers them, and the imports every account
+  has of them.
 
 A configuration key it does not serve is an error, not ignored.
 
@@ -42,8 +42,8 @@ A configuration key it does not serve is an error, not ignored.
 - JetStream. A naq leaf reaches the JetStream of its `nats-server` hub.
 - Routes to `nats-server`, gateways, and `nats-server` leaf nodes on a naq
   hub.
-- Config reload, lame duck mode, Prometheus metrics, and the account
-  requests and events on `$SYS`.
+- Config reload, lame duck mode, Prometheus metrics, and the events on
+  `$SYS`.
 
 ## Usage
 

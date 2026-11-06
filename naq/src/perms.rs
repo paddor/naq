@@ -89,6 +89,11 @@ impl Perms {
         }
     }
 
+    /// The rules, as given.
+    pub(crate) const fn rules(&self) -> &Permissions {
+        &self.rules
+    }
+
     /// Permissions `p`, or none, that deny publishing to `subject` too.
     pub(crate) fn denying(p: Option<&Perms>, subject: &[u8]) -> Perms {
         let mut rules = p.map(|p| p.rules.clone()).unwrap_or_default();

@@ -28,12 +28,12 @@ fn jwt_of(shared: &Shared, name: &str) -> Option<Arc<JwtAccount>> {
 
 /// Whether account `name` is in use as `nats-server` has accounts: one of
 /// a JWT once a client looked it up.
-pub(super) fn in_use(shared: &Shared, name: &str) -> bool {
+pub(crate) fn in_use(shared: &Shared, name: &str) -> bool {
     jwt_of(shared, name).is_none_or(|j| j.is_loaded())
 }
 
 /// The name account `name` goes by: in its JWT, if it has a name there.
-pub(super) fn name_tag(shared: &Shared, name: &str) -> String {
+pub(crate) fn name_tag(shared: &Shared, name: &str) -> String {
     jwt_of(shared, name)
         .map(|a| a.claims.name.clone())
         .filter(|n| !n.is_empty())
@@ -226,6 +226,21 @@ struct Accountz<'a> {
     account_detail: Option<AccountInfo<'a>>,
 }
 
+/// The exports and imports of account `acc`, of id `id`, with JWT `jwt`
+/// if it has one: those of the system account with the services the
+/// server adds to it.
+fn def_of(shared: &Shared, id: u32, acc: &str, jwt: Option<&Arc<JwtAccount>>) -> Def {
+    let def = jwt.map_or_else(
+        || defs::of(&shared.opts, &[acc.to_owned()]).pop(),
+        |j| Some(defs::of_jwt(acc, &j.claims.nats)),
+    );
+    let mut def = def.unwrap_or_default();
+    if shared.system == Some(id) {
+        crate::imports::system::add(std::slice::from_mut(&mut def), 0);
+    }
+    def
+}
+
 /// `/accountz`: the names of the accounts, or account `acc` in detail.
 pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refused> {
     shared.monitor.asked(q, Counted::Accountz);
@@ -251,11 +266,7 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
         .pop()
         .unwrap_or_default();
     let jwt = jwt_of(shared, acc);
-    let def = jwt.as_ref().map_or_else(
-        || defs::of(&shared.opts, &[acc.to_owned()]).pop(),
-        |j| Some(defs::of_jwt(acc, &j.claims.nats)),
-    );
-    let def = def.unwrap_or_default();
+    let def = def_of(shared, id, acc, jwt.as_ref());
     page.account_detail = Some(AccountInfo {
         account_name: &a.name,
         update_time: rfc3339_nano(a.updated()),

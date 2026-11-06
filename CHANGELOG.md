@@ -74,6 +74,12 @@ Notable changes to naq. The format follows
   `GATEWAYZ`, `LEAFZ`, `ACCOUNTZ`, `HEALTHZ`, `JSZ`, `PROFILEZ`, `EXPVARZ`,
   `IPQUEUESZ` and `RAFTZ`. Their options, server filters and errors are
   Go's, and answers are compressed as `Accept-Encoding` asks.
+- `naq`: account requests on `$SYS`, as `nats-server` answers them:
+  `$SYS.REQ.ACCOUNT.<acc>.SUBSZ`, `CONNZ`, `LEAFZ`, `JSZ`, `INFO`, `STATZ`
+  and `CONNS`, `$SYS.REQ.ACCOUNT.PING.STATZ`, and a user's own details on
+  `$SYS.REQ.USER.INFO`, answered by its server only. The system account
+  exports them, and every account imports those about itself, as in
+  `nats-server`; `/accountz` shows them.
 - `naq`: `Options::server_tags` (`server_tags`) and
   `Options::server_metadata` (`server_metadata`), shown in `/varz` and on
   `$SYS`.
@@ -85,6 +91,9 @@ Notable changes to naq. The format follows
 - `naq`: a monitoring port of -1 picks a free one and 0 serves none, as
   in `nats-server` (`http_port`, `https_port`, `-m`, `-ms`); `listen`
   addresses take port -1.
+- `naq`: in operator mode, the system account is the one named, by
+  `system_account` or the operator JWT; without one there is none, as in
+  `nats-server`.
 
 ### Fixed
 

@@ -103,6 +103,7 @@ impl Client {
                 version: None,
                 tls: None,
                 jwt: None,
+                expires: None,
             }),
             seen: Seen::new(),
             closed: Cell::new(false),
@@ -215,6 +216,9 @@ pub(crate) struct Meta {
     pub(crate) tls: Option<Box<crate::tls::Facts>>,
     /// Its user JWT, if it logged in with one.
     pub(crate) jwt: Option<Box<crate::jwt::trust::Shown>>,
+    /// When its JWT or its account's expires, the first of them, if one
+    /// does.
+    pub(crate) expires: Option<std::time::SystemTime>,
 }
 
 impl Meta {

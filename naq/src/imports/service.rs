@@ -568,7 +568,7 @@ impl Run<'_, '_> {
             headers: headers.as_deref(),
             payload: &payload,
         };
-        crate::sys::answer(lane, self.out, s, &m)
+        crate::sys::answer(lane, self.out, s, &m, self.from.client)
     }
 
     /// Hands the answer `w` holds to the auth callout request it names.
@@ -584,7 +584,8 @@ impl Run<'_, '_> {
         let imported = self.out.imported(lane);
         let src = message(m, &imported.arena, w.msg);
         let empty = src.headers.is_none() && src.payload.is_empty();
-        let src_reply = src.reply.map(<[u8]>::to_vec);
+        // The server's own answers have an empty reply: none.
+        let src_reply = src.reply.filter(|r| !r.is_empty()).map(<[u8]>::to_vec);
         let Some((token, mut wait)) = r.take(src.subject) else {
             return false;
         };
@@ -740,6 +741,11 @@ fn details(lane: &Lane, c: &Client) -> ClientInfo {
         name: meta.name.clone().unwrap_or_default(),
         lang: meta.lang.clone().unwrap_or_default(),
         version: meta.version.clone().unwrap_or_default(),
+        name_tag: meta
+            .jwt
+            .as_ref()
+            .map(|j| j.user_name.clone())
+            .unwrap_or_default(),
         kind: "Client".into(),
         client_type: if meta.websocket { "websocket" } else { "nats" }.into(),
         ..ClientInfo::default()

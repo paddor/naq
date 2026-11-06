@@ -193,9 +193,14 @@ impl Z {
     }
 }
 
-/// The monitoring query of `z` that the options `set` make, in the keys
-/// of its HTTP endpoint.
+/// The monitoring query of `z` that the options `set` make.
 fn query(z: Z, set: &Set) -> Query {
+    Query::of_pairs(pairs(z, set))
+}
+
+/// The monitoring query of `z` that the options `set` make, as the keys
+/// and values of its HTTP endpoint.
+pub(super) fn pairs(z: Z, set: &Set) -> Vec<(String, String)> {
     let subs = if set.bool("subscriptions_detail") {
         "detail"
     } else if set.bool("subscriptions") {
@@ -249,7 +254,7 @@ fn query(z: Z, set: &Set) -> Query {
             .collect(),
         _ => Vec::new(),
     };
-    Query::of_pairs(pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
+    pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
 }
 
 /// Go's `ConnState` `n` as `/connz` names it: other numbers ask for open
@@ -376,7 +381,11 @@ struct Idz<'a> {
 
 /// The options of request `asked` in `fields`: `Ok(None)` if they pass
 /// this server by, `Err` with Go's 400 answer if they cannot be read.
-fn options(shared: &Shared, asked: &Asked, fields: &Fields) -> Result<Option<Set>, Answer> {
+pub(super) fn options(
+    shared: &Shared,
+    asked: &Asked,
+    fields: &Fields,
+) -> Result<Option<Set>, Answer> {
     if asked.body.is_empty() {
         return Ok(Some(Set::default()));
     }
@@ -429,20 +438,28 @@ async fn answer(shared: Arc<Shared>, z: Z, asked: Asked) -> Option<Answer> {
         Some(e) => monitor::shown(s, e, &q).await,
         None => Ok(own(s, z, &set, &q)),
     };
+    answered(s, asked, data, true)
+}
+
+/// The answer to `asked` with `data`, as `zReq` gives it: compressed as
+/// asked; none if it is Go's `errSkipZreq`; else a 500, with `data`
+/// `null` if `null`.
+pub(super) fn answered(
+    s: &Shared,
+    asked: Asked,
+    data: Result<Vec<u8>, String>,
+    null: bool,
+) -> Option<Answer> {
     match data {
-        Ok(d) => Some(Answer::encoded(
-            asked.reply,
-            &asked.headers,
-            reply::envelope(s, Some(&d), None),
-        )),
-        // Go's `errSkipZreq`: no answer.
+        Ok(d) => {
+            let body = reply::envelope(s, Some(&d), None);
+            Some(Answer::encoded(asked.reply, &asked.headers, body))
+        }
         Err(why) if why.starts_with("filtered response") => None,
         Err(why) => {
             let e = ApiError::new(500, why);
-            Some(Answer::new(
-                asked.reply,
-                reply::envelope(s, Some(b"null"), Some(&e)),
-            ))
+            let data = null.then_some(&b"null"[..]);
+            Some(Answer::new(asked.reply, reply::envelope(s, data, Some(&e))))
         }
     }
 }

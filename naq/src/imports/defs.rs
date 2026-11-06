@@ -23,6 +23,10 @@ pub(crate) struct Def {
     /// From a JWT: an import that does not link is left out, as
     /// `nats-server` leaves it, where the config's is an error.
     pub(crate) lenient: bool,
+    /// How many of the imports, the last, the server added itself: the
+    /// services of the system account. They need no authorization, and
+    /// one that does not link is left out.
+    pub(crate) added: usize,
 }
 
 /// The accounts of `names`, the server's by id, as `opts` define them.
@@ -38,6 +42,7 @@ pub(crate) fn of(opts: &Options, names: &[String]) -> Vec<Def> {
                     imports: a.imports.iter().map(|i| (i.clone(), None)).collect(),
                     signing_keys: Vec::new(),
                     lenient: false,
+                    added: 0,
                 };
             }
             let jwt = opts.resolver_preload.iter().find(|(k, _)| k == name);

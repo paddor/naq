@@ -349,7 +349,8 @@ impl Conn {
         self.bounds.subs = u.subs;
         let user = u.expires.map(|t| (t, false));
         let account = u.account_expires.map(|t| (t, true));
-        self.bounds.deadline = deadline(u.subs, 0, [user, account].into_iter().flatten().min());
+        let expires = [user, account].into_iter().flatten().min();
+        self.bounds.deadline = deadline(u.subs, 0, expires);
         self.bounds.kept.clone_from(&u.kept);
         if shared.resolver.is_some() {
             // The taps of an account added since this lane was told.
@@ -358,6 +359,7 @@ impl Conn {
         let mut meta = self.client.meta.borrow_mut();
         meta.user = Some(u.key.clone());
         meta.jwt = Some(u.shown.clone());
+        meta.expires = expires.map(|(t, _)| t);
         Ok(())
     }
 
