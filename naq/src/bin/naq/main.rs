@@ -63,6 +63,15 @@ fn serve(mut opts: naq::Options) -> ExitCode {
     if opts.log.to.is_none() {
         opts.log.to = Some(naq::LogTo::Stderr);
     }
+    // Caught before the server starts, as by `nats-server`: a signal sent
+    // once the process ID file is there does not end the process.
+    let signals = match naq::Signals::catch() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("naq: cannot handle signals: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let server = match naq::Server::start(&opts) {
         Ok(s) => s,
         Err(e) => {
@@ -70,11 +79,6 @@ fn serve(mut opts: naq::Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match server.wait_for_signals() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("naq: cannot handle signals: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    server.wait_for_signals(signals);
+    ExitCode::SUCCESS
 }

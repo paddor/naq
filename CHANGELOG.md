@@ -30,7 +30,8 @@ Notable changes to naq. The format follows
   connections, then clients and hub links close with `Server Shutdown`
   once their lane delivered what was sent to it, and get a few seconds to
   write what is left.
-- `naq`: `Server::wait_for_signals`: `INT`, `TERM` and `USR2` shut the
+- `naq`: `Signals::catch` and `Server::wait_for_signals`, caught before
+  the server starts, as by `nats-server`: `INT`, `TERM` and `USR2` shut the
   server down, `USR1` opens the log file again, `HUP` is logged.
 - `naq`: `Options::pid_file` (`pid_file`, `-P`) and
   `Options::ports_file_dir` (`ports_file_dir`, `--ports_file_dir`): the

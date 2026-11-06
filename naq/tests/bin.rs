@@ -324,13 +324,15 @@ fn signal_sends_its_command_to_the_server_its_pid_file_names() {
     let dir = std::env::temp_dir().join(format!("naq-bin-sl-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let pid_file = dir.join("naq.pid");
-    let mut child = Command::new(NAQ)
-        .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1"])
-        .args(["-P".as_ref(), pid_file.as_os_str()])
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut r = BufReader::new(child.stderr.take().unwrap());
+    let mut child = Proc(
+        Command::new(NAQ)
+            .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1"])
+            .args(["-P".as_ref(), pid_file.as_os_str()])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut r = BufReader::new(child.0.stderr.take().unwrap());
     until(&mut r, "Server is ready");
     let reopen = format!("reopen={}", pid_file.display());
     let out = Command::new(NAQ)
@@ -339,11 +341,11 @@ fn signal_sends_its_command_to_the_server_its_pid_file_names() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     until(&mut r, "File log re-open ignored, not a file logger");
-    let quit = format!("quit={}", child.id());
+    let quit = format!("quit={}", child.0.id());
     let out = Command::new(NAQ).args(["-sl", &quit]).output().unwrap();
     assert!(out.status.success(), "{out:?}");
     until(&mut r, "Trapped \"interrupt\" signal");
-    assert_eq!(child.wait().unwrap().code(), Some(0));
+    assert_eq!(child.0.wait().unwrap().code(), Some(0));
     for (spec, err) in [
         ("bogus=1", "naq: unknown signal \"bogus\""),
         ("stop=x", "naq: invalid pid: x"),
@@ -440,4 +442,32 @@ fn auth_and_cluster_flags_set_what_they_name() {
     let _ = c.read_to_string(&mut got);
     assert!(got.contains("-ERR 'Authorization Violation'"), "{got}");
     drop(proc);
+}
+
+#[test]
+fn a_signal_sent_once_the_pid_file_is_there_is_caught() {
+    let dir = std::env::temp_dir().join(format!("naq-bin-early-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for round in 0..20 {
+        let pid_file = dir.join(format!("naq-{round}.pid"));
+        let mut child = Proc(
+            Command::new(NAQ)
+                .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1"])
+                .args(["-P".as_ref(), pid_file.as_os_str()])
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        // At once, not by a `kill` that takes a while to start.
+        while !pid_file.exists() {
+            std::hint::spin_loop();
+        }
+        let pid = nix::unistd::Pid::from_raw(child.0.id().cast_signed());
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR1).unwrap();
+        let mut r = BufReader::new(child.0.stderr.take().unwrap());
+        until(&mut r, "Trapped \"user defined signal 1\" signal");
+        kill("INT", child.0.id());
+        assert_eq!(child.0.wait().unwrap().code(), Some(0), "round {round}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

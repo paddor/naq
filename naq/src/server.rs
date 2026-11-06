@@ -235,24 +235,16 @@ impl Server {
         crate::stop::server(&self.shared);
     }
 
-    /// Serves until a signal stops it, and shuts it down, as
+    /// Serves until one of `signals` stops it, and shuts it down, as
     /// `nats-server` handles signals: `INT`, `TERM` and `USR2` stop it,
     /// `USR1` opens the log file again, `HUP` is logged.
-    ///
-    /// # Errors
-    ///
-    /// The signal handlers cannot be installed.
     ///
     /// # Panics
     ///
     /// Called from within an async runtime.
-    pub fn wait_for_signals(self) -> std::io::Result<()> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        rt.block_on(crate::signals::wait(&self))?;
+    pub fn wait_for_signals(self, signals: crate::Signals) {
+        signals.wait(&self);
         self.shutdown();
-        Ok(())
     }
 
     /// Opens the log file again at its path, as after another tool moved
@@ -316,15 +308,17 @@ fn announce(
         leafnodes: mesh.leafnodes,
         cluster: mesh.cluster,
     };
-    crate::log::banner::log(shared, &bound);
     let o = &shared.opts;
     let write = |path: &std::path::Path| {
         let path = path.display().to_string();
         move |source| Error::Write { path, source }
     };
+    // Before the server says it is ready: a tool that waits for that
+    // finds the file.
     if let Some(p) = &o.pid_file {
         crate::files::pid(p).map_err(write(p))?;
     }
+    crate::log::banner::log(shared, &bound);
     let Some(dir) = &o.ports_file_dir else {
         return Ok(None);
     };

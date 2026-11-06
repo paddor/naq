@@ -11,12 +11,27 @@ use crate::log::banner::Bound;
 /// Writes the process ID to `path`, as `nats-server` does: no newline,
 /// readable by the owner alone.
 pub(crate) fn pid(path: &Path) -> std::io::Result<()> {
+    whole(path, std::process::id().to_string().as_bytes())
+}
+
+/// Writes `bytes` to `path` whole: to a file beside it, then renamed, so
+/// that a reader finds none or all of it. Readable by the owner alone.
+fn whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut beside = path.as_os_str().to_owned();
+    beside.push(format!(".{}.tmp", std::process::id()));
+    let beside = PathBuf::from(beside);
     let mut o = std::fs::OpenOptions::new();
     o.create(true).write(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    o.open(path)?
-        .write_all(std::process::id().to_string().as_bytes())
+    let written = o.open(&beside).and_then(|mut f| f.write_all(bytes));
+    match written.and_then(|()| std::fs::rename(&beside, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&beside);
+            Err(e)
+        }
+    }
 }
 
 /// Writes where the server bound at `at` listens to a file in `dir`, as
@@ -29,7 +44,7 @@ pub(crate) fn ports(dir: &Path, opts: &Options, at: &Bound) -> std::io::Result<P
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "naq".into());
     let path = dir.join(format!("{program}_{}.ports", std::process::id()));
-    std::fs::write(&path, ports_json(opts, at).to_string())?;
+    whole(&path, ports_json(opts, at).to_string().as_bytes())?;
     Ok(path)
 }
 
@@ -68,6 +83,34 @@ fn ports_json(opts: &Options, at: &Bound) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_is_written_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("naq-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("taken/inside")).unwrap();
+        let p = dir.join("naq.pid");
+        pid(&p).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            std::process::id().to_string()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // A directory in the way: nothing is left beside it.
+        assert!(pid(&dir.join("taken")).is_err());
+        assert!(pid(&dir.join("none/naq.pid")).is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_ports_file_names_each_listener_by_its_kind() {

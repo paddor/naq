@@ -70,3 +70,4 @@ pub use options::{
     Websocket, WebsocketAuth,
 };
 pub use server::Server;
+pub use signals::Signals;
