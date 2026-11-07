@@ -400,6 +400,34 @@ mod tests {
     }
 
     #[test]
+    fn naq_leafs_count_by_their_members_for_a_subject_and_once_for_a_filter() {
+        use crate::index::Members;
+        let leaf = 3;
+        let plain = Group {
+            lanes: vec![(1, 2)],
+            servers: vec![(leaf, Members::from(1)), (4, Members::from(1))],
+            ..Group::default()
+        };
+        let q = Group {
+            lanes: vec![(1, 1)],
+            servers: vec![(leaf, Members::from(5))],
+            ..Group::default()
+        };
+        let i = Interest {
+            plain,
+            queues: vec![(b"q".to_vec().into(), q)],
+            ..Interest::default()
+        };
+        let leafs = crate::lane::bit(leaf);
+        assert_eq!(members(&i, None, leafs), 3 + 6, "slot 4 is not a leaf");
+        assert_eq!(members(&i, Some(b"q"), leafs), 6);
+        assert_eq!(members(&i, Some(b""), leafs), 0);
+        assert_eq!(subscriptions(&i, None, leafs), 3 + 2);
+        assert_eq!(subscriptions(&i, Some(b""), leafs), 3, "plain ones");
+        assert_eq!(subscriptions(&i, Some(b"q"), leafs), 2);
+    }
+
+    #[test]
     fn answers_add_up_until_the_last() {
         let t = Tallies::new(*b"NUmM6cRx");
         let (tx, mut rx) = oneshot::channel();

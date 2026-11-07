@@ -419,8 +419,30 @@ fn clients_past_the_limit_go_newest_first_until_the_others_leave() {
     let mut new = Sys::of(server.addr(), "a");
     assert!(old.told().ends_with("PONG\r\n"));
     assert!(new.told().ends_with("PONG\r\n"));
-    // Another server tells of a client of its own.
+    // Messages that tell nothing change nothing.
     let mut c = Sys::new(server.addr());
+    let own = format!(
+        r#"{{"server":{{"id":"{}","seq":1}},"acc":"A","conns":5}}"#,
+        c.server_id
+    );
+    for told in ["", "{", own.as_str()] {
+        c.send(&format!(
+            "PUB $SYS.SERVER.ACCOUNT.A.CONNS {}\r\n{told}\r\n",
+            told.len()
+        ));
+    }
+    for asked in [r#"{"acc":"B"}"#, "{"] {
+        let none = c.ask_with(
+            "$SYS.REQ.ACCOUNT.A.CONNS",
+            asked,
+            1,
+            Duration::from_millis(200),
+        );
+        assert!(none.is_empty(), "{asked}: {none:?}");
+    }
+    old.send("PING\r\n");
+    assert_eq!(old.told(), "PONG\r\n");
+    // Another server tells of a client of its own.
     let conns = r#"{"server":{"id":"NFAR","seq":1},"acc":"A","conns":1}"#;
     c.send(&format!(
         "PUB $SYS.SERVER.ACCOUNT.A.CONNS {}\r\n{conns}\r\nPING\r\n",
@@ -474,7 +496,8 @@ fn subscribers_are_counted_on_every_server_with_connections_of_the_account() {
     each.sort_by_key(serde_json::Value::as_u64);
     assert_eq!(each, [0, 1]);
     let wait = Duration::from_millis(300);
-    for bad in ["", "{", r#"{"acc":"NONE","subject":"foo.bar"}"#] {
+    let bad_queue = r#"{"acc":"SYS","subject":"foo.bar","queue":"!"}"#;
+    for bad in ["", "{", bad_queue, r#"{"acc":"NONE","subject":"foo.bar"}"#] {
         let none = c.ask_with("$SYS.REQ.ACCOUNT.NSUBS", bad, 1, wait);
         assert!(none.is_empty(), "{bad:?}: {none:?}");
     }
