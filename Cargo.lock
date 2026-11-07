@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "naq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bcrypt",
  "bytes",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "naq-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "naq",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "naq-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "memchr",
