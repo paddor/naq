@@ -103,6 +103,10 @@ Notable changes to naq. The format follows
   most clients an account may have across the cluster. A client past it is
   refused; once the other servers tell of more, the newest clients here
   past it close. The limit of an account JWT holds across the cluster too.
+- `naq`: `$SYS.DEBUG.SUBSCRIBERS`, as `nats-server` answers it: the
+  subscribers of a subject, or of a queue group on it, in the account that
+  asks, on every server with connections of the account. The servers ask
+  each other on `$SYS.REQ.ACCOUNT.NSUBS`.
 
 ### Changed
 

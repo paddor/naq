@@ -139,6 +139,12 @@ impl Remote {
         }
     }
 
+    /// The other servers with connections of `account`: those a count of
+    /// its subscribers asks.
+    pub(super) fn serving(&self, account: u32) -> usize {
+        self.lock().accounts.get(&account).map_or(0, FxHashMap::len)
+    }
+
     /// The clients of `account` on the other servers.
     pub(crate) fn conns(&self, account: u32) -> usize {
         let known = self.lock();
@@ -280,12 +286,14 @@ mod tests {
         r.counted("b", 4, n(3, 0));
         r.counted("b", 5, n(1, 0));
         assert_eq!(r.conns(4), 5);
+        assert_eq!(r.serving(4), 2);
         r.counted("b", 4, n(1, 0));
         assert_eq!(r.conns(4), 3, "each message tells them all");
         assert!(r.forget("a"));
         assert_eq!(r.conns(4), 1);
         r.counted("b", 4, n(0, 0));
         assert_eq!(r.conns(4), 0);
+        assert_eq!(r.serving(4), 0, "none there for none");
         assert!(!r.forget("b"), "known by its counts alone");
         assert_eq!(r.conns(5), 0, "forgotten with it");
         r.heard("c", 1, t0);

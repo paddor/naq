@@ -13,6 +13,7 @@ mod remote;
 mod reply;
 mod send;
 mod server;
+mod subscribers;
 mod unmarshal;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -45,6 +46,8 @@ pub(crate) struct State {
     pub(crate) remote: remote::Remote,
     /// It said its last word: it answers no more.
     quiet: AtomicBool,
+    /// Its counts of subscribers that wait for the others.
+    tallies: subscribers::Tallies,
 }
 
 impl State {
@@ -57,6 +60,7 @@ impl State {
             outbox: send::Outbox::new(),
             remote: remote::Remote::default(),
             quiet: AtomicBool::new(false),
+            tallies: subscribers::Tallies::new(node.unwrap_or_default()),
         }
     }
 
@@ -105,6 +109,12 @@ pub(crate) enum Service {
     Gone,
     /// The connections of an account on another server.
     Conns,
+    /// `$SYS.DEBUG.SUBSCRIBERS`: a count of subscribers.
+    Subscribers,
+    /// Another server asks for this one's count of subscribers.
+    Nsubs,
+    /// Another server's count, as this one asked.
+    Counted,
 }
 
 /// An event ID as `nats-server` makes them: 22 letters or digits.
@@ -121,7 +131,7 @@ impl Service {
     /// Whether only the server a client is on answers it: other servers
     /// do not hear of its interest.
     pub(crate) const fn local(self) -> bool {
-        matches!(self, Service::UserInfo)
+        matches!(self, Service::UserInfo | Service::Subscribers)
     }
 }
 
@@ -151,6 +161,7 @@ pub(crate) fn install(lane: &Lane) {
     server::install(&mut index, &shared.server_id);
     remote::install(&mut index);
     conns::install(&mut index, &shared.server_id);
+    subscribers::install(&mut index, &shared.sys.tallies);
     kick::install(&mut index, &shared.server_id);
     account::install(&mut index);
     if trust(shared).is_none() {
@@ -215,6 +226,9 @@ pub(crate) fn answer(
         Service::Heard => remote::statsz(lane, m),
         Service::Gone => remote::gone(lane, m),
         Service::Conns => conns::heard(lane, m),
+        Service::Subscribers => subscribers::take(lane, m),
+        Service::Nsubs => subscribers::nsubs(lane, m),
+        Service::Counted => lane.shared.sys.tallies.answer(m.subject, m.payload),
     }
 }
 

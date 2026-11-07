@@ -22,7 +22,7 @@ fn free_port() -> u16 {
 
 /// Server `n<i>` of a cluster on `ports`, with a user `sys` of the system
 /// account and a user `a` of account `A`, which has `limits` too.
-fn member(i: usize, ports: &[u16], limits: &str) -> Server {
+fn member(i: usize, ports: &[u16], limits: &str) -> Result<Server, naq::Error> {
     let routes: Vec<String> = (0..ports.len())
         .filter(|&j| j != i)
         .map(|j| format!("\"nats-route://127.0.0.1:{}\"", ports[j]))
@@ -42,7 +42,6 @@ fn member(i: usize, ports: &[u16], limits: &str) -> Server {
         lanes: 2,
         ..opts
     })
-    .unwrap()
 }
 
 fn cluster(n: usize) -> Vec<Server> {
@@ -51,8 +50,19 @@ fn cluster(n: usize) -> Vec<Server> {
 
 /// A cluster of `n` servers, account `A` with `limits` on each.
 fn limited(n: usize, limits: &str) -> Vec<Server> {
-    let ports: Vec<u16> = (0..n).map(|_| free_port()).collect();
-    (0..n).map(|i| member(i, &ports, limits)).collect()
+    let start = || {
+        let ports: Vec<u16> = (0..n).map(|_| free_port()).collect();
+        (0..n)
+            .map(|i| member(i, &ports, limits))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    // Another test may take a free port before the cluster binds it.
+    for _ in 0..4 {
+        if let Ok(servers) = start() {
+            return servers;
+        }
+    }
+    start().unwrap()
 }
 
 /// A user of the system account.
@@ -113,9 +123,23 @@ impl Sys {
     /// The answers to a request on `subject`, as many as come in `wait`
     /// or `n` of them.
     fn ask(&mut self, subject: &str, n: usize, wait: Duration) -> Vec<serde_json::Value> {
+        self.ask_with(subject, "", n, wait)
+    }
+
+    /// The answers to `body` on `subject`, as [`Sys::ask`] takes them.
+    fn ask_with(
+        &mut self,
+        subject: &str,
+        body: &str,
+        n: usize,
+        wait: Duration,
+    ) -> Vec<serde_json::Value> {
         self.next += 1;
         let reply = format!("_R.{}", self.next);
-        self.send(&format!("PUB {subject} {reply} 0\r\n\r\n"));
+        self.send(&format!(
+            "PUB {subject} {reply} {}\r\n{body}\r\n",
+            body.len()
+        ));
         // Answers to an earlier request come late.
         self.messages(n, wait, |s| s == reply)
     }
@@ -417,5 +441,41 @@ fn clients_past_the_limit_go_newest_first_until_the_others_leave() {
             Instant::now() < deadline,
             "its clients are forgotten with it"
         );
+    }
+}
+
+#[test]
+fn subscribers_are_counted_on_every_server_with_connections_of_the_account() {
+    let servers = cluster(2);
+    let mut c = Sys::new(servers[0].addr());
+    c.ask_all("$SYS.REQ.SERVER.PING.IDZ", 2);
+    let mut far = Sys::new(servers[1].addr());
+    far.send("SUB foo.bar 2\r\nSUB foo.bar q 3\r\nPING\r\n");
+    assert!(far.told().ends_with("PONG\r\n"));
+    c.send("SUB foo.bar 2\r\nPING\r\n");
+    // Once the far server told of its connections, it is asked too.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let n = c.ask_with("$SYS.DEBUG.SUBSCRIBERS", "foo.bar", 1, WAIT);
+        if n == [3] {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{n:?}");
+    }
+    let q = c.ask_with("$SYS.DEBUG.SUBSCRIBERS", "foo.bar q", 1, WAIT);
+    assert_eq!(q, [1]);
+    // Each server with connections of the account tells its own.
+    let req = r#"{"acc":"SYS","subject":"foo.*"}"#;
+    let mut each = c.ask_with("$SYS.REQ.ACCOUNT.NSUBS", req, 2, WAIT);
+    each.sort_by_key(serde_json::Value::as_u64);
+    assert_eq!(each, [1, 2]);
+    let q = r#"{"acc":"SYS","subject":"foo.bar","queue":"cQ=="}"#;
+    let mut each = c.ask_with("$SYS.REQ.ACCOUNT.NSUBS", q, 2, WAIT);
+    each.sort_by_key(serde_json::Value::as_u64);
+    assert_eq!(each, [0, 1]);
+    let wait = Duration::from_millis(300);
+    for bad in ["", "{", r#"{"acc":"NONE","subject":"foo.bar"}"#] {
+        let none = c.ask_with("$SYS.REQ.ACCOUNT.NSUBS", bad, 1, wait);
+        assert!(none.is_empty(), "{bad:?}: {none:?}");
     }
 }
