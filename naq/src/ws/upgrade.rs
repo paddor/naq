@@ -2,7 +2,7 @@
 //! `nats-server` checks and answers it.
 
 use std::fmt::Write as _;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use data_encoding::BASE64;
 
@@ -68,7 +68,7 @@ impl Refusal {
         let connection = if close { "Connection: close\r\n" } else { "" };
         format!(
             "HTTP/1.1 {code} {text}\r\nContent-Type: text/plain; charset=utf-8\r\nSec-Websocket-Version: 13\r\nX-Content-Type-Options: nosniff\r\n{connection}Date: {}\r\nContent-Length: {}\r\n\r\n{text}\n",
-            http_date(now),
+            crate::times::http_date(now),
             text.len() + 1
         )
     }
@@ -331,28 +331,9 @@ pub(super) fn accept_key(key: &str) -> String {
     BASE64.encode(&digest.bytes())
 }
 
-/// `t` as HTTP writes dates: `Tue, 03 Nov 2026 20:47:19 GMT`.
-fn http_date(t: SystemTime) -> String {
-    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    let (days, rest) = (secs / 86_400, secs % 86_400);
-    let (y, m, d) = crate::monitor::civil(days.cast_signed());
-    format!(
-        "{}, {d:02} {} {y} {:02}:{:02}:{:02} GMT",
-        DAYS[(days % 7) as usize],
-        MONTHS[m as usize - 1],
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
     use crate::Cookies;

@@ -33,10 +33,10 @@ pub(super) struct Told {
 }
 
 /// How a link ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Ended {
-    /// The hub could not be reached.
-    Unreached,
+    /// The hub could not be reached, for this reason.
+    Unreached(String),
     /// It ended, and the hub asked to wait this long beyond the interval.
     Closed { delay: Duration },
 }
@@ -218,15 +218,33 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
     }
     let interval = shared.opts.leaf_reconnect;
     let told = RefCell::new(None);
+    let mut attempts = 0u64;
     loop {
         let Some(url) = urls.pop_front() else {
             return;
         };
+        if crate::stop::stopping(&lane.shared) {
+            return;
+        }
         urls.push_back(url.clone());
+        let at = format!("{}:{}", url.host, url.port);
+        let log = &lane.shared.log;
+        log.debug(format_args!(
+            "Trying to connect as leafnode to remote server on {at:?}"
+        ));
         let wait = match link::session(&lane, index, &url, &all, &told).await {
-            // Some jitter, so leafs do not dial a hub in step.
-            Ended::Unreached => interval + interval.mul_f64(lane.below(1000) as f64 / 1000.0),
-            Ended::Closed { delay } => interval + delay,
+            Ended::Unreached(why) => {
+                attempts += 1;
+                log.error(format_args!(
+                    "Error trying to connect as leafnode to remote server {at:?} (attempt {attempts}): {why}"
+                ));
+                // Some jitter, so leafs do not dial a hub in step.
+                interval + interval.mul_f64(lane.below(1000) as f64 / 1000.0)
+            }
+            Ended::Closed { delay } => {
+                attempts = 0;
+                interval + delay
+            }
         };
         // The hub's latest word on its cluster, as `nats-server` takes it.
         if let Some(t) = told.take() {

@@ -37,6 +37,7 @@ mod callout;
 mod config;
 mod conn;
 mod error;
+mod files;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -45,6 +46,7 @@ mod index;
 mod jwt;
 mod lane;
 mod leaf;
+mod log;
 mod mailbox;
 mod mesh;
 mod monitor;
@@ -52,16 +54,20 @@ mod options;
 mod perms;
 mod resolver;
 mod server;
+mod signals;
 mod stats;
+mod stop;
 mod sys;
+mod times;
 mod tls;
 mod ws;
 
 pub use error::Error;
 pub use options::{
     Account, AuthCallout, Cluster, ConnectionType, Cookies, Delete, Directory, Export, ExportKind,
-    Import, ImportKind, Latency, Leafnodes, Login, Options, Permissions, Remote, RemoteTls,
-    Resolver, ResponseType, Responses, Rules, Sampling, ServiceExport, Tls, User, Websocket,
-    WebsocketAuth,
+    Import, ImportKind, Latency, Leafnodes, LogTo, Logging, Login, Options, Permissions, Remote,
+    RemoteTls, Resolver, ResponseType, Responses, Rules, Sampling, ServiceExport, Tls, Trace, User,
+    Websocket, WebsocketAuth,
 };
 pub use server::Server;
+pub use signals::Signals;

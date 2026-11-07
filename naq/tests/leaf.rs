@@ -36,6 +36,9 @@ fn leaf_named(name: &str, remote: Remote) -> Server {
         server_name: name.into(),
         leaf_reconnect: Duration::from_millis(50),
         remotes: vec![remote],
+        // What links tell is then the interest of clients, without the
+        // server's own: the imports of the system account's services.
+        no_system_account: true,
         ..Options::default()
     })
     .unwrap()
@@ -2085,4 +2088,337 @@ fn a_member_two_links_away_gets_its_pick_once() {
         "{got:?}"
     );
     assert_eq!(got.iter().filter(|l| *l == "end").count(), 1, "{got:?}");
+}
+
+#[test]
+fn a_shutdown_closes_the_link_and_logs_it_and_its_start() {
+    let hub = Hub::new();
+    let dir = std::env::temp_dir().join(format!("naq-leaf-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("leaf.log");
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        server_name: "l".into(),
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://127.0.0.1:{}", hub.port())],
+            ..Remote::default()
+        }],
+        log: naq::Logging {
+            to: Some(naq::LogTo::File(log.clone())),
+            debug: true,
+            time: false,
+            ..naq::Logging::default()
+        },
+        ..Options::default()
+    })
+    .unwrap();
+    let mut p = linked(&hub);
+    s.shutdown();
+    assert!(p.closed(), "the link stays");
+    assert!(
+        hub.accept_within(Duration::from_millis(200)).is_none(),
+        "dialed again"
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    let at = format!("127.0.0.1:{} - lid:", hub.port());
+    for line in [
+        "Trying to connect as leafnode to remote server on",
+        "Leafnode connection created for account: $G ",
+        "Leafnode connection closed: Server Shutdown - Remote: ",
+    ] {
+        assert!(text.contains(line), "no {line:?} in {text}");
+    }
+    assert!(text.contains(&at), "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_hub_that_cannot_be_reached_is_logged_with_each_attempt() {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dir = std::env::temp_dir().join(format!("naq-leaf-dial-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("leaf.log");
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        leaf_reconnect: Duration::from_millis(20),
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://127.0.0.1:{port}")],
+            ..Remote::default()
+        }],
+        log: naq::Logging {
+            to: Some(naq::LogTo::File(log.clone())),
+            time: false,
+            ..naq::Logging::default()
+        },
+        ..Options::default()
+    })
+    .unwrap();
+    let deadline = Instant::now() + WAIT;
+    let want = format!(
+        "[ERR] Error trying to connect as leafnode to remote server \"127.0.0.1:{port}\" (attempt 2): "
+    );
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains(&want)
+    {
+        assert!(Instant::now() < deadline, "no second attempt logged");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(s);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn connz_lists_a_link_to_a_hub_as_a_leafnode_and_keeps_it_once_closed() {
+    let hub = Hub::new();
+    let s = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        http_port: Some(0),
+        remotes: vec![Remote {
+            urls: vec![format!("127.0.0.1:{}", hub.port())],
+            ..Remote::default()
+        }],
+        ..Options::default()
+    })
+    .unwrap();
+    let http = s.monitor_addr().unwrap().port();
+    let mut p = hub.accept();
+    p.send("INFO {\"server_id\":\"HUB\",\"name\":\"hub1\",\"client_id\":5,\"headers\":true,\"info_on_connect\":true} \r\n");
+    assert!(p.line().starts_with("CONNECT "));
+    p.send("INFO {\"connect_info\":true}\r\nLS+ foo\r\nLS+ bar q 2\r\nPING\r\n");
+    while p.line() != "PONG" {}
+    let z = until(http, "/connz?subs=1&auth=1", |z| z["num_connections"] == 1);
+    let c = &z["connections"][0];
+    assert_eq!(c["kind"], "Leafnode", "{z}");
+    assert!(c.get("type").is_none(), "{z}");
+    assert_eq!(c["subscriptions"], 2, "{z}");
+    assert_eq!(
+        c["subscriptions_list"],
+        serde_json::json!(["bar", "foo"]),
+        "{z}"
+    );
+    assert_eq!(c["name_tag"], "$G", "{z}");
+    let plain = get(http, "/connz");
+    assert!(
+        plain["connections"][0].get("subscriptions_list").is_none(),
+        "{plain}"
+    );
+    drop(p);
+    let z = until(http, "/connz?state=closed", |z| z["num_connections"] == 1);
+    let c = &z["connections"][0];
+    assert_eq!(
+        (c["kind"].as_str(), c["reason"].as_str()),
+        (Some("Leafnode"), Some("Client Closed")),
+        "{z}"
+    );
+}
+
+/// The body of `GET path` on monitoring port `port`, as it came.
+fn raw(port: u16, path: &str) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(s, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut s, &mut body).unwrap();
+    body.split_once("\r\n\r\n").unwrap().1.to_owned()
+}
+
+/// The first link of a `/leafz` body, with its keys in order, and what
+/// changes between servers and runs masked.
+fn first_link(body: &str) -> Vec<(String, serde_json::Value)> {
+    let keys: Vec<&str> = body
+        .lines()
+        .skip_while(|l| !l.starts_with("  \"leafs\""))
+        .skip(2)
+        .take_while(|l| *l != "    }" && *l != "    },")
+        .filter_map(|l| Some(l.strip_prefix("      \"")?.split_once('"')?.0))
+        .collect();
+    let z: serde_json::Value = serde_json::from_str(body).unwrap();
+    let link = &z["leafs"][0];
+    keys.into_iter()
+        .map(|k| {
+            let v = match k {
+                "id" | "port" | "rtt" | "compression" => serde_json::Value::Null,
+                "subscriptions_list" => {
+                    let mut subs: Vec<String> = link[k]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|s| s.as_str().unwrap().to_owned())
+                        .map(|s| {
+                            if s.starts_with("$LDS.") {
+                                "$LDS.".into()
+                            } else {
+                                s
+                            }
+                        })
+                        .collect();
+                    subs.sort();
+                    serde_json::json!(subs)
+                }
+                _ => link[k].clone(),
+            };
+            (k.to_owned(), v)
+        })
+        .collect()
+}
+
+/// Two messages from `at_leaf`, a client of a leaf, to `at_hub`, a client
+/// of its hub, and one back.
+fn both_ways(at_leaf: &mut Peer, at_hub: &mut Peer) {
+    at_leaf.send("PUB orders.x 2\r\nhi\r\nPUB orders.y 3\r\nyes\r\n");
+    assert_eq!(
+        lines(at_hub, 4),
+        ["MSG orders.x 1 2", "hi", "MSG orders.y 1 3", "yes"]
+    );
+    at_hub.send("PUB back 4\r\nback\r\n");
+    assert_eq!(lines(at_leaf, 2), ["MSG back 1 4", "back"]);
+}
+
+#[test]
+fn a_link_to_a_go_hub_shows_in_leafz_as_that_of_a_go_leaf() {
+    let ports: Vec<u16> = (0..8).map(|_| free_port()).collect();
+    let hub = |i: usize| {
+        let (port, leafport, http) = (ports[3 * i], ports[3 * i + 1], ports[3 * i + 2]);
+        format!(
+            "server_name: hub\nport: {port}\nhttp_port: {http}\nleafnodes {{ port: {leafport} }}\n"
+        )
+    };
+    let Some(_go_hub) = go(&hub(0)) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let _naq_hub = go(&hub(1)).unwrap();
+    let (go_leaf_http, go_leaf_port) = (ports[6], ports[7]);
+    let _go_leaf = go(&format!(
+        "server_name: leaf\nport: {go_leaf_port}\nhttp_port: {go_leaf_http}\n\
+         leafnodes {{ remotes [{{ url: \"nats-leaf://127.0.0.1:{}\" }}] }}\n",
+        ports[1]
+    ))
+    .unwrap();
+    let naq_leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        http_port: Some(0),
+        server_name: "leaf".into(),
+        remotes: vec![Remote {
+            urls: vec![format!("nats-leaf://127.0.0.1:{}", ports[4])],
+            ..Remote::default()
+        }],
+        ..Options::default()
+    })
+    .unwrap();
+    let naq_http = naq_leaf.monitor_addr().unwrap().port();
+    let mut at_hubs: Vec<Peer> = [ports[0], ports[3]]
+        .iter()
+        .map(|&p| go_client(p, "SUB orders.* 1\r\n"))
+        .collect();
+    let mut at_leafs = [
+        go_client(go_leaf_port, "SUB back 1\r\n"),
+        client(&naq_leaf, "SUB back 1\r\n"),
+    ];
+    let lists = |subject: &'static str| {
+        move |z: &serde_json::Value| {
+            z["leafs"][0]["subscriptions_list"]
+                .as_array()
+                .is_some_and(|l| l.iter().any(|s| s == subject))
+        }
+    };
+    for (leaf, hub) in [(go_leaf_http, ports[2]), (naq_http, ports[5])] {
+        until(leaf, "/leafz?subs=1", lists("orders.*"));
+        until(hub, "/leafz?subs=1", lists("back"));
+    }
+    for (at_leaf, at_hub) in at_leafs.iter_mut().zip(&mut at_hubs) {
+        both_ways(at_leaf, at_hub);
+    }
+    shows_as_go_does(go_leaf_http, naq_http);
+}
+
+/// `/leafz` and the `$G` entry of `/accstatz` at monitoring port
+/// `naq_http` are those at `go_http`.
+fn shows_as_go_does(go_http: u16, naq_http: u16) {
+    let go_side = first_link(&raw(go_http, "/leafz?subs=1"));
+    let naq_side = first_link(&raw(naq_http, "/leafz?subs=1"));
+    assert_eq!(naq_side, go_side);
+    let go_side = global_statz(&raw(go_http, "/accstatz"));
+    let naq_side = global_statz(&raw(naq_http, "/accstatz"));
+    assert_eq!(naq_side, go_side);
+    let over_link = (
+        &naq_side["leafnodes"],
+        &naq_side["received"]["leafs"]["msgs"],
+    );
+    assert_eq!(over_link, (&1.into(), &1.into()), "{naq_side}");
+}
+
+/// The entry of `$G` in `/accstatz` body `body`, without its count of
+/// subscriptions: Go's counts those of its system account's services.
+fn global_statz(body: &str) -> serde_json::Value {
+    let z: serde_json::Value = serde_json::from_str(body).unwrap();
+    let all = z["account_statz"].as_array().unwrap();
+    let mut g = all.iter().find(|a| a["acc"] == "$G").unwrap().clone();
+    g["num_subscriptions"] = serde_json::Value::Null;
+    g
+}
+
+/// The next message `p` gets: its subject and its payload as JSON.
+fn message(p: &mut Peer) -> (String, serde_json::Value) {
+    let line = p.line();
+    let words: Vec<&str> = line.split(' ').collect();
+    assert_eq!(words[0], "MSG", "{line}");
+    let payload = p.line();
+    (words[1].to_owned(), serde_json::from_str(&payload).unwrap())
+}
+
+#[test]
+fn the_system_account_hears_of_links_as_they_come_and_go() {
+    let hub = Hub::new();
+    let conf = format!(
+        "server_name: naq-leaf\n\
+         accounts {{ SYS {{ users [{{user: sys, password: p}}] }} }}\n\
+         system_account: SYS\n\
+         leafnodes {{ remotes [{{ url: \"nats-leaf://127.0.0.1:{}\" }}] }}\n",
+        hub.port()
+    );
+    let opts: Options = conf.parse().unwrap();
+    let server = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        leaf_reconnect: Duration::from_secs(60),
+        ..opts
+    })
+    .unwrap();
+    let s = TcpStream::connect(server.addr()).unwrap();
+    s.set_read_timeout(Some(WAIT)).unwrap();
+    let mut c = Peer {
+        r: BufReader::new(s.try_clone().unwrap()),
+        w: s,
+    };
+    c.line();
+    // Its own events are in SYS: it may hear them still as it subscribes.
+    c.send("CONNECT {\"user\":\"sys\",\"pass\":\"p\",\"verbose\":false}\r\nPING\r\n");
+    assert_eq!(c.line(), "PONG");
+    c.send("SUB $SYS.ACCOUNT.$G.CONNECT 1\r\nSUB $SYS.ACCOUNT.$G.DISCONNECT 2\r\nPING\r\n");
+    assert_eq!(c.line(), "PONG");
+    let p = linked(&hub);
+    let (subject, up) = message(&mut c);
+    assert_eq!(subject, "$SYS.ACCOUNT.$G.CONNECT");
+    assert_eq!(up["client"]["kind"], "Leafnode", "{up}");
+    assert!(up["client"].get("client_type").is_none(), "{up}");
+    assert_eq!(up["client"]["acc"], "$G");
+    drop(p);
+    let (subject, down) = message(&mut c);
+    assert_eq!(subject, "$SYS.ACCOUNT.$G.DISCONNECT");
+    assert_eq!(down["client"]["kind"], "Leafnode", "{down}");
+    assert_eq!(down["client"]["id"], up["client"]["id"]);
+    assert_eq!(down["reason"], "Client Closed");
 }

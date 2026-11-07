@@ -104,7 +104,7 @@ impl Me {
             .peers
             .borrow()
             .iter()
-            .filter(|p| p.up)
+            .filter(|p| p.up.is_some())
             .flat_map(|p| &p.leaf_urls)
         {
             urls.push(' ');
@@ -366,6 +366,11 @@ impl Hub {
         ));
         other.greet(None);
         tokio::task::spawn_local(tell::send(other.clone(), || {}));
+        let link = self.shared.next_client();
+        self.shared.log.info(format_args!(
+            "lid:{link} - Leafnode connection created {}",
+            g.name
+        ));
         self.mesh.leafs.borrow_mut().push(Leaf {
             slot,
             id: g.who,
@@ -375,10 +380,11 @@ impl Hub {
             heard: Heard::of(g.epoch),
             told,
             other,
-            link: self.shared.next_client(),
+            link,
             heard_at: Instant::now(),
             carries,
         });
+        crate::sys::conns_changed(&self.shared, account);
     }
 
     /// Fills `told` with what `leaf`, bound to `account`, of permissions
@@ -433,8 +439,13 @@ impl Hub {
             mut heard,
             other,
             carries,
+            link,
+            name,
             ..
         } = leaf;
+        self.shared.log.info(format_args!(
+            "lid:{link} - Leafnode connection closed: Client Closed - Remote: {name}"
+        ));
         other.close();
         let shared = &self.shared;
         let perms = carries.perms.as_deref();
@@ -442,6 +453,7 @@ impl Hub {
         for tx in &*shared.lanes {
             tx.control(LaneControl::Unlink { slot });
         }
+        crate::sys::conns_changed(shared, account);
         true
     }
 

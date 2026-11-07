@@ -58,9 +58,7 @@ impl Conn {
         loop {
             let limits = self.bounds.limits;
             let (at, stop) = self.parse(&buf, &limits);
-            if std::mem::take(&mut self.busy) {
-                self.ping.active(Instant::now());
-            }
+            self.note_busy();
             self.lane.flush();
             self.lane.expire();
             self.ship(&mut buf, at).await;
@@ -69,8 +67,11 @@ impl Conn {
                 Ok(None) => continue,
                 Err(close) => return close,
             };
-            if let Some(sub) = self.stalled.take() {
-                stall(&sub, stall_mark).await;
+            if let Some(sub) = self.stalled.take()
+                && stall(&sub, stall_mark, &self.lane.shared.events.stalls).await
+            {
+                let stalls = &self.client.seen.stalls;
+                stalls.set(stalls.get() + 1);
             }
             // Lets the writers just woken run before the next read, so output
             // leaves in step with input instead of in bursts.
@@ -111,6 +112,16 @@ impl Conn {
         }
     }
 
+    /// Notes that the client was active, if the read just parsed held
+    /// messages, subscriptions or a `PING`.
+    fn note_busy(&mut self) {
+        if std::mem::take(&mut self.busy) {
+            let now = Instant::now();
+            self.ping.active(now);
+            self.client.seen.last.set(now.into_std());
+        }
+    }
+
     /// Acts on why parsing stopped: `Some` is reading on, for an operation of
     /// that many bytes if known; `None` is parsing again first.
     async fn on_stop(&mut self, stop: Result<Stop, Close>) -> Result<Option<Option<usize>>, Close> {
@@ -121,7 +132,10 @@ impl Conn {
                 self.unfenced = false;
                 self.pong();
             }
-            Stop::Login(l) => self.later(*l).await?,
+            Stop::Login(l) => {
+                let login = self.later(*l).await;
+                self.refused(login)?;
+            }
         }
         self.lane.flush();
         Ok(None)
@@ -159,7 +173,10 @@ impl Conn {
                     }
                 }
                 Ok(Parsed::Partial(need)) => return (at, Ok(Stop::More(need))),
-                Err(e) => return (at, Err(Close::Parse(e))),
+                Err(e) => {
+                    self.log_parse(&e, &buf[at..]);
+                    return (at, Err(Close::Parse(e)));
+                }
             }
         }
     }
@@ -176,8 +193,8 @@ impl Conn {
     // remains small enough.
     #[inline]
     fn handle(&mut self, op: ClientOp<'_>, buf: &[u8]) -> Result<Step, Close> {
-        if self.auth_by.is_some() && !matches!(op, ClientOp::Connect(_)) {
-            self.without_connect()?;
+        if self.watch.on {
+            self.watched(&op)?;
         }
         match op {
             ClientOp::Pub(p) => {
@@ -254,6 +271,20 @@ impl Conn {
         }
     }
 
+    /// What a watched client sends goes by here first: it is traced, and
+    /// until it authenticates, it may send nothing but a `CONNECT`.
+    #[cold]
+    #[inline(never)]
+    fn watched(&mut self, op: &ClientOp<'_>) -> Result<(), Close> {
+        if self.watch.tracing {
+            self.trace_in(op);
+        }
+        if self.auth_by.is_some() && !matches!(op, ClientOp::Connect(_)) {
+            self.without_connect()?;
+        }
+        Ok(())
+    }
+
     /// The ping timer fired: maybe a `PING`, maybe the end.
     #[inline(never)]
     fn ping_tick(&mut self) -> Option<Close> {
@@ -264,12 +295,15 @@ impl Conn {
         {
             Tick::Quiet => None,
             Tick::Ping => {
+                if self.watch.tracing {
+                    self.trace_out("PING", None);
+                }
                 self.reply(encode::PING);
                 self.lane.flush();
                 None
             }
             Tick::Stale => {
-                crate::stats::Events::note(&self.lane.shared.events.stale);
+                self.lane.shared.events.stale_clients.note();
                 Some(Close::Stale)
             }
         }
@@ -282,21 +316,29 @@ impl Conn {
     #[cold]
     #[inline(never)]
     fn may_send(&self, p: &Pub<'_>) -> bool {
+        // A traced client is guarded: its payload is traced here.
+        if self.watch.tracing {
+            self.trace_payload_in(p);
+        }
         let subject = p.subject;
         if subject.starts_with(b"_GR_.") && subject.len() > 5
             || subject.starts_with(b"$GR.") && subject.len() > 4
         {
-            self.error(&publish_violation(subject));
+            self.refuse_publish(subject);
             return false;
         }
         if self.client.guarded.get() && !self.may_publish(subject) {
             return false;
         }
         if subject.starts_with(b"$NRG.") {
-            self.error(&publish_violation(subject));
+            self.refuse_publish(subject);
             return false;
         }
         if let Some(reply) = p.reply.filter(|r| is_reserved_reply(r)) {
+            self.log_violation(format_args!(
+                "Publish Violation - Reply {:?}",
+                String::from_utf8_lossy(reply)
+            ));
             self.error(&format!(
                 "Permissions Violation for Publish with Reply of {}",
                 quoted(reply)
@@ -315,8 +357,18 @@ impl Conn {
         if held.is_none_or(|h| h.may_publish(subject)) {
             return true;
         }
-        self.error(&publish_violation(subject));
+        self.refuse_publish(subject);
         false
+    }
+
+    /// Tells it and the log it may not publish to `subject`.
+    #[cold]
+    fn refuse_publish(&self, subject: &[u8]) {
+        self.log_violation(format_args!(
+            "Publish Violation - Subject {:?}",
+            String::from_utf8_lossy(subject)
+        ));
+        self.error(&publish_violation(subject));
     }
 
     /// Whether its permissions let it subscribe as `s` asks; if not, it is
@@ -327,6 +379,19 @@ impl Conn {
         let held = self.client.held.borrow().clone();
         if held.is_none_or(|h| h.perms.subscribe(s.subject, s.queue)) {
             return true;
+        }
+        let (subject, sid) = (
+            String::from_utf8_lossy(s.subject),
+            String::from_utf8_lossy(s.sid),
+        );
+        match s.queue {
+            Some(q) => self.log_violation(format_args!(
+                "Subscription Violation - Subject {subject:?}, Queue: {:?}, SID {sid}",
+                String::from_utf8_lossy(q)
+            )),
+            None => self.log_violation(format_args!(
+                "Subscription Violation - Subject {subject:?}, SID {sid}"
+            )),
         }
         let text = match s.queue {
             Some(q) => format!(
@@ -529,16 +594,19 @@ impl SpentReads {
 }
 
 /// Waits up to [`STALL_MAX`] while `sub` has more than `mark` bytes queued,
-/// so its publisher slows to its pace.
-pub(crate) async fn stall(sub: &Rc<Client>, mark: usize) {
+/// so its publisher slows to its pace, and counts the wait in `stalls`.
+/// Tells whether it waited.
+pub(crate) async fn stall(sub: &Rc<Client>, mark: usize, stalls: &crate::stats::Counter) -> bool {
     let drained = sub.drained.notified();
     tokio::pin!(drained);
     // Registered before the check, so a drain after it is not missed.
     drained.as_mut().enable();
     if sub.is_closed() || sub.out.borrow().len() <= mark {
-        return;
+        return false;
     }
+    stalls.note();
     let _ = tokio::time::timeout(STALL_MAX, drained).await;
+    true
 }
 
 #[cfg(test)]

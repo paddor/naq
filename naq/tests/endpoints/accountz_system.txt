@@ -1,0 +1,215 @@
+# With the system account: /accountz names it, and service exports show
+# their latency samples. Every account imports the services of the
+# system account, which exports them.
+#! accounts {
+#!   A {
+#!     users [{user: a, password: p}]
+#!     exports [
+#!       {service: svc.>, latency: {sampling: 50, subject: lat.a}}
+#!       {service: hdr.>, latency: {sampling: headers, subject: lat.h}}
+#!     ]
+#!   }
+#!   B { imports [{service: {account: A, subject: svc.x}}] }
+#! }
+#= accounts
+#= exports
+#= imports
+GET /accountz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "$SYS",
+<   "accounts": [
+<     "$G",
+<     "$SYS",
+<     "A",
+<     "B"
+<   ]
+< }
+GET /accountz?acc=A
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "$SYS",
+<   "account_detail": {
+<     "account_name": "A",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 0,
+<     "subscriptions": 4,
+<     "exports": [
+<       {
+<         "subject": "hdr.\u003e",
+<         "type": "service",
+<         "response_type": "Singleton",
+<         "service_latency": {
+<           "sampling": "headers",
+<           "results": "lat.h"
+<         }
+<       },
+<       {
+<         "subject": "svc.\u003e",
+<         "type": "service",
+<         "response_type": "Singleton",
+<         "service_latency": {
+<           "sampling": 50,
+<           "results": "lat.a"
+<         }
+<       }
+<     ],
+<     "imports": [
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.CONNZ",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.CONNZ",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.A.STATZ",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.USER.A.INFO",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.USER.INFO",
+<         "local_subject": "$SYS.REQ.USER.INFO",
+<         "type": "service",
+<         "invalid": false,
+<         "share": true,
+<         "tracking": false
+<       }
+<     ],
+<     "name_tag": "A",
+<     "sublist_stats": {
+<       "num_subscriptions": 4,
+<       "num_cache": 0,
+<       "num_inserts": 4,
+<       "num_removes": 0,
+<       "num_matches": 0,
+<       "cache_hit_rate": 0,
+<       "max_fanout": 0,
+<       "avg_fanout": 0
+<     }
+<   }
+< }
+GET /accountz?acc=B
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "system_account": "$SYS",
+<   "account_detail": {
+<     "account_name": "B",
+<     "update_time": ~,
+<     "expired": false,
+<     "complete": true,
+<     "jetstream_enabled": false,
+<     "leafnode_connections": 0,
+<     "client_connections": 0,
+<     "subscriptions": 5,
+<     "imports": [
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.B.CONNZ",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.B.CONNZ",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "local_subject": "$SYS.REQ.SERVER.PING.CONNZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.ACCOUNT.B.STATZ",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "local_subject": "$SYS.REQ.ACCOUNT.PING.STATZ",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "$SYS.REQ.USER.B.INFO",
+<         "account": "$SYS",
+<         "to": "$SYS.REQ.USER.INFO",
+<         "local_subject": "$SYS.REQ.USER.INFO",
+<         "type": "service",
+<         "invalid": false,
+<         "share": true,
+<         "tracking": false
+<       },
+<       {
+<         "subject": "svc.x",
+<         "account": "A",
+<         "to": "svc.x",
+<         "local_subject": "svc.x",
+<         "type": "service",
+<         "invalid": false,
+<         "share": false,
+<         "tracking": false,
+<         "latency": {
+<           "sampling": 50,
+<           "results": "lat.a"
+<         }
+<       }
+<     ],
+<     "name_tag": "B",
+<     "sublist_stats": {
+<       "num_subscriptions": 5,
+<       "num_cache": 0,
+<       "num_inserts": 5,
+<       "num_removes": 0,
+<       "num_matches": 0,
+<       "cache_hit_rate": 0,
+<       "max_fanout": 0,
+<       "avg_fanout": 0
+<     }
+<   }
+< }

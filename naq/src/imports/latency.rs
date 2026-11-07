@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use super::info::ClientInfo;
 use crate::lane::{Lane, Outs};
+use crate::times::rfc3339_nano;
 use crate::{Latency, Sampling};
 
 /// Headers that asked for a sample, by their canonical names.
@@ -244,22 +245,6 @@ fn event_id(lane: &Lane) -> String {
     (0..22)
         .map(|_| char::from(super::service::base62(lane.below(62))))
         .collect()
-}
-
-/// `t` in RFC 3339 with nanoseconds, UTC, trailing zeros cut, as Go
-/// writes a time.
-pub(crate) fn rfc3339_nano(t: SystemTime) -> String {
-    let full = crate::monitor::rfc3339(t);
-    let (whole, fraction) = full
-        .trim_end_matches('Z')
-        .split_once('.')
-        .unwrap_or((&full, ""));
-    let fraction = fraction.trim_end_matches('0');
-    if fraction.is_empty() {
-        format!("{whole}Z")
-    } else {
-        format!("{whole}.{fraction}Z")
-    }
 }
 
 /// Publishes `payload` on `subject` in `account` from the server itself,

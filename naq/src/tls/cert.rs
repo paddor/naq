@@ -2,6 +2,8 @@
 //! read from the DER as `nats-server` reads it, and tried against the
 //! users in the order it tries them.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use super::dn::Dn;
 
 /// Attribute types `nats-server` names in a subject, by OID contents, in
@@ -199,6 +201,71 @@ fn parts(mut der: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
     expect(&mut tbs, 0x30)?;
     let subject = expect(&mut tbs, 0x30)?;
     Some((issuer, subject, tbs))
+}
+
+/// The subject of certificate `der`, as Go writes it out of the names it
+/// knows; empty for one it cannot read.
+pub(crate) fn subject_text(der: &[u8]) -> String {
+    Names::of(der).written()
+}
+
+/// The subject public key info of certificate `der`, its tag and length
+/// with it.
+pub(crate) fn spki(mut der: &[u8]) -> Option<&[u8]> {
+    let mut cert = expect(&mut der, 0x30)?;
+    let mut tbs = expect(&mut cert, 0x30)?;
+    let (tag, _) = element(&mut tbs)?;
+    if tag == 0xa0 {
+        element(&mut tbs)?;
+    }
+    // The signature algorithm, issuer, validity and subject.
+    for _ in 0..4 {
+        expect(&mut tbs, 0x30)?;
+    }
+    let all = tbs;
+    expect(&mut tbs, 0x30)?;
+    Some(&all[..all.len() - tbs.len()])
+}
+
+/// When certificate `der` expires: the end of its validity.
+pub(crate) fn not_after(mut der: &[u8]) -> Option<SystemTime> {
+    let mut cert = expect(&mut der, 0x30)?;
+    let mut tbs = expect(&mut cert, 0x30)?;
+    let (mut tag, _) = element(&mut tbs)?;
+    if tag == 0xa0 {
+        (tag, _) = element(&mut tbs)?;
+    }
+    if tag != 0x02 {
+        return None;
+    }
+    // The signature algorithm and the issuer, then the validity.
+    expect(&mut tbs, 0x30)?;
+    expect(&mut tbs, 0x30)?;
+    let mut validity = expect(&mut tbs, 0x30)?;
+    element(&mut validity)?;
+    let (tag, at) = element(&mut validity)?;
+    asn1_time(tag, at)
+}
+
+/// An ASN.1 `UTCTime` (`YYMMDDHHMMSSZ`) or `GeneralizedTime`
+/// (`YYYYMMDDHHMMSSZ`).
+fn asn1_time(tag: u8, at: &[u8]) -> Option<SystemTime> {
+    let s = std::str::from_utf8(at).ok()?.strip_suffix('Z')?;
+    if !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (year, rest) = match (tag, s.len()) {
+        (0x17, 12) => {
+            let yy: i64 = s[..2].parse().ok()?;
+            (if yy < 50 { 2000 + yy } else { 1900 + yy }, &s[2..])
+        }
+        (0x18, 14) => (s[..4].parse().ok()?, &s[4..]),
+        _ => return None,
+    };
+    let n = |i: usize| rest[i..i + 2].parse::<i64>().ok();
+    let days = crate::times::days(year, n(0)?, n(2)?);
+    let secs = days * 86_400 + n(4)? * 3600 + n(6)? * 60 + n(8)?;
+    Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).ok()?))
 }
 
 /// Whether certificate `ca` issued certificate `cert`, by their names,

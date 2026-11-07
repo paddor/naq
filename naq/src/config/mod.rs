@@ -5,6 +5,7 @@ pub(crate) mod callout;
 mod cluster;
 mod imports;
 mod leaf;
+mod log;
 mod operator;
 mod parse;
 mod ws;
@@ -15,23 +16,6 @@ use std::time::Duration;
 use parse::{Item, Map, Value};
 
 use crate::{Error, Options};
-
-/// Keys of `nats-server` that only change its logs, ignored here.
-const IGNORED: &[&str] = &[
-    "debug",
-    "trace",
-    "trace_verbose",
-    "logtime",
-    "logtime_utc",
-    "logfile",
-    "log_file",
-    "log_size_limit",
-    "log_max_num",
-    "syslog",
-    "remote_syslog",
-    "pidfile",
-    "pid_file",
-];
 
 impl Options {
     /// Reads a `nats-server` configuration file. Keys it leaves out keep
@@ -71,7 +55,10 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
         at: at(e.line, e.file.as_deref()),
         reason: e.reason,
     })?;
-    let mut opts = Options::default();
+    let mut opts = Options {
+        config_file: file.map(Path::to_path_buf),
+        ..Options::default()
+    };
     apply(&mut opts, &map).map_err(|(line, reason)| Error::Config {
         at: at(line, file),
         reason,
@@ -129,6 +116,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 }
                 o.server_name = name;
             }
+            "server_tags" | "server_metadata" => facts(o, &key, item)?,
             "max_payload" => {
                 o.max_payload = size(item, i32::MAX).ok_or_else(|| bad("expected a size"))?;
             }
@@ -142,16 +130,13 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
             "ping_max" => o.max_pings_out = int(item).ok_or_else(|| bad("expected a count"))?,
             "write_deadline" => o.write_deadline = duration(item).map_err(|e| bad(&e))?,
             "authorization" => auth::authorization(o, item)?,
-            "http" => {
-                let (host, port) = listen(item).ok_or_else(|| bad("expected host:port"))?;
-                o.http_host = host;
-                o.http_port = Some(port);
+            k if MONITORING.contains(&k) => monitoring(o, k, item)?,
+            "max_closed_clients" => {
+                o.max_closed_clients =
+                    size(item, i32::MAX).ok_or_else(|| bad("expected a count"))?;
             }
             "tls" => o.tls = Some(tls(item)?),
             "websocket" | "ws" => o.websocket = ws::websocket(item)?,
-            "http_port" | "monitor_port" => {
-                o.http_port = Some(int(item).ok_or_else(|| bad("expected a port"))?);
-            }
             "accounts" => auth::accounts(o, item)?,
             "leafnodes" | "leaf" => leaf::leafnodes(o, item)?,
             "cluster" => o.cluster = Some(cluster::cluster(item)?),
@@ -159,14 +144,53 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 auth::system(o, &key, item)?;
             }
             k if operator::KEYS.contains(&k) => operator::apply(o, k, item)?,
+            k if log::KEYS.contains(&k) => log::apply(o, k, item)?,
             "no_auth_user" => {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }
-            k if IGNORED.contains(&k) => {}
+            "pid_file" | "pidfile" | "ports_file_dir" => files(o, &key, item)?,
             _ => return Err(bad("not supported")),
         }
     }
     Ok(())
+}
+
+/// `server_tags` and `server_metadata`: what the server tells of itself.
+fn facts(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    if key == "server_tags" {
+        let tags = strings(item).ok_or_else(|| (item.line, format!("{key}: expected strings")))?;
+        tags_of(&mut o.server_tags, &tags);
+    } else {
+        o.server_metadata = metadata(item)?;
+    }
+    Ok(())
+}
+
+/// Adds `tags` to `all` as `nats-server` keeps server tags: trimmed,
+/// lowercase, once each, none empty.
+fn tags_of(all: &mut Vec<String>, tags: &[String]) {
+    for t in tags {
+        let t = t.trim().to_lowercase();
+        if !t.is_empty() && !all.contains(&t) {
+            all.push(t);
+        }
+    }
+}
+
+/// `server_metadata`: a map of strings.
+fn metadata(item: &Item) -> Result<std::collections::BTreeMap<String, String>, Bad> {
+    let bad = |line| {
+        (
+            line,
+            "server_metadata: expected a map of strings".to_owned(),
+        )
+    };
+    let Value::Map(m) = &item.value else {
+        return Err(bad(item.line));
+    };
+    m.iter()
+        .map(|(k, v)| Ok((k.clone(), string(v).ok_or_else(|| bad(v.line))?)))
+        .collect()
 }
 
 /// `tls { cert_file, key_file, ca_file, verify, verify_and_map, timeout,
@@ -237,6 +261,17 @@ pub(super) fn seconds(v: &Item) -> Result<Duration, String> {
     }
 }
 
+/// `pid_file` and `ports_file_dir`: where the server writes of itself.
+fn files(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    let path = string(item).ok_or_else(|| (item.line, format!("{key}: expected a path")))?;
+    if key == "ports_file_dir" {
+        o.ports_file_dir = Some(path.into());
+    } else {
+        o.pid_file = Some(path.into());
+    }
+    Ok(())
+}
+
 pub(super) fn string(item: &Item) -> Option<String> {
     match &item.value {
         Value::Str(s) => Some(s.clone()),
@@ -274,9 +309,77 @@ pub(super) fn listen(item: &Item) -> Option<(Option<String>, u16)> {
         Value::Int(_) => Some((None, int(item)?)),
         Value::Str(s) => {
             let (host, port) = s.rsplit_once(':')?;
-            let port = port.parse().ok()?;
+            // -1 picks a free port, as 0 does here.
+            let port = if port == "-1" { 0 } else { port.parse().ok()? };
             let host = host.trim_start_matches('[').trim_end_matches(']');
             Some(((!host.is_empty()).then(|| host.to_owned()), port))
+        }
+        _ => None,
+    }
+}
+
+/// The keys of where monitoring is served.
+const MONITORING: [&str; 6] = [
+    "http",
+    "https",
+    "http_port",
+    "monitor_port",
+    "https_port",
+    "http_base_path",
+];
+
+/// One of [`MONITORING`].
+fn monitoring(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    let bad = |reason: &str| (item.line, format!("{key}: {reason}"));
+    let https = key.starts_with("https");
+    let port = match key {
+        "http_base_path" => {
+            o.http_base_path = string(item).ok_or_else(|| bad("expected a string"))?;
+            return Ok(());
+        }
+        "http" | "https" => {
+            let (host, port) = monitor_listen(item).ok_or_else(|| bad("expected host:port"))?;
+            o.http_host = host;
+            port
+        }
+        _ => int(item)
+            .and_then(Port::of)
+            .ok_or_else(|| bad("expected a port"))?,
+    };
+    if https {
+        o.https_port = port.0;
+    } else {
+        o.http_port = port.0;
+    }
+    Ok(())
+}
+
+/// A monitoring port as `nats-server` takes it: 0 is none, and -1 picks
+/// a free one, as 0 does in [`Options`].
+struct Port(Option<u16>);
+
+impl Port {
+    const fn of(n: i64) -> Option<Port> {
+        match n {
+            0 => Some(Port(None)),
+            -1 => Some(Port(Some(0))),
+            1..=65535 => Some(Port(Some(n as u16))),
+            _ => None,
+        }
+    }
+}
+
+/// A monitoring `host:port` or port, its port as [`Port`] takes it.
+fn monitor_listen(item: &Item) -> Option<(Option<String>, Port)> {
+    match &item.value {
+        Value::Int(n) => Some((None, Port::of(*n)?)),
+        Value::Str(s) => {
+            let (host, port) = s.rsplit_once(':')?;
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            Some((
+                (!host.is_empty()).then(|| host.to_owned()),
+                Port::of(port.parse().ok()?)?,
+            ))
         }
         _ => None,
     }
@@ -361,6 +464,10 @@ mod tests {
             Some((Some("::1".into()), 4333))
         );
         assert_eq!(listen(&item(Value::Int(4333))), Some((None, 4333)));
+        assert_eq!(
+            listen(&item(Value::Str("127.0.0.1:-1".into()))),
+            Some((Some("127.0.0.1".into()), 0))
+        );
         assert_eq!(listen(&item(Value::Str("nohost".into()))), None);
         assert_eq!(listen(&item(Value::Bool(true))), None);
     }

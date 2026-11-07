@@ -209,8 +209,8 @@ impl Mesh {
 pub(crate) struct Peer {
     pub(crate) host: String,
     pub(crate) port: u16,
-    /// Its `Hello` came, and the connection holds.
-    pub(crate) up: bool,
+    /// Once its `Hello` came, while the connection holds.
+    pub(crate) up: Option<Up>,
     pub(crate) server_id: String,
     pub(crate) name: String,
     pub(crate) epoch: u64,
@@ -222,6 +222,14 @@ pub(crate) struct Peer {
     pub(crate) client_urls: Vec<String>,
     /// Where naq leafs dial it, if they may.
     pub(crate) leaf_urls: Vec<String>,
+}
+
+/// When the route to a server came up, and when that server last told
+/// something.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Up {
+    pub(crate) since: std::time::SystemTime,
+    pub(crate) last: std::time::SystemTime,
 }
 
 /// Options of every socket of the mesh: heartbeats find a peer gone, and

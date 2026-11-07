@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use naq::{Error, Options, WebsocketAuth};
+use naq::{Error, LogTo, Logging, Options, Trace, WebsocketAuth};
 
 /// A directory of its own for test `name`.
 fn dir(name: &str) -> PathBuf {
@@ -39,6 +39,11 @@ fn a_file_sets_what_it_names_and_leaves_the_rest() {
             ping_interval: Duration::from_secs(30),
             max_pings_out: 5,
             write_deadline: Duration::from_secs(2),
+            log: Logging {
+                debug: true,
+                ..Logging::default()
+            },
+            config_file: Some(path.clone()),
             ..Options::default()
         }
     );
@@ -46,9 +51,66 @@ fn a_file_sets_what_it_names_and_leaves_the_rest() {
 }
 
 #[test]
+fn log_keys_set_what_and_where_the_server_logs() {
+    let o: Options = "debug: true\ntrace_verbose: true\nlogtime: false\nlogtime_utc: true\n\
+                      syslog: true\nlog_file: \"/var/log/naq.log\"\nlog_size_limit: 1MB\n\
+                      log_max_num: 3\nmax_traced_msg_len: 64\n"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        o.log,
+        Logging {
+            to: Some(LogTo::File("/var/log/naq.log".into())),
+            debug: true,
+            trace: Trace::On,
+            time: false,
+            size_limit: 1 << 20,
+            max_files: 3,
+            max_traced: 64,
+        }
+    );
+    let o: Options = "remote_syslog: \"udp://h:514\"\nsyslog: true\ntrace_headers: true\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.log.to, Some(LogTo::RemoteSyslog("udp://h:514".into())));
+    assert_eq!(o.log.trace, Trace::Headers);
+    let e = "debug: 1\n".parse::<Options>().unwrap_err();
+    assert_eq!(e.to_string(), "line 1: debug: expected true or false");
+}
+
+#[test]
 fn text_parses_as_options() {
     let o: Options = "host: ::1\nport: 4444\nlisten: :4555\n".parse().unwrap();
     assert_eq!((o.host.as_str(), o.port), ("::1", 4555));
+}
+
+#[test]
+fn server_tags_are_kept_as_nats_server_keeps_them() {
+    let o: Options = "server_tags: [\" AZ:1 \", \"az:1\", \"\", \"Probe\"]\nserver_metadata: {rack: r1, row: \"2\"}\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.server_tags, ["az:1", "probe"]);
+    let pairs: Vec<(&str, &str)> = o
+        .server_metadata
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(pairs, [("rack", "r1"), ("row", "2")]);
+    let one: Options = "server_tags: Solo\n".parse().unwrap();
+    assert_eq!(one.server_tags, ["solo"]);
+    for (text, reason) in [
+        ("server_tags: 1\n", "line 1: server_tags: expected strings"),
+        (
+            "server_metadata: [a]\n",
+            "line 1: server_metadata: expected a map of strings",
+        ),
+        (
+            "server_metadata: {a: 1}\n",
+            "line 1: server_metadata: expected a map of strings",
+        ),
+    ] {
+        assert_eq!(text.parse::<Options>().unwrap_err().to_string(), reason);
+    }
 }
 
 #[test]
@@ -130,6 +192,7 @@ fn users_tokens_and_accounts_come_from_their_blocks() {
         .parse()
         .unwrap();
     assert_eq!(names(&o), ["A", "B"]);
+    assert_eq!(o.accounts[0].max_connections, None);
     assert_eq!(o.auth_timeout, Duration::from_millis(500));
     assert_eq!(o.no_auth_user.as_deref(), Some("a"));
     let users: Vec<_> = o
@@ -255,6 +318,32 @@ fn auth_that_contradicts_itself_is_an_error() {
 }
 
 #[test]
+fn an_account_s_limits_cap_its_connections() {
+    let o: Options = "accounts {\n  A { limits { max_connections: 2 } }\n  \
+                      B { limits { MAX_CONN: -1 } }\n  C { limits { max_conn: 0 } }\n}\n"
+        .parse()
+        .unwrap();
+    let most: Vec<_> = o.accounts.iter().map(|a| a.max_connections).collect();
+    assert_eq!(most, [Some(2), None, Some(0)]);
+    for (text, reason) in [
+        (
+            "accounts { A { limits { max_subs: 1 } } }\n",
+            "accounts: A: limits: max_subs: not supported",
+        ),
+        (
+            "accounts { A { limits { max_conn: x } } }\n",
+            "accounts: A: limits: max_conn: expected a number",
+        ),
+        ("accounts { A { limits: 1 } }\n", "limits: expected a map"),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { reason: r, .. }) => assert_eq!(r, reason, "{text:?}"),
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_server_refuses_options_that_contradict_themselves() {
     let o = Options {
         token: Some("t".into()),
@@ -358,7 +447,31 @@ fn monitoring_takes_a_port_or_a_host_and_port() {
         (Some(8444), Some("127.0.0.1"))
     );
     assert!("http: nope\n".parse::<Options>().is_err());
-    assert!("http_port: -1\n".parse::<Options>().is_err());
+    // As in nats-server: -1 picks a free port, 0 serves none.
+    let port = |text: &str| text.parse::<Options>().unwrap();
+    assert_eq!(port("http_port: -1\n").http_port, Some(0));
+    assert_eq!(port("http_port: 0\n").http_port, None);
+    assert_eq!(port("http: \"127.0.0.1:-1\"\n").http_port, Some(0));
+    let o = port("https: \"[::1]:8443\"\nhttp_base_path: mon\n");
+    assert_eq!(
+        (
+            o.https_port,
+            o.http_host.as_deref(),
+            o.http_base_path.as_str()
+        ),
+        (Some(8443), Some("::1"), "mon")
+    );
+    assert_eq!(port("https_port: 8443\n").https_port, Some(8443));
+    assert_eq!(port("http: 8222\n").http_port, Some(8222));
+    for bad in [
+        "http_port: 70000\n",
+        "https_port: x\n",
+        "https: \"h:x\"\n",
+        "https: true\n",
+        "http_base_path: 1\n",
+    ] {
+        assert!(bad.parse::<Options>().is_err(), "{bad:?}");
+    }
 }
 
 #[test]

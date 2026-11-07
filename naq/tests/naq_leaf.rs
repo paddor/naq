@@ -46,6 +46,9 @@ fn base(name: &str) -> Options {
         http_port: Some(0),
         server_name: name.into(),
         leaf_reconnect: Duration::from_millis(50),
+        // What links tell is then the interest of clients, without the
+        // server's own: the imports of the system account's services.
+        no_system_account: true,
         ..Options::default()
     }
 }
@@ -261,6 +264,11 @@ fn a_naq_leaf_links_to_its_naq_hub() {
             &h.leafnode_addr().unwrap().port().into()
         )
     );
+    for s in [&h, &l] {
+        let g = &get(s, "/accstatz")["account_statz"][0];
+        let counts = (&g["acc"], &g["leafnodes"], &g["total_conns"]);
+        assert_eq!(counts, (&"$G".into(), &1.into(), &1.into()), "{g}");
+    }
 }
 
 #[test]
@@ -287,6 +295,14 @@ fn interest_and_messages_cross_both_ways() {
     assert_eq!(line(&mut with), "hi");
     send(&mut at_hub, "UNSUB 1\r\nPING\r\n");
     leafz(&l, |z| subjects(z).is_empty());
+    // Each side counts what crossed the link in its account.
+    for server in [&h, &l] {
+        let global = &get(server, "/accstatz")["account_statz"][0];
+        for way in ["received", "sent"] {
+            let over = global[way]["leafs"]["msgs"].as_u64().unwrap();
+            assert!(over > 0, "{global}");
+        }
+    }
 }
 
 #[test]

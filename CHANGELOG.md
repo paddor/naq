@@ -5,8 +5,129 @@ Notable changes to naq. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `naq`: a log, as `nats-server` writes it: `[pid] time [LVL] text`, the
+  start of the server in its order, clients created, refused and closed
+  with Go's reasons and texts, permission violations, slow consumers,
+  routes and leaf node links. `Options::log` (`Logging`, `LogTo`,
+  `Trace`) and the keys `debug`, `trace`, `trace_verbose`,
+  `trace_headers`, `logtime`, `logtime_utc`, `log_file`,
+  `log_size_limit`, `log_max_num`, `syslog`, `remote_syslog` and
+  `max_traced_msg_len`. Times are in UTC. The library logs nothing unless
+  told; the binary logs to stderr. `Server::start` fails with `Error::Log`
+  if the log file cannot be opened or the syslog not reached.
+- `naq`: protocol traces of clients (`trace`): what each sent and got,
+  payloads cut at `max_traced_msg_len`, secrets of a `CONNECT` left out.
+- `naq`: log files rotated past `log_size_limit` and purged to
+  `log_max_num`; `Server::reopen_log` opens the file again.
+- `naq` binary: the log flags of `nats-server` (`-D`, `-V`, `-DV`, `-T`,
+  `-l`, `-s`, `-r`, `--logtime_utc`, `--log_size_limit`,
+  `--max_traced_msg_len`), with `-flag=value` and `--flag` forms, and `-n`
+  for the server name.
+- `naq`: `Options::config_file`, set by `Options::from_file`.
+- `naq`: `Server::shutdown`, as `nats-server` shuts down: no new
+  connections, then clients and hub links close with `Server Shutdown`
+  once their lane delivered what was sent to it, and get a few seconds to
+  write what is left.
+- `naq`: `Signals::catch` and `Server::wait_for_signals`, caught before
+  the server starts, as by `nats-server`: `INT`, `TERM` and `USR2` shut the
+  server down, `USR1` opens the log file again, `HUP` is logged.
+- `naq`: `Options::pid_file` (`pid_file`, `-P`) and
+  `Options::ports_file_dir` (`ports_file_dir`, `--ports_file_dir`): the
+  process ID, and the URLs the server listens at, in a file removed as it
+  stops. `Error::Write` if they cannot be written.
+- `naq` binary: `--signal` (`stop`, `quit`, `term`, `reopen`, `reload`,
+  `ldm`, to a process ID, a pid file, or the one `naq` running), `-t`,
+  `-v`, `--user`, `--pass`, `--auth`, the `--tls*` flags, `--cluster`,
+  `--cluster_name` and `--routes`. Flags of `nats-server` naq does not
+  serve say so.
+- `naq`: monitoring served as `nats-server` serves it: HTTP/1.1 with
+  keep-alive, any method, and Go's answers to requests it cannot read and
+  to paths that are not clean; JSON in Go's layout and escaping; query
+  options read as Go reads them, refused with its texts. `/varz` has all
+  of Go's fields that apply, `/healthz` takes its options, and `/jsz`,
+  `/gatewayz`, `/ipqueuesz`, `/raftz` and `/debug/vars` answer as Go does
+  without JetStream, gateways or Raft.
+- `naq`: `/connz` as `nats-server` serves it: every option, sort and
+  page; activity, round trips, stalls, TLS and its client certificates,
+  users, accounts and what issued a JWT user; links to hubs among the
+  connections; and the connections that closed, with why, the newest
+  `max_closed_clients` (`Options::max_closed_clients`) of them.
+- `naq`: `/subsz` (`/subscriptionsz`) as `nats-server` serves it: counts
+  by account, and the subscriptions of clients, paged and tested against
+  a subject. `/routez` and `/leafz` in Go's fields: when a route came up
+  and was last heard from, what it sent, round trips of links to Go hubs.
+- `naq`: `/accountz` and `/accstatz` as `nats-server` serves them: the
+  accounts, and one in detail with its exports, imports, connections and
+  subscriptions; what the clients and links of each account sent and got,
+  those that closed too. Subscription counts take in those `nats-server`
+  makes for service imports and their replies. Accounts of JWTs show
+  once in use, with their JWT, claims and revoked users; `/varz` shows
+  the trusted operators and their claims.
+- `naq`: `Options::https_port` (`https_port`, `https`, `-ms`): monitoring
+  over HTTPS with the certificate of the client port, and
+  `Options::http_base_path` (`http_base_path`).
+- `naq`: server requests on `$SYS`, as `nats-server` answers them, from
+  every server of a cluster: `$SYS.REQ.SERVER.PING`, and `PING.<Z>` or
+  `<id>.<Z>` for `IDZ`, `STATSZ`, `VARZ`, `SUBSZ`, `CONNZ`, `ROUTEZ`,
+  `GATEWAYZ`, `LEAFZ`, `ACCOUNTZ`, `HEALTHZ`, `JSZ`, `PROFILEZ`, `EXPVARZ`,
+  `IPQUEUESZ` and `RAFTZ`. Their options, server filters and errors are
+  Go's, and answers are compressed as `Accept-Encoding` asks.
+- `naq`: `$SYS.REQ.SERVER.<id>.KICK` closes a client, or a link to a
+  hub, as `Kicked`, as in `nats-server`.
+- `naq`: account requests on `$SYS`, as `nats-server` answers them:
+  `$SYS.REQ.ACCOUNT.<acc>.SUBSZ`, `CONNZ`, `LEAFZ`, `JSZ`, `INFO`, `STATZ`
+  and `CONNS`, `$SYS.REQ.ACCOUNT.PING.STATZ`, and a user's own details on
+  `$SYS.REQ.USER.INFO`, answered by its server only. The system account
+  exports them, and every account imports those about itself, as in
+  `nats-server`; `/accountz` shows them.
+- `naq`: `Options::server_tags` (`server_tags`) and
+  `Options::server_metadata` (`server_metadata`), shown in `/varz` and on
+  `$SYS`.
+- `naq`: the `STATSZ` heartbeat on `$SYS.SERVER.<id>.STATSZ`, timed as
+  `nats-server` times it, and `SHUTDOWN` as the server stops. Servers of a
+  cluster know each other from these: `active_servers` counts those heard
+  from, until they say they go or fall quiet.
+- `naq`: events of connections on `$SYS`, as `nats-server` sends them:
+  `$SYS.ACCOUNT.<acc>.CONNECT` once a client or a link to a hub logs in,
+  `DISCONNECT` as it goes, with what it sent and got and why, and for a
+  refused login `$SYS.SERVER.<id>.CLIENT.AUTH.ERR` and
+  `$SYS.ACCOUNT.CLIENT.AUTH.ERR` in the account the client was in.
+- `naq`: the connections of each account on `$SYS`, as `nats-server`
+  tells them: `CONNS` on `$SYS.SERVER.ACCOUNT.<acc>.CONNS` and
+  `$SYS.ACCOUNT.<acc>.SERVER.CONNS` as they change and every 30 seconds
+  while there are any, and to `$SYS.REQ.ACCOUNT.<acc>.CONNS`. A server
+  asks the others for them as it starts and as accounts are added.
+- `naq`: `Account::max_connections` (`limits { max_connections }`): the
+  most clients an account may have across the cluster. A client past it is
+  refused; once the other servers tell of more, the newest clients here
+  past it close. The limit of an account JWT holds across the cluster too.
+- `naq`: `$SYS.DEBUG.SUBSCRIBERS`, as `nats-server` answers it: the
+  subscribers of a subject, or of a queue group on it, in the account that
+  asks, on every server with connections of the account. The servers ask
+  each other on `$SYS.REQ.ACCOUNT.NSUBS`.
+
+### Changed
+
+- `naq` binary: a configuration it cannot use exits 1, as `nats-server`;
+  flags it cannot read exit 2.
+- `naq`: a monitoring port of -1 picks a free one and 0 serves none, as
+  in `nats-server` (`http_port`, `https_port`, `-m`, `-ms`); `listen`
+  addresses take port -1.
+- `naq`: in operator mode, the system account is the one named, by
+  `system_account` or the operator JWT; without one there is none, as in
+  `nats-server`.
+
 ### Fixed
 
+- `naq`: a client's first round trip is estimated as its `CONNECT`
+  comes, before the login, as in `nats-server`: a slow login or auth
+  callout no longer counts.
+- `naq`: a client that breaks the protocol is closed as `Protocol
+  Violation`, as by `nats-server`, in the log and in the WebSocket close
+  frame; a client without credentials is the `no_auth_user` in the user
+  service imports tell of.
 - `naq`: plain subscriptions get a message from another server of the
   cluster, or from a naq hub or leaf, once, not twice, where a queue group
   of theirs matches it too and gets its pick there.

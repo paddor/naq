@@ -84,6 +84,7 @@ fn a_server_of_another_cluster_is_not_met() {
                 port: me,
                 routes: others.iter().map(|p| format!("127.0.0.1:{p}")).collect(),
             }),
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -112,6 +113,7 @@ fn a_cluster_that_cannot_listen_or_route_stops_the_start() {
                 port,
                 routes,
             }),
+            no_system_account: true,
             ..Options::default()
         })
     };
@@ -210,6 +212,7 @@ fn a_server_that_starts_late_hears_of_what_was_there() {
                 port: ports[i],
                 routes: vec![format!("127.0.0.1:{}", ports[1 - i])],
             }),
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -372,6 +375,7 @@ fn a_message_of_a_hub_stays_with_the_server_linked_to_it() {
             } else {
                 Vec::new()
             },
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -426,6 +430,7 @@ fn a_message_of_another_server_is_not_sent_to_a_hub() {
             } else {
                 Vec::new()
             },
+            no_system_account: true,
             ..Options::default()
         })
         .unwrap()
@@ -484,6 +489,14 @@ fn clients_hear_where_the_clients_of_the_others_connect() {
     let mut want: Vec<String> = servers[1..].iter().map(|s| s.addr().to_string()).collect();
     want.sort();
     assert_eq!(others, want);
+    // /varz lists them as INFO does, with the routes up.
+    let varz = get(&servers[0], "/varz");
+    assert_eq!(varz["connect_urls"], info["connect_urls"]);
+    assert_eq!(
+        (varz["routes"].as_u64(), varz["remotes"].as_u64()),
+        (Some(2), Some(2))
+    );
+    assert_eq!(varz["cluster"]["name"], "c");
 }
 
 #[test]
@@ -819,6 +832,7 @@ fn importing_cluster() -> Vec<Server> {
                 }),
                 accounts: accounts.accounts.clone(),
                 users: accounts.users.clone(),
+                no_system_account: true,
                 ..Options::default()
             })
             .unwrap()
@@ -932,4 +946,108 @@ fn a_server_with_plain_and_queue_interest_gets_a_message_once_for_each() {
     let got = until_end(&mut member);
     let once = |payload: &str| got.iter().filter(|l| *l == payload).count();
     assert_eq!((once("sync"), once("x")), (1, 1), "{got:?}");
+}
+
+/// The keys `nats-server` gives a route in `/routez`, in its order, as
+/// naq fills them: no permissions, account or list of subjects.
+const ROUTE_KEYS: [&str; 20] = [
+    "rid",
+    "remote_id",
+    "remote_name",
+    "did_solicit",
+    "is_configured",
+    "ip",
+    "port",
+    "start",
+    "last_activity",
+    "rtt",
+    "uptime",
+    "idle",
+    "pending_size",
+    "in_msgs",
+    "out_msgs",
+    "in_bytes",
+    "out_bytes",
+    "subscriptions",
+    "subscriptions_list_detail",
+    "compression",
+];
+
+/// The body of `GET path` on `s`'s monitoring port, as it came.
+fn raw(s: &Server, path: &str) -> String {
+    use std::io::Read;
+    let mut c = TcpStream::connect(s.monitor_addr().unwrap()).unwrap();
+    c.set_read_timeout(Some(WAIT)).unwrap();
+    write!(c, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
+    let mut body = String::new();
+    c.read_to_string(&mut body).unwrap();
+    body.split_once("\r\n\r\n").unwrap().1.to_owned()
+}
+
+/// The keys of the first route of a `/routez` body, in order.
+fn route_keys(body: &str) -> Vec<String> {
+    body.lines()
+        .skip_while(|l| !l.starts_with("  \"routes\""))
+        .skip(2)
+        .take_while(|l| *l != "    }" && *l != "    },")
+        .filter_map(|l| l.strip_prefix("      \"")?.split_once('"'))
+        .map(|(k, _)| k.to_owned())
+        .collect()
+}
+
+#[test]
+fn a_route_shows_in_routez_with_the_fields_of_nats_server() {
+    let servers = cluster(2);
+    for s in &servers {
+        until(s, "/routez", |z| z["num_routes"] == 1);
+    }
+    let mut publisher = client(&servers[0], "");
+    let mut sub = client(&servers[1], "SUB a 1\r\nSUB w q 2\r\n");
+    until_heard(&mut publisher, &mut sub, "a");
+    let before = get(&servers[0], "/routez")["routes"][0].clone();
+    send(
+        &mut publisher,
+        "PUB a 2\r\nhi\r\nPUB a 2\r\nhi\r\nPUB a 4\r\nsync\r\n",
+    );
+    for _ in 0..2 {
+        assert_eq!([line(&mut sub), line(&mut sub)], ["MSG a 1 2", "hi"]);
+    }
+    assert_eq!([line(&mut sub), line(&mut sub)], ["MSG a 1 4", "sync"]);
+    let body = raw(&servers[0], "/routez?subs=detail");
+    assert_eq!(route_keys(&body), ROUTE_KEYS);
+    let routez: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(routez["server_name"], "n0");
+    let route = &routez["routes"][0];
+    let port = servers[1].cluster_addr().unwrap().port();
+    let want = serde_json::json!({
+        "rid": 1, "remote_name": "n1", "did_solicit": true, "is_configured": true,
+        "ip": "127.0.0.1", "port": port, "rtt": "0s", "pending_size": 0,
+        "subscriptions": 2, "compression": "off",
+    });
+    for (k, v) in want.as_object().unwrap() {
+        assert_eq!(&route[k], v, "{k}");
+    }
+    let count = |v: &serde_json::Value, k: &str| v[k].as_u64().unwrap();
+    assert_eq!(count(route, "out_msgs"), count(&before, "out_msgs") + 3);
+    assert_eq!(count(route, "out_bytes"), count(&before, "out_bytes") + 8);
+    assert!(route["start"].as_str().unwrap().ends_with('Z'));
+    let mut subs: Vec<String> = route["subscriptions_list_detail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| format!("{} {} {}", d["sid"], d["cid"], d["queue_weight"]))
+        .collect();
+    subs.sort();
+    assert_eq!(subs, ["\"R $G a\" 1 null", "\"R $G w q\" 1 1"]);
+    // Interest of a route counts among the subscriptions, unlisted.
+    let subsz = get(&servers[0], "/subsz?subs=1");
+    assert_eq!(
+        (subsz["num_subscriptions"].as_u64(), subsz["total"].as_u64()),
+        (Some(2), Some(0))
+    );
+    let subsz = get(&servers[1], "/subsz?subs=1");
+    assert_eq!(
+        (subsz["num_subscriptions"].as_u64(), subsz["total"].as_u64()),
+        (Some(2), Some(2))
+    );
 }

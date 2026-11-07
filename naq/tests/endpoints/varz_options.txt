@@ -1,0 +1,103 @@
+# Settings a configuration file changes show in /varz.
+#! server_name: s1
+#! max_payload: 2048
+#! max_control_line: 1024
+#! max_pending: 1000000
+#! ping_interval: "30s"
+#! ping_max: 3
+#! write_deadline: "3s"
+#! authorization { timeout: 4, users: [{user: a, password: p}] }
+#! websocket { port: -1, no_tls: true, same_origin: true, allowed_origins: ["http://example.com"], compression: true, handshake_timeout: "3s" }
+GET /varz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": "s1",
+<   "version": ~,
+<   "proto": 1,
+<   "go": ~,
+<   "host": "127.0.0.1",
+<   "port": ~,
+<   "auth_required": true,
+<   "max_connections": 65536,
+<   "ping_interval": 30000000000,
+<   "ping_max": 3,
+<   "http_host": "127.0.0.1",
+<   "http_port": ~,
+<   "http_base_path": "",
+<   "https_port": ~,
+<   "auth_timeout": 4,
+<   "max_control_line": 1024,
+<   "max_payload": 2048,
+<   "max_pending": 1000000,
+<   "cluster": {},
+<   "gateway": {},
+<   "leaf": {},
+<   "mqtt": {},
+<   "websocket": {
+<     "host": "0.0.0.0",
+<     "port": ~,
+<     "handshake_timeout": 3000000000,
+<     "no_tls": true,
+<     "same_origin": true,
+<     "allowed_origins": [
+<       "http://example.com"
+<     ],
+<     "compression": true
+<   },
+<   "jetstream": {},
+<   "tls_timeout": 2,
+<   "write_deadline": 3000000000,
+<   "start": ~,
+<   "now": ~,
+<   "uptime": ~,
+<   "mem": ~,
+<   "cores": ~,
+<   "gomaxprocs": ~,
+<   "cpu": ~,
+<   "connections": 0,
+<   "total_connections": 0,
+<   "routes": 0,
+<   "remotes": 0,
+<   "leafnodes": 0,
+<   "in_msgs": 0,
+<   "in_bytes": 0,
+<   "in_client_msgs": 0,
+<   "in_client_bytes": 0,
+<   "out_msgs": 0,
+<   "out_bytes": 0,
+<   "out_client_msgs": 0,
+<   "out_client_bytes": 0,
+<   "slow_consumers": 0,
+<   "stale_connections": 0,
+<   "stalled_clients": 0,
+<   "subscriptions": ~,
+<   "http_req_stats": {
+<     "/varz": 1
+<   },
+<   "config_load_time": ~,
+<   "config_digest": ~,
+<   "system_account": "$SYS",
+<   "slow_consumer_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "stale_connection_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "disk_io_wait_stats": {
+<     "waiters": 0,
+<     "waits": 0,
+<     "wait_time": 0,
+<     "max_wait_time": 0
+<   }
+< }

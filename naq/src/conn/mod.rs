@@ -1,11 +1,14 @@
 //! One client connection: `INFO`, the read loop and the writer.
 
 mod handshake;
+mod log;
 mod login;
 mod ping;
 mod read;
+mod trace;
 mod write;
 
+pub(crate) use log::How;
 pub(crate) use read::{READ_CHUNK, SpentReads, make_room, stall};
 pub(crate) use write::writer;
 
@@ -26,7 +29,7 @@ use crate::auth::Creds;
 use crate::lane::{self, Lane, Outs};
 use crate::perms::Held;
 use crate::server::Shared;
-use crate::stats::{Events, Tally};
+use crate::stats::Tally;
 
 /// How long a closed connection's writer may take to write what is left,
 /// such as to a client that stopped reading.
@@ -49,14 +52,18 @@ pub(crate) struct Client {
     pub(crate) account: Cell<u32>,
     /// Its permissions, if any limit it.
     pub(crate) held: RefCell<Option<Rc<Held>>>,
-    /// Whether `held` is set: deliveries check it.
+    /// Whether `held` is set or it is traced: deliveries check it.
     pub(crate) guarded: Cell<bool>,
+    /// Its protocol is traced.
+    pub(crate) traced: Cell<bool>,
     /// Messages it sent and got.
     pub(crate) tally: Tally,
     /// The round trip to it, as last measured.
     pub(crate) rtt: Cell<Duration>,
     /// Who it is, for monitoring.
     pub(crate) meta: RefCell<Meta>,
+    /// When it came and was last active, for monitoring.
+    pub(crate) seen: Seen,
     closed: Cell<bool>,
     /// Its account changed: the read loop checks it again.
     refresh: Cell<bool>,
@@ -81,6 +88,7 @@ impl Client {
             account: Cell::new(crate::auth::GLOBAL),
             held: RefCell::default(),
             guarded: Cell::new(false),
+            traced: Cell::new(false),
             tally: Tally::default(),
             rtt: Cell::new(Duration::ZERO),
             meta: RefCell::new(Meta {
@@ -89,10 +97,15 @@ impl Client {
                 start: std::time::SystemTime::now(),
                 websocket: false,
                 user: None,
+                how: None,
                 name: None,
                 lang: None,
                 version: None,
+                tls: None,
+                jwt: None,
+                expires: None,
             }),
+            seen: Seen::new(),
             closed: Cell::new(false),
             refresh: Cell::new(false),
             ended: Cell::new(None),
@@ -131,6 +144,9 @@ impl Client {
         let Some(sub) = self.subs.borrow_mut().remove(sid) else {
             return;
         };
+        if self.traced.get() {
+            self.trace_delsub(&lane.shared, sid);
+        }
         let (queue, account) = (sub.queue.as_deref(), self.account.get());
         lane.index(account)
             .borrow_mut()
@@ -163,6 +179,14 @@ impl Client {
         self.stop.notified().await;
     }
 
+    /// Closes the connection for `why`, unless it was closed already.
+    pub(crate) fn kick(&self, why: Close) {
+        if self.ended.get().is_none() && !self.closed.get() {
+            self.ended.set(Some(why));
+        }
+        self.close();
+    }
+
     /// Closes the connection once the writer wrote what is queued.
     pub(crate) fn close(&self) {
         if !self.closed.replace(true) {
@@ -182,10 +206,64 @@ pub(crate) struct Meta {
     pub(crate) websocket: bool,
     /// Who it logged in as, if anyone: a user name or an NKey.
     pub(crate) user: Option<String>,
+    /// What it logged in with, for its log lines.
+    pub(crate) how: Option<log::How>,
     /// From its `CONNECT`.
     pub(crate) name: Option<String>,
     pub(crate) lang: Option<String>,
     pub(crate) version: Option<String>,
+    /// Its TLS, if it came over TLS.
+    pub(crate) tls: Option<Box<crate::tls::Facts>>,
+    /// Its user JWT, if it logged in with one.
+    pub(crate) jwt: Option<Box<crate::jwt::trust::Shown>>,
+    /// When its JWT or its account's expires, the first of them, if one
+    /// does.
+    pub(crate) expires: Option<std::time::SystemTime>,
+}
+
+impl Meta {
+    /// Who it logged in as, as `nats-server` names a user in monitoring:
+    /// its user name or NKey, a JWT user's key, `[REDACTED]` for a token,
+    /// else no one.
+    pub(crate) fn raw_user(&self) -> &str {
+        match (&self.user, self.how) {
+            (Some(u), _) => u,
+            (None, Some(log::How::Token)) => "[REDACTED]",
+            _ => "",
+        }
+    }
+}
+
+/// When a client came and was last active, and how often its publishes
+/// waited for a subscriber.
+#[derive(Debug)]
+pub(crate) struct Seen {
+    /// When it was accepted, on the monotonic clock.
+    pub(crate) born: std::time::Instant,
+    /// When it last sent messages or interest, or got output.
+    pub(crate) last: Cell<std::time::Instant>,
+    pub(crate) stalls: Cell<u64>,
+}
+
+impl Seen {
+    fn new() -> Seen {
+        let now = std::time::Instant::now();
+        Seen {
+            born: now,
+            last: Cell::new(now),
+            stalls: Cell::new(0),
+        }
+    }
+
+    /// It is active now.
+    pub(crate) fn active(&self) {
+        self.last.set(std::time::Instant::now());
+    }
+
+    /// When it was last active, on the clock it came at `start` of.
+    pub(crate) fn last_at(&self, start: std::time::SystemTime) -> std::time::SystemTime {
+        start + (self.last.get() - self.born)
+    }
 }
 
 /// A subscription of a client.
@@ -213,8 +291,17 @@ enum Stage {
 pub(crate) enum Close {
     /// The client closed it, or reading failed.
     Lost,
-    /// The server closed it, as for a slow consumer.
+    /// The server closed it.
     Kicked,
+    /// It let more output wait than `max_pending`: a slow consumer.
+    SlowPending,
+    /// A write of this many bytes to it took longer than `write_deadline`:
+    /// a slow consumer.
+    SlowWrite(usize),
+    /// A write to it failed.
+    WriteError,
+    /// The server shuts down.
+    Shutdown,
     /// The client broke the protocol.
     Parse(ParseError),
     /// The `CONNECT` was not valid.
@@ -241,6 +328,32 @@ pub(crate) enum Close {
     AccountExpired,
     /// The key that signed its user no longer may: closed without a word.
     Unsigned,
+}
+
+impl Close {
+    /// Why it ended, in the words of `nats-server`.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Close::Lost => "Client Closed",
+            Close::Kicked => "Kicked",
+            Close::SlowPending => "Slow Consumer (Pending Bytes)",
+            Close::SlowWrite(_) => "Slow Consumer (Write Deadline)",
+            Close::WriteError => "Write Error",
+            Close::Shutdown => "Server Shutdown",
+            Close::Parse(ParseError::MaxPayload(_)) => "Maximum Message Payload Exceeded",
+            Close::Parse(ParseError::ControlLine) => "Maximum Control Line Exceeded",
+            Close::Parse(_) | Close::Connect | Close::NoHeaders => "Protocol Violation",
+            Close::Refused(text) if text == BAD_PROTOCOL => "Bad Client Protocol Version",
+            Close::Refused(_) => "No Responders Requires Headers",
+            Close::Stale => "Stale Connection",
+            Close::Auth | Close::Unsigned => "Authentication Failure",
+            Close::AuthTimeout => "Authentication Timeout",
+            Close::AccountConns => "Maximum Account Connections Exceeded",
+            Close::UserExpired | Close::AccountExpired => "Authentication Expired",
+            Close::MaxSubs => "Maximum Subscriptions Exceeded",
+            Close::Revoked => "Credentials Revoked",
+        }
+    }
 }
 
 /// The refusal of a `CONNECT` with a protocol other than 0 and 1.
@@ -288,6 +401,16 @@ struct Conn {
     via: Via,
     /// What its user may do, beyond the server's limits.
     bounds: Bounds,
+    watch: Watch,
+}
+
+/// Whether what a client sends goes by `watched` first, and why.
+#[derive(Debug, Clone, Copy)]
+struct Watch {
+    /// Until it authenticates, or while it is traced.
+    on: bool,
+    /// Its protocol is traced.
+    tracing: bool,
 }
 
 /// The limits of a connection's user, set as it logs in.
@@ -304,6 +427,9 @@ struct Bounds {
     /// How it logged in to a JWT account, to check itself again once the
     /// account changes.
     kept: Option<Box<crate::jwt::trust::live::Kept>>,
+    /// The account it was in as its login was refused, which
+    /// `nats-server` tells of it; the auth callout's if that refused it.
+    refused: Option<u32>,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -403,7 +529,7 @@ where
     lane.clients.borrow_mut().insert(client.id, client.clone());
     let opts = &lane.shared.opts;
     let shared = lane.shared.clone();
-    let slow = move || Events::note(&shared.events.slow_consumers);
+    let slow = move || shared.events.slow_clients.note();
     let deadline = lane.shared.opts.write_deadline;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, deadline, slow));
     client.wake_writer();
@@ -417,6 +543,11 @@ where
         max_control_line: opts.max_control_line,
         max_payload: opts.max_payload,
     };
+    let tracing = lane.shared.log.traces();
+    if tracing {
+        client.traced.set(true);
+        client.guarded.set(true);
+    }
     let mut conn = Conn {
         lane,
         client,
@@ -437,8 +568,14 @@ where
             deadline: None,
             counted: None,
             kept: None,
+            refused: None,
+        },
+        watch: Watch {
+            on: tracing || auth_by.is_some(),
+            tracing,
         },
     };
+    conn.log_created();
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;
 }
@@ -453,6 +590,9 @@ impl Conn {
     /// Queues `+OK` in verbose mode.
     fn ok(&self) {
         if self.opts.verbose {
+            if self.watch.tracing {
+                self.trace_out("OK", None);
+            }
             self.reply(encode::OK);
         }
     }
@@ -460,6 +600,9 @@ impl Conn {
     /// Queues `PONG`, and after the first since the `CONNECT`, an `INFO` for
     /// clients that take one at any time.
     fn pong(&mut self) {
+        if self.watch.tracing {
+            self.trace_out("PONG", None);
+        }
         self.reply(encode::PONG);
         if self.stage != Stage::Connected {
             return;
@@ -486,15 +629,26 @@ impl Conn {
 
     /// Queues `-ERR 'text'` for this client.
     fn error(&self, text: &str) {
+        if self.watch.tracing {
+            self.trace_out("-ERR", Some(text));
+        }
         naq_proto::encode::err(&mut *self.client.out.borrow_mut(), text);
         self.lane.mark(&self.client);
     }
 
     /// Removes the connection's interest, writes what is left and closes.
     async fn end(&mut self, close: Close, mut writer: JoinHandle<()>) {
+        // Kicked by another, it was told why.
+        let close = match (close, self.client.ended()) {
+            (Close::Kicked, Some(why)) => why,
+            _ => close,
+        };
+        self.log_why(close);
         if let Some(text) = farewell(close) {
             self.error(text);
         }
+        self.log_closed(close);
+        crate::monitor::closed(&self.lane, &self.client, close.reason());
         let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
         for sid in sids {
             self.client.unsubscribe(&self.lane, &sid);
@@ -503,10 +657,13 @@ impl Conn {
         if let Some(a) = self.bounds.counted.take() {
             self.lane.shared.uncount(a, self.client.id);
         }
+        let of = crate::sys::Of::Client(&self.client);
+        crate::sys::closed(&self.lane, of, close, self.bounds.refused);
         self.lane.shared.client_gone();
         self.lane.flush();
         self.client.ended.set(Some(close));
         self.client.close();
+        let _ending = self.lane.ending();
         if tokio::time::timeout(CLOSE_LINGER, &mut writer)
             .await
             .is_err()
@@ -534,6 +691,10 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
         | Close::Kicked
+        | Close::SlowPending
+        | Close::SlowWrite(_)
+        | Close::WriteError
+        | Close::Shutdown
         | Close::Connect
         | Close::Unsigned
         | Close::NoHeaders => None,

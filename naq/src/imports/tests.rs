@@ -103,7 +103,8 @@ fn an_import_twice_is_an_error() {
         I { imports [{service: {account: E, subject: q.a}, to: x},\n\
                      {service: {account: E, subject: q.b}, to: x}] } }";
     assert!(link_text(services).unwrap_err().contains("twice"));
-    let two = "accounts { E { exports [{service: q}] }, F { exports [{service: q}] }\n\
+    // Without the imports of the system account's services.
+    let two = "no_system_account: true\naccounts { E { exports [{service: q}] }, F { exports [{service: q}] }\n\
         I { imports [{service: {account: E, subject: q}},\n\
                      {service: {account: F, subject: q}}] } }";
     assert_eq!(link_text(two).unwrap()[3].services.len(), 2);

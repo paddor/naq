@@ -116,7 +116,7 @@ impl Creds {
         }
     }
 
-    const fn is_blank(&self) -> bool {
+    pub(crate) const fn is_blank(&self) -> bool {
         self.user.is_none()
             && self.pass.is_none()
             && self.token.is_none()
@@ -224,11 +224,13 @@ fn system_name(opts: &Options) -> Option<String> {
 /// it has one.
 pub(crate) fn system(opts: &Options, names: &[String]) -> Option<u32> {
     let chosen = system_name(opts);
+    let defined = opts.accounts.iter().any(|a| a.name == SYSTEM);
     let name = match &chosen {
         Some(n) => n.as_str(),
-        None if opts.no_system_account && !opts.accounts.iter().any(|a| a.name == SYSTEM) => {
-            return None;
-        }
+        // In operator mode, `nats-server` makes none: its `$SYS` is there
+        // before it would make it the system account.
+        None if !opts.operators.is_empty() => return None,
+        None if opts.no_system_account && !defined => return None,
         None => SYSTEM,
     };
     // Accounts are few: their count fits.
@@ -636,7 +638,7 @@ fn compare(secret: &str, given: &str, grant: &Grant) -> Check {
     }
 }
 
-fn is_bcrypt(s: &str) -> bool {
+pub(crate) fn is_bcrypt(s: &str) -> bool {
     ["$2a$", "$2b$", "$2x$", "$2y$"]
         .iter()
         .any(|p| s.starts_with(p))

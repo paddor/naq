@@ -1,0 +1,294 @@
+# /accstatz counts the connections and subscriptions of each account;
+# only accounts in use unless unused.
+#! no_system_account: true
+#! accounts {
+#!   A {
+#!     users [{user: a, password: p}]
+#!     exports [{service: svc.>}, {stream: feed.>}]
+#!   }
+#!   B {
+#!     users [{user: b, password: p}]
+#!     imports [
+#!       {service: {account: A, subject: svc.x}}
+#!       {stream: {account: A, subject: feed.>}}
+#!     ]
+#!   }
+#!   C { users [{user: c, password: p}] }
+#! }
+#= account_statz
+# Go counts what the clients of every account publish in $G, the account
+# they are in before CONNECT, and what they get in the account it was
+# published in; naq both in the account of the client.
+#- received
+#- sent
+# The harness asks /connz until a closed client shows.
+#~ /connz
+GET /accstatz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": []
+< }
+a> CONNECT {"user":"a","pass":"p"}
+a> SUB foo 1
+a> PUB foo 5
+a> hello
+b> CONNECT {"user":"b","pass":"p"}
+b> SUB feed.> 1
+b> SUB _INBOX.1 2
+b> PUB svc.x _INBOX.1 3
+b> req
+GET /accstatz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": [
+<     {
+<       "acc": "A",
+<       "name": "A",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 3,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "B",
+<       "name": "B",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 3,
+<       "slow_consumers": 0
+<     }
+<   ]
+< }
+a> PUB feed.x 4
+a> news
+GET /accstatz?unused=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": [
+<     {
+<       "acc": "$G",
+<       "name": "$G",
+<       "conns": 0,
+<       "leafnodes": 0,
+<       "total_conns": 0,
+<       "num_subscriptions": 0,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "A",
+<       "name": "A",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 3,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "B",
+<       "name": "B",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 3,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "C",
+<       "name": "C",
+<       "conns": 0,
+<       "leafnodes": 0,
+<       "total_conns": 0,
+<       "num_subscriptions": 0,
+<       "slow_consumers": 0
+<     }
+<   ]
+< }
+GET /accstatz?unused=0&acc=C
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": [
+<     {
+<       "acc": "A",
+<       "name": "A",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 3,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "B",
+<       "name": "B",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 3,
+<       "slow_consumers": 0
+<     }
+<   ]
+< }
+GET /accstatz?unused=x
+< HTTP/1.1 400 Bad Request
+< connection: close
+< content-type: text/plain; charset=utf-8
+<
+< Error decoding boolean for 'unused': strconv.ParseBool: parsing "x": invalid syntax
+a.
+GET /accstatz?unused=true
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "account_statz": [
+<     {
+<       "acc": "$G",
+<       "name": "$G",
+<       "conns": 0,
+<       "leafnodes": 0,
+<       "total_conns": 0,
+<       "num_subscriptions": 0,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "A",
+<       "name": "A",
+<       "conns": 0,
+<       "leafnodes": 0,
+<       "total_conns": 0,
+<       "num_subscriptions": 2,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "B",
+<       "name": "B",
+<       "conns": 1,
+<       "leafnodes": 0,
+<       "total_conns": 1,
+<       "num_subscriptions": 3,
+<       "slow_consumers": 0
+<     },
+<     {
+<       "acc": "C",
+<       "name": "C",
+<       "conns": 0,
+<       "leafnodes": 0,
+<       "total_conns": 0,
+<       "num_subscriptions": 0,
+<       "slow_consumers": 0
+<     }
+<   ]
+< }
+GET /varz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": ~,
+<   "version": ~,
+<   "proto": 1,
+<   "go": ~,
+<   "host": "127.0.0.1",
+<   "port": ~,
+<   "auth_required": true,
+<   "max_connections": 65536,
+<   "ping_interval": 120000000000,
+<   "ping_max": 2,
+<   "http_host": "127.0.0.1",
+<   "http_port": ~,
+<   "http_base_path": "",
+<   "https_port": ~,
+<   "auth_timeout": 2,
+<   "max_control_line": 4096,
+<   "max_payload": 1048576,
+<   "max_pending": 67108864,
+<   "cluster": {},
+<   "gateway": {},
+<   "leaf": {},
+<   "mqtt": {},
+<   "websocket": {},
+<   "jetstream": {},
+<   "tls_timeout": 2,
+<   "write_deadline": 10000000000,
+<   "start": ~,
+<   "now": ~,
+<   "uptime": ~,
+<   "mem": ~,
+<   "cores": ~,
+<   "gomaxprocs": ~,
+<   "cpu": ~,
+<   "connections": 1,
+<   "total_connections": 2,
+<   "routes": 0,
+<   "remotes": 0,
+<   "leafnodes": 0,
+<   "in_msgs": 3,
+<   "in_bytes": 12,
+<   "in_client_msgs": 3,
+<   "in_client_bytes": 12,
+<   "out_msgs": 2,
+<   "out_bytes": 9,
+<   "out_client_msgs": 2,
+<   "out_client_bytes": 9,
+<   "slow_consumers": 0,
+<   "stale_connections": 0,
+<   "stalled_clients": 0,
+<   "subscriptions": ~,
+<   "http_req_stats": {
+<     "/accstatz": 6,
+<     "/connz": ~,
+<     "/varz": 1
+<   },
+<   "config_load_time": ~,
+<   "config_digest": ~,
+<   "slow_consumer_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "stale_connection_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "disk_io_wait_stats": {
+<     "waiters": 0,
+<     "waits": 0,
+<     "wait_time": 0,
+<     "max_wait_time": 0
+<   }
+< }

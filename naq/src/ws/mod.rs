@@ -92,6 +92,7 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
         peer,
         tls: false,
         cert: None,
+        facts: None,
         deadline,
     };
     match &door.tls {
@@ -104,6 +105,7 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
                 return;
             };
             arrival.cert = acc.names(&tls);
+            arrival.facts = Some(Box::new(crate::tls::Facts::of(&tls, true)));
             let (r, w) = tokio::io::split(tls);
             arrival.tls = true;
             open(lane, r, w, arrival).await;
@@ -127,6 +129,8 @@ struct Arrival {
     tls: bool,
     /// What its certificate names, where certificates name users.
     cert: Option<Box<crate::tls::cert::Names>>,
+    /// Its TLS, for monitoring.
+    facts: Option<Box<crate::tls::Facts>>,
     /// When its upgrade must be done by, if ever.
     deadline: Option<Instant>,
 }
@@ -172,6 +176,7 @@ where
     let writer = stream::Writer::new(w, link, &u);
     hello.via.cookies = Some(Box::new(u.cookies));
     hello.via.cert = arrival.cert;
+    hello.client.meta.borrow_mut().tls = arrival.facts;
     conn::serve(lane, hello, reader, writer).await;
 }
 
@@ -208,32 +213,29 @@ async fn read_head<R: AsyncRead + Unpin>(r: &mut R) -> Option<(String, bool)> {
 /// The status and text of the close frame for a connection the server
 /// ends for `why`, as `nats-server` maps its reasons.
 pub(super) fn closing(why: Option<Close>) -> (u16, &'static str) {
-    match why {
-        Some(Close::Lost) => (frame::NORMAL, "Client Closed"),
-        Some(Close::Kicked) => (frame::POLICY, "Slow Consumer (Pending Bytes)"),
-        Some(Close::Parse(ParseError::MaxPayload(_))) => {
-            (frame::TOO_BIG, "Maximum Message Payload Exceeded")
-        }
-        Some(Close::Parse(ParseError::ControlLine)) => {
-            (frame::POLICY, "Maximum Control Line Exceeded")
-        }
-        Some(Close::Parse(_) | Close::Connect) => (frame::PROTOCOL_ERROR, "Parse Error"),
-        Some(Close::NoHeaders) => (frame::PROTOCOL_ERROR, "Protocol Violation"),
-        Some(Close::Refused(text)) if text == conn::BAD_PROTOCOL => {
-            (frame::PROTOCOL_ERROR, "Bad Client Protocol Version")
-        }
-        Some(Close::Refused(_)) => (frame::INTERNAL, "No Responders Requires Headers"),
-        Some(Close::Stale) => (frame::GOING_AWAY, "Stale Connection"),
-        Some(Close::Auth | Close::Unsigned) => (frame::POLICY, "Authentication Failure"),
-        Some(Close::AuthTimeout) => (frame::POLICY, "Authentication Timeout"),
-        Some(Close::AccountConns) => (frame::POLICY, "Maximum Account Connections Exceeded"),
-        Some(Close::UserExpired | Close::AccountExpired) => {
-            (frame::POLICY, "Authentication Expired")
-        }
-        Some(Close::MaxSubs) => (frame::POLICY, "Maximum Subscriptions Exceeded"),
-        Some(Close::Revoked) => (frame::POLICY, "Credentials Revoked"),
-        None => (frame::GOING_AWAY, "Server Shutdown"),
-    }
+    let Some(why) = why else {
+        return (frame::GOING_AWAY, "Server Shutdown");
+    };
+    let status = match why {
+        Close::Lost => frame::NORMAL,
+        Close::Parse(ParseError::MaxPayload(_)) => frame::TOO_BIG,
+        Close::Parse(ParseError::ControlLine)
+        | Close::SlowPending
+        | Close::SlowWrite(_)
+        | Close::Auth
+        | Close::Unsigned
+        | Close::AuthTimeout
+        | Close::AccountConns
+        | Close::UserExpired
+        | Close::AccountExpired
+        | Close::MaxSubs
+        | Close::Revoked => frame::POLICY,
+        Close::Parse(_) | Close::Connect | Close::NoHeaders => frame::PROTOCOL_ERROR,
+        Close::Refused(text) if text == conn::BAD_PROTOCOL => frame::PROTOCOL_ERROR,
+        Close::Stale | Close::WriteError | Close::Shutdown => frame::GOING_AWAY,
+        Close::Refused(_) | Close::Kicked => frame::INTERNAL,
+    };
+    (status, why.reason())
 }
 
 /// Reads an upgrade request and the frames after it from `data`, as a lane
@@ -338,7 +340,10 @@ mod tests {
     fn closes_get_the_status_nats_server_gives() {
         let cases = [
             (Some(Close::Lost), 1000),
-            (Some(Close::Kicked), 1008),
+            (Some(Close::Kicked), 1011),
+            (Some(Close::SlowPending), 1008),
+            (Some(Close::SlowWrite(1)), 1008),
+            (Some(Close::WriteError), 1001),
             (Some(Close::Parse(ParseError::MaxPayload(0))), 1009),
             (Some(Close::Parse(ParseError::ControlLine)), 1008),
             (Some(Close::Connect), 1002),

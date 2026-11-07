@@ -1,8 +1,8 @@
 //! Starting and stopping a server: lanes, the listener, accepting clients.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use zzq_tokio::transport::{Listener, TransportOptions};
@@ -38,17 +38,24 @@ pub(crate) struct Shared {
     pub(crate) system: Option<u32>,
     /// The directory resolver, if there is one.
     pub(crate) resolver: Option<crate::resolver::Dir>,
-    /// The hash of the server's name that replies tracked for latency end
-    /// in, with a system account, as `nats-server` makes it.
-    pub(crate) node: Option<[u8; 8]>,
+    /// What the server keeps for its services on `$SYS`.
+    pub(crate) sys: crate::sys::State,
     /// What clients must authenticate with, if anything.
     pub(crate) auth: Option<Auth>,
     /// What WebSocket clients authenticate with, where it is not `auth`.
     ws_auth: Option<Auth>,
     /// The auth callouts clients log in through, if any.
     pub(crate) callouts: Option<crate::callout::Callouts>,
-    /// Message counts of each lane.
+    /// Where the server logs to.
+    pub(crate) log: crate::log::Log,
+    /// It shuts down: no new connections.
+    pub(crate) stopping: std::sync::atomic::AtomicBool,
+    /// Message counts of the clients of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
+    /// Message counts of the links and routes of each lane.
+    pub(crate) peer_counts: Box<[stats::Shared]>,
+    /// What monitoring keeps.
+    pub(crate) monitor: crate::monitor::State,
     /// Slow consumers and stale clients so far.
     pub(crate) events: stats::Events,
     /// When the server started.
@@ -82,23 +89,38 @@ impl Shared {
         self.next_client.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Counts client `id` among the connections of `account`, unless it
-    /// has `limit` already; a negative limit is none.
-    pub(crate) fn count(&self, account: u32, id: u64, limit: i64) -> bool {
-        let Some(Ok(mut ids)) = self.accounts.get(account).map(|a| a.conns.lock()) else {
+    /// Counts client `id` among the connections of `account`, unless the
+    /// account has all it may across the cluster, as far as this server
+    /// knows.
+    pub(crate) fn count(&self, account: u32, id: u64) -> bool {
+        let Some(a) = self.accounts.get(account) else {
             return false;
         };
-        if usize::try_from(limit).is_ok_and(|l| ids.len() >= l) {
+        let limit = usize::try_from(a.limit()).ok();
+        // The others' first: the two locks do not nest.
+        let remote = limit.map_or(0, |_| self.sys.remote.conns(account));
+        let mut ids = a.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        if limit.is_some_and(|l| ids.len() + remote >= l) {
             return false;
         }
         ids.insert(id);
+        drop(ids);
+        crate::sys::conns_changed(self, account);
         true
     }
 
     /// Lets client `id` of `account` that [`Shared::count`] counted go.
     pub(crate) fn uncount(&self, account: u32, id: u64) {
-        if let Some(Ok(mut ids)) = self.accounts.get(account).map(|a| a.conns.lock()) {
-            ids.remove(&id);
+        let Some(a) = self.accounts.get(account) else {
+            return;
+        };
+        let gone = a
+            .conns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        if gone {
+            crate::sys::conns_changed(self, account);
         }
     }
 
@@ -108,9 +130,10 @@ impl Shared {
         let Ok(limit) = usize::try_from(limit) else {
             return true;
         };
-        let Some(Ok(ids)) = self.accounts.get(account).map(|a| a.conns.lock()) else {
+        let Some(a) = self.accounts.get(account) else {
             return true;
         };
+        let ids = a.conns.lock().unwrap_or_else(PoisonError::into_inner);
         ids.range(..id).count() < limit
     }
 
@@ -127,12 +150,15 @@ impl Shared {
     }
 }
 
-/// A running server. Dropping it stops the server and closes its
-/// connections.
+/// A running server. Dropping it stops the server at once and drops its
+/// connections; [`Server::shutdown`] lets them close first.
 #[derive(Debug)]
 pub struct Server {
     // Held, not used: the lanes stop when the last clone drops.
     _ctx: Context,
+    shared: Arc<Shared>,
+    /// The ports file it wrote, removed as it stops.
+    ports: Option<std::path::PathBuf>,
     addr: SocketAddr,
     monitor: Option<SocketAddr>,
     websocket: Option<SocketAddr>,
@@ -148,21 +174,19 @@ impl Server {
     /// the TLS certificates or key cannot be read,
     /// [`Error::Lanes`] if the lane threads cannot start,
     /// [`Error::Listen`] if the client, WebSocket or monitoring port cannot
-    /// be bound.
+    /// be bound, [`Error::Log`] if the log cannot be opened,
+    /// [`Error::Write`] if the process ID or ports file cannot be written.
     pub fn start(opts: &Options) -> Result<Server, Error> {
         let setup = check(opts)?;
+        let log = crate::log::Log::new(&opts.log).map_err(Error::Log)?;
         let accounts = auth::accounts(opts);
         let system = auth::system(opts, &accounts);
         let auth = Auth::new(opts, &accounts);
-        let ctx = Context::with_config(&Config {
-            io_threads: lanes(opts.lanes),
-            name: "naq".into(),
-            ..Config::default()
-        })
-        .map_err(|e| Error::Lanes(io(e)))?;
+        let ctx = context(opts)?;
         let (ports, at) = bind_all(&ctx, opts)?;
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
         let keys = Keys::new();
+        let started = std::time::SystemTime::now();
         let shared = Arc::new(Shared {
             id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
             opts: opts.clone(),
@@ -176,35 +200,76 @@ impl Server {
             server_id: keys.server.public_key(),
             keys,
             lanes: txs.into_boxed_slice(),
-            accounts: Arc::new(crate::accounts::Accounts::new(
+            accounts: Arc::new(new_accounts(
                 &accounts,
                 setup.imports,
                 setup.resolver.is_some(),
-                responses,
+                opts,
             )),
             resolver: setup.resolver,
             ws_auth: Auth::websocket(opts, auth.as_ref()),
             auth,
+            log,
+            stopping: std::sync::atomic::AtomicBool::new(false),
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
+            peer_counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
+            monitor: crate::monitor::State::new(opts, started, at.monitor),
             events: stats::Events::default(),
-            started: std::time::SystemTime::now(),
+            started,
             gone: AtomicU64::new(0),
             tls: setup.tls,
             ws: door(opts, at.ws, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
             system,
-            node: system.map(|_| node(&opts.server_name)),
+            sys: crate::sys::State::new(system.map(|_| node(&opts.server_name))),
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });
-        let mesh = run(&ctx, &shared, rxs, ports)?;
+        let mesh = run(&ctx, &shared, rxs, ports, setup.monitor_tls)?;
+        let _ = shared.monitor.mesh.set(mesh);
+        let ports = announce(&shared, &at, &mesh)?;
         Ok(Server {
             _ctx: ctx,
+            shared,
+            ports,
             addr: at.client,
             monitor: at.monitor,
             websocket: at.ws,
             mesh,
         })
+    }
+
+    /// Stops the server as `nats-server` does: it takes no more
+    /// connections, closes those it has with `Server Shutdown`, lets them
+    /// write what is left for a few seconds, then stops its lanes.
+    ///
+    /// # Panics
+    ///
+    /// Called from within an async runtime, which it would block.
+    pub fn shutdown(self) {
+        crate::stop::server(&self.shared);
+    }
+
+    /// Serves until one of `signals` stops it, and shuts it down, as
+    /// `nats-server` handles signals: `INT`, `TERM` and `USR2` stop it,
+    /// `USR1` opens the log file again, `HUP` is logged.
+    ///
+    /// # Panics
+    ///
+    /// Called from within an async runtime.
+    pub fn wait_for_signals(self, signals: crate::Signals) {
+        signals.wait(&self);
+        self.shutdown();
+    }
+
+    /// Opens the log file again at its path, as after another tool moved
+    /// it away. Without a log file, it logs that it did nothing.
+    pub fn reopen_log(&self) {
+        self.shared.log.reopen();
+    }
+
+    pub(crate) fn log(&self) -> &crate::log::Log {
+        &self.shared.log
     }
 
     /// Where clients connect.
@@ -234,6 +299,75 @@ impl Server {
     }
 }
 
+/// The accounts `names`, with `imports`, room for more if `growing`, and
+/// the connection limits `opts` give them.
+fn new_accounts(
+    names: &[String],
+    imports: Box<[crate::imports::Imports]>,
+    growing: bool,
+    opts: &Options,
+) -> crate::accounts::Accounts {
+    let accounts = crate::accounts::Accounts::new(names, imports, growing, responses);
+    for a in &opts.accounts {
+        let id = accounts.id(&a.name);
+        if let (Some(acc), Some(n)) = (id.and_then(|id| accounts.get(id)), a.max_connections) {
+            acc.set_limit(i64::from(n));
+        }
+    }
+    accounts
+}
+
+/// The engine context of the lanes `opts` ask for.
+fn context(opts: &Options) -> Result<Context, Error> {
+    Context::with_config(&Config {
+        io_threads: lanes(opts.lanes),
+        name: "naq".into(),
+        ..Config::default()
+    })
+    .map_err(|e| Error::Lanes(io(e)))
+}
+
+/// Logs the start of `shared`, bound at `at` and `mesh`, and writes its
+/// process ID and ports files. Returns the ports file.
+fn announce(
+    shared: &Shared,
+    at: &Addrs,
+    mesh: &crate::mesh::Bound,
+) -> Result<Option<std::path::PathBuf>, Error> {
+    let bound = crate::log::banner::Bound {
+        client: at.client,
+        monitor: at.monitor,
+        websocket: at.ws,
+        leafnodes: mesh.leafnodes,
+        cluster: mesh.cluster,
+    };
+    let o = &shared.opts;
+    let write = |path: &std::path::Path| {
+        let path = path.display().to_string();
+        move |source| Error::Write { path, source }
+    };
+    // Before the server says it is ready: a tool that waits for that
+    // finds the file.
+    if let Some(p) = &o.pid_file {
+        crate::files::pid(p).map_err(write(p))?;
+    }
+    crate::log::banner::log(shared, &bound);
+    let Some(dir) = &o.ports_file_dir else {
+        return Ok(None);
+    };
+    crate::files::ports(dir, o, &bound)
+        .map(Some)
+        .map_err(write(dir))
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if let Some(p) = &self.ports {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// The WebSocket port of `opts`, bound at `addr`, with TLS `tls`.
 fn door(
     opts: &Options,
@@ -260,6 +394,8 @@ struct Setup {
     imports: Box<[crate::imports::Imports]>,
     /// The directory resolver, if there is one.
     resolver: Option<crate::resolver::Dir>,
+    /// For the HTTPS monitoring port.
+    monitor_tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 /// Checks `opts` and reads the TLS files they name: for the client port,
@@ -269,6 +405,7 @@ fn check(opts: &Options) -> Result<Setup, Error> {
     let imports = crate::imports::link(opts).map_err(Error::Options)?;
     crate::leaf::validate(opts).map_err(Error::Options)?;
     crate::mesh::validate(opts).map_err(Error::Options)?;
+    crate::monitor::validate(opts)?;
     if let Some(w) = &opts.websocket {
         crate::ws::validate(w).map_err(Error::Options)?;
     }
@@ -290,6 +427,7 @@ fn check(opts: &Options) -> Result<Setup, Error> {
         leaf_tls,
         imports,
         resolver: crate::resolver::Dir::open(opts).map_err(Error::Options)?,
+        monitor_tls: crate::monitor::acceptor(opts)?,
     })
 }
 
@@ -307,6 +445,7 @@ fn run(
     shared: &Arc<Shared>,
     rxs: Vec<lane::LaneRx>,
     ports: Ports,
+    monitor_tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<crate::mesh::Bound, Error> {
     let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
     for (l, rx) in lanes.iter().zip(rxs) {
@@ -318,7 +457,7 @@ fn run(
     if let Some(m) = ports.monitor {
         let s = shared.clone();
         first
-            .spawn(move || crate::monitor::serve(m, s))
+            .spawn(move || crate::monitor::serve(m, s, monitor_tls))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     if let Some(w) = ports.ws {
@@ -388,7 +527,6 @@ fn lanes(wanted: usize) -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
-/// Binds the monitoring port, if `opts` want one.
 /// Where a server's listeners are bound.
 struct Addrs {
     client: SocketAddr,
@@ -418,8 +556,9 @@ fn bind_all(ctx: &Context, opts: &Options) -> Result<(Ports, Addrs), Error> {
     Ok((ports, at))
 }
 
+/// Binds the monitoring port, HTTP or HTTPS, if `opts` want one.
 fn bind_monitor(ctx: &Context, opts: &Options) -> Result<Option<(Listener, SocketAddr)>, Error> {
-    let Some(port) = opts.http_port else {
+    let Some(port) = opts.http_port.or(opts.https_port) else {
         return Ok(None);
     };
     let host = opts.http_host.as_deref().unwrap_or(&opts.host);
@@ -514,6 +653,9 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
                 continue;
             }
         };
+        if crate::stop::stopping(&shared) {
+            return;
+        }
         let lane = &lanes[next % lanes.len()];
         next += 1;
         let (s, index) = (shared.clone(), lane.index());

@@ -1,0 +1,192 @@
+# Paths match exactly; any method works; unclean paths are redirected.
+GET /nope
+< HTTP/1.1 404 Not Found
+< connection: close
+< content-type: text/plain; charset=utf-8
+< x-content-type-options: nosniff
+<
+< 404 page not found
+GET /VARZ
+< HTTP/1.1 404 Not Found
+< connection: close
+< content-type: text/plain; charset=utf-8
+< x-content-type-options: nosniff
+<
+< 404 page not found
+GET /healthz/
+< HTTP/1.1 404 Not Found
+< connection: close
+< content-type: text/plain; charset=utf-8
+< x-content-type-options: nosniff
+<
+< 404 page not found
+HEAD /healthz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+DELETE /healthz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {"status":"ok"}
+GET //healthz?x=1
+< HTTP/1.1 307 Temporary Redirect
+< connection: close
+< content-type: text/html; charset=utf-8
+< location: /healthz?x=1
+<
+< <a href="/healthz?x=1">Temporary Redirect</a>.
+<
+GET /a/../healthz
+< HTTP/1.1 307 Temporary Redirect
+< connection: close
+< content-type: text/html; charset=utf-8
+< location: /healthz
+<
+< <a href="/healthz">Temporary Redirect</a>.
+<
+GET /health%7A
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {"status":"ok"}
+GET /stacksz/x
+< HTTP/1.1 404 Not Found
+< connection: close
+< content-type: text/plain; charset=utf-8
+< x-content-type-options: nosniff
+<
+< 404 page not found
+RAW GET\r\n\r\n
+< HTTP/1.1 400 Bad Request\r\n
+< Content-Type: text/plain; charset=utf-8\r\n
+< Connection: close\r\n
+< \r\n
+< 400 Bad Request
+RAW GET /healthz HTTP/1.1\r\n\r\n
+< HTTP/1.1 400 Bad Request: missing required Host header\r\n
+< Content-Type: text/plain; charset=utf-8\r\n
+< Connection: close\r\n
+< \r\n
+< 400 Bad Request: missing required Host header
+RAW GET /healthz HTTP/2.0\r\nHost: x\r\n\r\n
+< HTTP/1.1 505 HTTP Version Not Supported: unsupported protocol version\r\n
+< Content-Type: text/plain; charset=utf-8\r\n
+< Connection: close\r\n
+< \r\n
+< 505 HTTP Version Not Supported: unsupported protocol version
+RAW GET healthz HTTP/1.1\r\nHost: x\r\n\r\n
+< HTTP/1.1 400 Bad Request\r\n
+< Content-Type: text/plain; charset=utf-8\r\n
+< Connection: close\r\n
+< \r\n
+< 400 Bad Request
+RAW GET /healthz HTTP/1.0\r\n\r\n
+< HTTP/1.0 200 OK\r\n
+< Access-Control-Allow-Origin: *\r\n
+< Content-Type: application/json\r\n
+< Content-Length: 15\r\n
+< \r\n
+< {"status":"ok"}
+RAW GET /healthz HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabcGET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n
+< HTTP/1.1 200 OK\r\n
+< Access-Control-Allow-Origin: *\r\n
+< Content-Type: application/json\r\n
+< Content-Length: 15\r\n
+< \r\n
+< {"status":"ok"}HTTP/1.1 200 OK\r\n
+< Access-Control-Allow-Origin: *\r\n
+< Content-Type: application/json\r\n
+< Content-Length: 15\r\n
+< Connection: close\r\n
+< \r\n
+< {"status":"ok"}
+GET /varz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": ~,
+<   "version": ~,
+<   "proto": 1,
+<   "go": ~,
+<   "host": "127.0.0.1",
+<   "port": ~,
+<   "max_connections": 65536,
+<   "ping_interval": 120000000000,
+<   "ping_max": 2,
+<   "http_host": "127.0.0.1",
+<   "http_port": ~,
+<   "http_base_path": "",
+<   "https_port": ~,
+<   "auth_timeout": 2,
+<   "max_control_line": 4096,
+<   "max_payload": 1048576,
+<   "max_pending": 67108864,
+<   "cluster": {},
+<   "gateway": {},
+<   "leaf": {},
+<   "mqtt": {},
+<   "websocket": {},
+<   "jetstream": {},
+<   "tls_timeout": 2,
+<   "write_deadline": 10000000000,
+<   "start": ~,
+<   "now": ~,
+<   "uptime": ~,
+<   "mem": ~,
+<   "cores": ~,
+<   "gomaxprocs": ~,
+<   "cpu": ~,
+<   "connections": 0,
+<   "total_connections": 0,
+<   "routes": 0,
+<   "remotes": 0,
+<   "leafnodes": 0,
+<   "in_msgs": 0,
+<   "in_bytes": 0,
+<   "in_client_msgs": 0,
+<   "in_client_bytes": 0,
+<   "out_msgs": 0,
+<   "out_bytes": 0,
+<   "out_client_msgs": 0,
+<   "out_client_bytes": 0,
+<   "slow_consumers": 0,
+<   "stale_connections": 0,
+<   "stalled_clients": 0,
+<   "subscriptions": ~,
+<   "http_req_stats": {
+<     "/healthz": 6,
+<     "/varz": 1
+<   },
+<   "config_load_time": ~,
+<   "config_digest": ~,
+<   "system_account": "$SYS",
+<   "slow_consumer_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "stale_connection_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "disk_io_wait_stats": {
+<     "waiters": 0,
+<     "waits": 0,
+<     "wait_time": 0,
+<     "max_wait_time": 0
+<   }
+< }

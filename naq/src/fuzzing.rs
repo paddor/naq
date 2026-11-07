@@ -41,6 +41,24 @@ pub fn websocket(data: &[u8]) {
     crate::ws::fuzz(data);
 }
 
+/// Reads a request to the monitoring port.
+///
+/// # Panics
+///
+/// When a path cleaned for a redirect is not clean.
+pub fn monitor(data: &[u8]) {
+    crate::monitor::fuzz(data);
+}
+
+/// Reads a request body on `$SYS` as each request reads it.
+///
+/// # Panics
+///
+/// When Go's check and `serde_json` disagree on whether it is JSON.
+pub fn sys_body(data: &[u8]) {
+    crate::sys::fuzz(data);
+}
+
 /// Decodes a JWT as each kind of claims.
 pub fn jwt(data: &[u8]) {
     let Ok(token) = std::str::from_utf8(data) else {
@@ -58,10 +76,15 @@ pub fn jwt(data: &[u8]) {
 ///
 /// # Panics
 ///
-/// When a DN is not the same as itself, or a certificate names a user
-/// that is empty.
+/// When a DN is not the same as itself, a certificate names a user that
+/// is empty, or its key info is longer than it.
 pub fn cert(data: &[u8]) {
     let names = crate::tls::cert::Names::of(data);
+    let _ = crate::tls::cert::not_after(data);
+    let _ = crate::tls::cert::subject_text(data);
+    if let Some(spki) = crate::tls::cert::spki(data) {
+        assert!(spki.len() <= data.len(), "more than the certificate");
+    }
     let user = names.user(|_| true, &[]);
     assert!(user.is_none_or(|u| !u.is_empty()), "an empty name");
     if let Some(dn) = crate::tls::dn::Dn::parse(&String::from_utf8_lossy(data)) {
@@ -109,5 +132,13 @@ mod tests {
         websocket(b"GET / HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n\x02\x82\x80\0\0\0\0\x89\x80\0\0\0\0");
         websocket(b"\x16\x03\x01\n");
         websocket(b"");
+    }
+
+    #[test]
+    fn monitoring_requests_are_read_without_panics() {
+        monitor(b"GET //a/../varz?subs=1&limit=x HTTP/1.1\r\nHost: h\r\n\r\n");
+        monitor(b"GET /varz HTTP/1.1\r\nHost: h\r\n\r\n");
+        monitor(b"BAD\r\n\r\n");
+        monitor(b"");
     }
 }

@@ -1,5 +1,10 @@
 //! Server settings.
 
+mod log;
+
+pub use log::{LogTo, Logging, Trace};
+
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Server settings. The defaults are those of `nats-server`.
@@ -14,6 +19,11 @@ pub struct Options {
     pub lanes: usize,
     /// Name in `INFO`.
     pub server_name: String,
+    /// Tags of the server, trimmed and lowercase (`server_tags`):
+    /// requests on `$SYS` pick servers by them.
+    pub server_tags: Vec<String>,
+    /// What the server tells of itself on `$SYS` (`server_metadata`).
+    pub server_metadata: BTreeMap<String, String>,
     /// Largest message a client may publish, headers included
     /// (`max_payload`).
     pub max_payload: usize,
@@ -53,11 +63,22 @@ pub struct Options {
     /// How long a client has to authenticate, from the moment it connects
     /// (`authorization { timeout }`).
     pub auth_timeout: Duration,
-    /// Port for monitoring over HTTP (`http_port`): `/healthz`, `/varz`,
-    /// `/connz`, `/leafz`. `None` serves none; 0 picks a free port.
+    /// Port for monitoring over HTTP (`http_port`, `http`): the endpoints
+    /// of `nats-server`, such as `/healthz`, `/varz` and `/connz`. `None`
+    /// serves none; 0 picks a free port. Not with [`Options::https_port`].
     pub http_port: Option<u16>,
-    /// Host for monitoring; `None` for [`Options::host`] (`http`).
+    /// Port for monitoring over HTTPS (`https_port`, `https`), with the
+    /// certificate of [`Options::tls`], which it needs. Clients present no
+    /// certificate.
+    pub https_port: Option<u16>,
+    /// Host for monitoring; `None` for [`Options::host`] (`http`, `https`).
     pub http_host: Option<String>,
+    /// Closed connections monitoring keeps for `/connz` (`max_closed_clients`):
+    /// the newest that many. 0 keeps 10000, the default.
+    pub max_closed_clients: usize,
+    /// The path monitoring is served under (`http_base_path`): `/mon`
+    /// serves `/mon/varz`. Empty for the root.
+    pub http_base_path: String,
     /// TLS for every client (`tls`).
     pub tls: Option<Tls>,
     /// WebSocket clients, on a port of their own (`websocket`).
@@ -96,6 +117,17 @@ pub struct Options {
     /// Account JWTs the resolver starts with, by the account's public key
     /// (`resolver_preload`).
     pub resolver_preload: Vec<(String, String)>,
+    /// What the server logs, and where to.
+    pub log: Logging,
+    /// The configuration file the options came from, as
+    /// [`Options::from_file`] sets it.
+    pub config_file: Option<std::path::PathBuf>,
+    /// Where the server writes its process ID as it starts (`pid_file`).
+    pub pid_file: Option<std::path::PathBuf>,
+    /// Where the server writes the URLs it listens at as it starts, in a
+    /// file of the program's name and process ID, removed as it stops
+    /// (`ports_file_dir`).
+    pub ports_file_dir: Option<std::path::PathBuf>,
 }
 
 /// Where the JWTs of accounts come from (`resolver`).
@@ -233,6 +265,9 @@ pub struct Account {
     pub exports: Vec<Export>,
     /// What it takes from other accounts (`imports`).
     pub imports: Vec<Import>,
+    /// The most clients it may have across the cluster (`limits {
+    /// max_connections }`); `None` for no limit.
+    pub max_connections: Option<u32>,
 }
 
 impl From<&str> for Account {
@@ -501,6 +536,8 @@ impl Default for Options {
             port: 4222,
             lanes: 0,
             server_name: "naq".into(),
+            server_tags: Vec::new(),
+            server_metadata: BTreeMap::new(),
             max_payload: 1 << 20,
             max_control_line: 4096,
             max_pending: 64 << 20,
@@ -526,9 +563,16 @@ impl Default for Options {
             resolver: None,
             resolver_preload: Vec::new(),
             http_port: None,
+            https_port: None,
             http_host: None,
+            http_base_path: String::new(),
+            max_closed_clients: 10_000,
             tls: None,
             websocket: None,
+            log: Logging::default(),
+            config_file: None,
+            pid_file: None,
+            ports_file_dir: None,
         }
     }
 }

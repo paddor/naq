@@ -174,6 +174,7 @@ fn placed(
         expires: [exp, end].into_iter().flatten().min(),
         account_expires: None,
         kept: None,
+        shown: Box::new(trust::Shown::placed(user, &user.aud)),
     })
 }
 

@@ -1,0 +1,478 @@
+# Closed connections, with why they closed, newest first by stop. What
+# was left to write when the server closed one depends on timing.
+a> CONNECT {"verbose":false,"name":"a"}
+a> SUB x 1
+a> SUB y q 2
+a.
+b> CONNECT {"verbose":false,"name":"b"}
+b> BOGUS
+c> CONNECT {"verbose":false,"name":"c"}
+c> PUB foo 999999999
+d> CONNECT {"verbose":false,"name":"d"}
+GET /connz?state=closed
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 2,
+<       "name": "a"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Protocol Violation",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Maximum Message Payload Exceeded",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "c"
+<     }
+<   ]
+< }
+GET /connz?state=closed&sort=reason
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 2,
+<       "name": "a"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Maximum Message Payload Exceeded",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "c"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Protocol Violation",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     }
+<   ]
+< }
+GET /connz?state=closed&sort=stop
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 3,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Maximum Message Payload Exceeded",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "c"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Protocol Violation",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 2,
+<       "name": "a"
+<     }
+<   ]
+< }
+GET /connz?state=any&sort=cid
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 4,
+<   "total": 4,
+<   "offset": 0,
+<   "limit": 1024,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 2,
+<       "name": "a"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Protocol Violation",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "b"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Maximum Message Payload Exceeded",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "c"
+<     },
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "d"
+<     }
+<   ]
+< }
+GET /connz?state=closed&subs=detail&cid=$CID_a
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "subscriptions_list_detail": [
+<         {
+<           "account": "$G",
+<           "account_tag": "$G",
+<           "subject": "x",
+<           "sid": "1",
+<           "msgs": 0,
+<           "cid": ~
+<         },
+<         {
+<           "account": "$G",
+<           "account_tag": "$G",
+<           "subject": "y",
+<           "qgroup": "q",
+<           "sid": "2",
+<           "msgs": 0,
+<           "cid": ~
+<         }
+<       ]
+<     }
+<   ]
+< }
+GET /connz?state=closed&subs=1&auth=1&cid=$CID_a
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 3,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "stop": ~,
+<       "reason": "Client Closed",
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 2,
+<       "name": "a",
+<       "subscriptions_list": [
+<         "x",
+<         "y"
+<       ]
+<     }
+<   ]
+< }
+GET /connz?state=any&cid=$CID_d
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "num_connections": 1,
+<   "total": 4,
+<   "offset": 0,
+<   "limit": 1,
+<   "connections": [
+<     {
+<       "cid": ~,
+<       "kind": "Client",
+<       "type": "nats",
+<       "ip": "127.0.0.1",
+<       "port": ~,
+<       "start": ~,
+<       "last_activity": ~,
+<       "rtt": ~,
+<       "uptime": ~,
+<       "idle": ~,
+<       "pending_bytes": ~,
+<       "in_msgs": 0,
+<       "out_msgs": 0,
+<       "in_bytes": 0,
+<       "out_bytes": 0,
+<       "subscriptions": 0,
+<       "name": "d"
+<     }
+<   ]
+< }

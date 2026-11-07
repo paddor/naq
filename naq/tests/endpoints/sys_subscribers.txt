@@ -1,0 +1,67 @@
+# $SYS.DEBUG.SUBSCRIBERS counts the subscribers of a subject, or of a
+# queue group on it, in the account that asks: through an import of the
+# system account's export, or in the system account itself. A filter
+# with wildcards counts the subscriptions within it. nats-server takes the
+# import only of an export in the config.
+#! server_name: s1
+#! accounts {
+#!   SYS {
+#!     users [{user: sys, password: p}]
+#!     exports [{service: "$SYS.DEBUG.SUBSCRIBERS"}]
+#!   }
+#!   A {
+#!     users [{user: a, password: p}]
+#!     imports [{service: {account: SYS, subject: "$SYS.DEBUG.SUBSCRIBERS"}}]
+#!   }
+#! }
+#! system_account: SYS
+a> CONNECT {"user":"a","pass":"p"}
+a> SUB foo.bar 1
+a> SUB foo.bar q 2
+a> SUB foo.* q 3
+a> SUB foo.> 4
+a> SUB _R.> 5
+a< 0
+b> CONNECT {"user":"a","pass":"p"}
+b> SUB foo.bar 1
+b> SUB foo.baz r 2
+b< 0
+a> PUB $SYS.DEBUG.SUBSCRIBERS _R.1 $LEN
+a> foo.bar
+a< 1
+< MSG _R.1 5
+< 5
+a> PUB $SYS.DEBUG.SUBSCRIBERS _R.2 $LEN
+a> foo.bar q
+a< 1
+< MSG _R.2 5
+< 2
+a> PUB $SYS.DEBUG.SUBSCRIBERS _R.3 $LEN
+a> foo.*
+a< 1
+< MSG _R.3 5
+< 5
+a> PUB $SYS.DEBUG.SUBSCRIBERS _R.4 $LEN
+a> foo.> q
+a< 1
+< MSG _R.4 5
+< 2
+a> PUB $SYS.DEBUG.SUBSCRIBERS _R.5 $LEN
+a>  foo.baz   r
+a< 1
+< MSG _R.5 5
+< 0
+a> PUB $SYS.DEBUG.SUBSCRIBERS _R.6 0
+a>
+a< 1
+< MSG _R.6 5
+< 0
+s> CONNECT {"user":"sys","pass":"p"}
+s> SUB _R.> 1
+s> SUB foo.bar 2
+s< 0
+s> PUB $SYS.DEBUG.SUBSCRIBERS _R.1 $LEN
+s> foo.bar
+s< 1
+< MSG _R.1 1
+< 1

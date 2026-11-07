@@ -53,18 +53,17 @@ impl Pinger {
         }
     }
 
+    /// The round trip as far as it is known at a `CONNECT` at `now`: the
+    /// time from the connection to it, as `nats-server` takes it.
+    pub(super) fn first_rtt(&self, now: Instant) -> Duration {
+        now - self.start
+    }
+
     /// After a `CONNECT` at `now`: the next `PING` comes early, delayed by
     /// `jitter` so that clients that connect together do not get theirs
-    /// together. Returns the round trip as far as it is known: the time
-    /// from the connection to its `CONNECT`, as `nats-server` takes it.
-    pub(super) fn connected(
-        &mut self,
-        now: Instant,
-        interval: Duration,
-        jitter: Duration,
-    ) -> Duration {
+    /// together.
+    pub(super) fn connected(&mut self, now: Instant, interval: Duration, jitter: Duration) {
         self.next = now + interval.min(FIRST) + jitter;
-        now - self.start
     }
 
     /// The client sent messages, subscriptions or a `PING`.
@@ -116,13 +115,13 @@ mod tests {
         let t0 = Instant::now();
         let mut p = Pinger::new(t0, 2 * MIN);
         assert_eq!(p.next, t0 + 2 * MIN);
-        let rtt = p.connected(
+        p.connected(
             t0 + Duration::from_millis(3),
             2 * MIN,
             Duration::from_millis(100),
         );
         assert_eq!(
-            rtt,
+            p.first_rtt(t0 + Duration::from_millis(3)),
             Duration::from_millis(3),
             "from the connection to its CONNECT"
         );

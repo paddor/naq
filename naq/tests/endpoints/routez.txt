@@ -1,0 +1,171 @@
+# Routes and leaf node links, with none up, and the options they refuse.
+#! server_name: s1
+#! cluster { name: c1, listen: "127.0.0.1:-1", routes: ["nats-route://127.0.0.1:1"] }
+GET /routez
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": "s1",
+<   "now": ~,
+<   "num_routes": 0,
+<   "routes": []
+< }
+GET /routez?subs=1
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": "s1",
+<   "now": ~,
+<   "num_routes": 0,
+<   "routes": []
+< }
+GET /routez?subs=detail
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": "s1",
+<   "now": ~,
+<   "num_routes": 0,
+<   "routes": []
+< }
+GET /routez?subs=maybe
+< HTTP/1.1 400 Bad Request
+< connection: close
+< content-type: text/plain; charset=utf-8
+<
+< Error decoding boolean for 'subs': strconv.ParseBool: parsing "maybe": invalid syntax
+GET /leafz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "leafnodes": 0,
+<   "leafs": []
+< }
+GET /leafz?subs=1&acc=nope
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "now": ~,
+<   "leafnodes": 0,
+<   "leafs": []
+< }
+GET /leafz?subs=detail
+< HTTP/1.1 400 Bad Request
+< connection: close
+< content-type: text/plain; charset=utf-8
+<
+< Error decoding boolean for 'subs': strconv.ParseBool: parsing "detail": invalid syntax
+GET /varz
+< HTTP/1.1 200 OK
+< access-control-allow-origin: *
+< connection: close
+< content-type: application/json
+<
+< {
+<   "server_id": ~,
+<   "server_name": "s1",
+<   "version": ~,
+<   "proto": 1,
+<   "go": ~,
+<   "host": "127.0.0.1",
+<   "port": ~,
+<   "max_connections": 65536,
+<   "ping_interval": 120000000000,
+<   "ping_max": 2,
+<   "http_host": "127.0.0.1",
+<   "http_port": ~,
+<   "http_base_path": "",
+<   "https_port": ~,
+<   "auth_timeout": 2,
+<   "max_control_line": 4096,
+<   "max_payload": 1048576,
+<   "max_pending": 67108864,
+<   "cluster": {
+<     "name": "c1",
+<     "addr": "127.0.0.1",
+<     "cluster_port": ~,
+<     "auth_timeout": 2,
+<     "urls": [
+<       "127.0.0.1:1"
+<     ],
+<     "tls_timeout": 2
+<   },
+<   "gateway": {},
+<   "leaf": {},
+<   "mqtt": {},
+<   "websocket": {},
+<   "jetstream": {},
+<   "tls_timeout": 2,
+<   "write_deadline": 10000000000,
+<   "start": ~,
+<   "now": ~,
+<   "uptime": ~,
+<   "mem": ~,
+<   "cores": ~,
+<   "gomaxprocs": ~,
+<   "cpu": ~,
+<   "connections": 0,
+<   "total_connections": 0,
+<   "routes": 0,
+<   "remotes": 0,
+<   "leafnodes": 0,
+<   "in_msgs": 0,
+<   "in_bytes": 0,
+<   "in_client_msgs": 0,
+<   "in_client_bytes": 0,
+<   "out_msgs": 0,
+<   "out_bytes": 0,
+<   "out_client_msgs": 0,
+<   "out_client_bytes": 0,
+<   "slow_consumers": 0,
+<   "stale_connections": 0,
+<   "stalled_clients": 0,
+<   "subscriptions": ~,
+<   "http_req_stats": {
+<     "/leafz": 3,
+<     "/routez": 3,
+<     "/varz": 1
+<   },
+<   "config_load_time": ~,
+<   "config_digest": ~,
+<   "system_account": "$SYS",
+<   "slow_consumer_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "stale_connection_stats": {
+<     "clients": 0,
+<     "routes": 0,
+<     "gateways": 0,
+<     "leafs": 0
+<   },
+<   "disk_io_wait_stats": {
+<     "waiters": 0,
+<     "waits": 0,
+<     "wait_time": 0,
+<     "max_wait_time": 0
+<   }
+< }

@@ -4,6 +4,7 @@
 //! Both are taps: interest an index holds on every lane, the same on each,
 //! that the lane a message comes in on acts on once it routed it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -56,6 +57,9 @@ pub(crate) struct Responses {
     /// requests into the account.
     prefix: [u8; 11],
     pending: Mutex<FxHashMap<[u8; 6], Response>>,
+    /// A request went in: `nats-server` then has a subscription to the
+    /// replies.
+    asked: AtomicBool,
 }
 
 /// Where the responses to one request go.
@@ -86,6 +90,7 @@ impl Responses {
         Responses {
             prefix,
             pending: Mutex::default(),
+            asked: AtomicBool::new(false),
         }
     }
 
@@ -94,6 +99,12 @@ impl Responses {
         let mut f = self.prefix.to_vec();
         f.push(b'>');
         f
+    }
+
+    /// Whether a request went in.
+    pub(crate) fn asked(&self) -> bool {
+        // Relaxed: see `wait`.
+        self.asked.load(Ordering::Relaxed)
     }
 
     /// Drops the requests older than their threshold at `now`. Returns
@@ -138,6 +149,8 @@ impl Responses {
         };
         let tracked = r.track.is_some();
         pending.insert(token, r);
+        // Relaxed: monitoring reads it now and then; nothing hangs on it.
+        self.asked.store(true, Ordering::Relaxed);
         out.extend_from_slice(&self.prefix);
         out.extend_from_slice(&token);
         if let Some(node) = node.filter(|_| tracked) {
@@ -502,7 +515,7 @@ impl Run<'_, '_> {
             }
             Some(r) => {
                 let waiting = waiting(si, w.account, r, track);
-                let node = lane.shared.node.as_ref();
+                let node = lane.shared.sys.node.as_ref();
                 let Some(t) = responses.wait(waiting, |n| lane.below(n), node, &mut reply) else {
                     imported.subject = subject;
                     imported.headers = headers;
@@ -543,18 +556,19 @@ impl Run<'_, '_> {
         let imported = self.out.imported(lane);
         let src = message(m, &imported.arena, w.msg);
         // Copied out: the answer goes into the arena it lies in.
-        let (subject, reply, payload) = (
+        let (subject, reply, headers, payload) = (
             src.subject.to_vec(),
             src.reply.map(<[u8]>::to_vec),
+            src.headers.map(<[u8]>::to_vec),
             src.payload.to_vec(),
         );
         let m = Pub {
             subject: &subject,
             reply: reply.as_deref(),
-            headers: None,
+            headers: headers.as_deref(),
             payload: &payload,
         };
-        crate::sys::answer(lane, self.out, s, &m)
+        crate::sys::answer(lane, self.out, s, &m, self.from.client)
     }
 
     /// Hands the answer `w` holds to the auth callout request it names.
@@ -570,7 +584,8 @@ impl Run<'_, '_> {
         let imported = self.out.imported(lane);
         let src = message(m, &imported.arena, w.msg);
         let empty = src.headers.is_none() && src.payload.is_empty();
-        let src_reply = src.reply.map(<[u8]>::to_vec);
+        // The server's own answers have an empty reply: none.
+        let src_reply = src.reply.filter(|r| !r.is_empty()).map(<[u8]>::to_vec);
         let Some((token, mut wait)) = r.take(src.subject) else {
             return false;
         };
@@ -719,13 +734,18 @@ fn details(lane: &Lane, c: &Client) -> ClientInfo {
     let mut ci = ClientInfo {
         account: lane.shared.accounts.name(c.account.get()).to_owned(),
         rtt: u64::try_from(c.rtt.get().as_nanos()).unwrap_or(u64::MAX),
-        start: Some(crate::monitor::rfc3339(meta.start)),
+        start: Some(crate::times::rfc3339(meta.start)),
         host: meta.ip.clone(),
         id: c.id,
         user: meta.user.clone().unwrap_or_default(),
         name: meta.name.clone().unwrap_or_default(),
         lang: meta.lang.clone().unwrap_or_default(),
         version: meta.version.clone().unwrap_or_default(),
+        name_tag: meta
+            .jwt
+            .as_ref()
+            .map(|j| j.user_name.clone())
+            .unwrap_or_default(),
         kind: "Client".into(),
         client_type: if meta.websocket { "websocket" } else { "nats" }.into(),
         ..ClientInfo::default()

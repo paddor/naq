@@ -146,7 +146,7 @@ fn protocol_errors_get_their_err_then_a_close_frame() {
         data.ends_with("-ERR 'Unknown Protocol Operation'\r\n"),
         "{data}"
     );
-    assert_eq!(end, Some(close(1002, "Parse Error")));
+    assert_eq!(end, Some(close(1002, "Protocol Violation")));
 }
 
 #[test]
@@ -335,4 +335,46 @@ fn wss_clients_log_in_as_the_users_their_certificates_name() {
         "-ERR 'Authorization Violation'"
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn connz_shows_a_websocket_client_as_such() {
+    let server = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        http_port: Some(0),
+        websocket: Some(Websocket {
+            host: "127.0.0.1".into(),
+            ..plain()
+        }),
+        ..Options::default()
+    })
+    .unwrap();
+    let mut ws = tcp(&server);
+    upgrade(&mut ws);
+    ws.write_all(&frame(
+        0x2,
+        b"CONNECT {\"verbose\":false,\"name\":\"w\"}\r\nPING\r\n",
+    ))
+    .unwrap();
+    let mut got = String::new();
+    while !got.ends_with("PONG\r\n") {
+        let (_, payload) = next(&mut ws).unwrap();
+        got += std::str::from_utf8(&payload).unwrap();
+    }
+    let mut monitor = TcpStream::connect(server.monitor_addr().unwrap()).unwrap();
+    monitor
+        .write_all(b"GET /connz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut text = String::new();
+    monitor.read_to_string(&mut text).unwrap();
+    let connz: serde_json::Value =
+        serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let c = &connz["connections"][0];
+    assert_eq!(
+        (c["type"].as_str(), c["name"].as_str()),
+        (Some("websocket"), Some("w")),
+        "{connz}"
+    );
 }

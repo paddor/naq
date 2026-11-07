@@ -25,7 +25,8 @@ const HUBS: usize = 2;
 /// Leaf `k` is server `HUBS + k`, and dials hub `k % HUBS` first.
 const LEAFS: usize = 3;
 
-/// Options of server `name` with two lanes and monitoring.
+/// Options of server `name` with two lanes, monitoring and no system
+/// account.
 fn base(name: &str) -> Options {
     Options {
         host: "127.0.0.1".into(),
@@ -34,6 +35,9 @@ fn base(name: &str) -> Options {
         http_port: Some(0),
         server_name: name.into(),
         leaf_reconnect: Duration::from_millis(50),
+        // What routes tell is then the interest of clients, without the
+        // server's own in the system account.
+        no_system_account: true,
         ..Options::default()
     }
 }

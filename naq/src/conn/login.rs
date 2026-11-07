@@ -64,12 +64,26 @@ impl Conn {
     /// Applies a `CONNECT`.
     #[inline(never)]
     pub(super) fn connect(&mut self, json: &[u8]) -> Result<Step, Close> {
+        self.client.seen.active();
+        // As `nats-server`: estimated at every `CONNECT`, before the login.
+        let rtt = self.ping.first_rtt(Instant::now());
+        self.client.rtt.set(rtt);
         let (mut creds, names) = self.opts.apply(json).map_err(|_| Close::Connect)?;
         if let Some(cookies) = &self.via.cookies {
             creds.fill(cookies);
         }
         self.client.headers.set(self.opts.headers);
-        self.login(creds, names, false)
+        let login = self.login(creds, names, false);
+        self.refused(login)
+    }
+
+    /// Notes the account the client was in if `login` was refused.
+    pub(super) fn refused<T>(&mut self, login: Result<T, Close>) -> Result<T, Close> {
+        if matches!(login, Err(Close::Auth)) {
+            let account = self.client.account.get();
+            self.bounds.refused.get_or_insert(account);
+        }
+        login
     }
 
     /// Logs the client in with `creds` and `names`: once more if
@@ -100,7 +114,13 @@ impl Conn {
             let mut meta = self.client.meta.borrow_mut();
             (meta.name, meta.lang, meta.version) = names;
             meta.websocket = self.via.ws;
-            meta.user = creds.user.or(creds.nkey);
+            meta.how = super::log::How::of(&creds);
+            // A client without credentials is the no_auth_user, if any.
+            let free = auth
+                .filter(|_| creds.is_blank())
+                .and_then(|a| a.id_of(&creds))
+                .map(str::to_owned);
+            meta.user = creds.user.or(creds.nkey).or(free);
         }
         // A user of the service may not ask for others in its account.
         let own = |account: u32, perms: Option<std::sync::Arc<crate::perms::Perms>>| match hook {
@@ -115,7 +135,7 @@ impl Conn {
             }
             (Some(Check::Pass(mut g)), _) => {
                 g.perms = own(g.account, g.perms.take());
-                self.bind(g);
+                self.bind(g)?;
                 return self.connected().map(|()| Step::Next);
             }
             (Some(Check::User(mut u)), _) => {
@@ -183,10 +203,7 @@ impl Conn {
             return Err(Close::Auth);
         }
         match check {
-            Some(Check::Pass(account)) => {
-                self.bind(account);
-                Ok(())
-            }
+            Some(Check::Pass(account)) => self.bind(account),
             _ => Err(Close::Auth),
         }
     }
@@ -239,7 +256,7 @@ impl Conn {
                 let grant = p.grant.clone();
                 let holds = tokio::task::spawn_blocking(move || p.holds()).await;
                 if matches!(holds, Ok(true)) {
-                    self.bind(grant);
+                    self.bind(grant)?;
                     return self.connected();
                 }
                 match call {
@@ -287,9 +304,14 @@ impl Conn {
             }
         };
         drop(ticket);
-        let payload = answer.ok_or(Close::Auth)?;
-        let mut user = callout::response::decide(&c.ask, &payload, &shared, self.kind())
-            .map_err(|_| Close::Auth)?;
+        let decided = answer.and_then(|payload| {
+            callout::response::decide(&c.ask, &payload, &shared, self.kind()).ok()
+        });
+        let Some(mut user) = decided else {
+            // A refusal goes to the callout's account.
+            self.bounds.refused = Some(account);
+            return Err(Close::Auth);
+        };
         if user.account == account {
             user.perms = Some(callout::guarded(user.perms.as_deref()));
         }
@@ -297,22 +319,51 @@ impl Conn {
         self.connected()
     }
 
-    /// Puts the client into `account`. Subscriptions in another it had are
-    /// dropped, as a new `CONNECT` drops them in `nats-server`.
-    pub(super) fn bind(&mut self, grant: Grant) {
+    /// Puts the client into the account of `grant`, unless the account has
+    /// all the clients it may across the cluster.
+    pub(super) fn bind(&mut self, grant: Grant) -> Result<(), Close> {
+        self.join(grant.account)?;
         self.auth_by = None;
-        self.out.account = grant.account;
+        self.watch.on = self.watch.tracing;
         let held = grant.perms.map(|p| Rc::new(Held::new(p)));
-        self.client.guarded.set(held.is_some());
+        self.client
+            .guarded
+            .set(held.is_some() || self.client.traced.get());
         *self.client.held.borrow_mut() = held;
-        if self.client.account.get() == grant.account {
+        self.enter(grant.account);
+        Ok(())
+    }
+
+    /// Counts the client among the clients of `account`, unless it has all
+    /// it may across the cluster: then the client goes, refused by it, as
+    /// in `nats-server`.
+    fn join(&mut self, account: u32) -> Result<(), Close> {
+        if self.bounds.counted == Some(account) {
+            return Ok(());
+        }
+        let shared = self.lane.shared.clone();
+        if !shared.count(account, self.client.id) {
+            self.enter(account);
+            return Err(Close::AccountConns);
+        }
+        if let Some(a) = self.bounds.counted.replace(account) {
+            shared.uncount(a, self.client.id);
+        }
+        Ok(())
+    }
+
+    /// Moves the client to `account`. Subscriptions in another it had are
+    /// dropped, as a new `CONNECT` drops them in `nats-server`.
+    fn enter(&mut self, account: u32) {
+        self.out.account = account;
+        if self.client.account.get() == account {
             return;
         }
         let sids: Vec<_> = self.client.subs.borrow().keys().cloned().collect();
         for sid in sids {
             self.client.unsubscribe(&self.lane, &sid);
         }
-        self.client.account.set(grant.account);
+        self.client.account.set(account);
     }
 
     /// Puts the client into the account of user `u` of a JWT, with its
@@ -321,31 +372,30 @@ impl Conn {
     #[inline(never)]
     fn bind_user(&mut self, u: &crate::jwt::trust::User) -> Result<(), Close> {
         let shared = self.lane.shared.clone();
-        if self.bounds.counted != Some(u.account) {
-            if !shared.count(u.account, self.client.id, u.conns) {
-                return Err(Close::AccountConns);
-            }
-            if let Some(a) = self.bounds.counted.replace(u.account) {
-                shared.uncount(a, self.client.id);
-            }
+        if let Some(a) = shared.accounts.get(u.account) {
+            a.set_limit(u.conns);
         }
         self.bind(Grant {
             account: u.account,
             perms: u.perms.clone(),
-        });
+        })?;
         let server = shared.opts.max_payload;
         self.bounds.limits.max_payload =
             usize::try_from(u.payload).map_or(server, |p| p.min(server));
         self.bounds.subs = u.subs;
         let user = u.expires.map(|t| (t, false));
         let account = u.account_expires.map(|t| (t, true));
-        self.bounds.deadline = deadline(u.subs, 0, [user, account].into_iter().flatten().min());
+        let expires = [user, account].into_iter().flatten().min();
+        self.bounds.deadline = deadline(u.subs, 0, expires);
         self.bounds.kept.clone_from(&u.kept);
         if shared.resolver.is_some() {
             // The taps of an account added since this lane was told.
             crate::imports::service::install_account(&self.lane, u.account);
         }
-        self.client.meta.borrow_mut().user = Some(u.key.clone());
+        let mut meta = self.client.meta.borrow_mut();
+        meta.user = Some(u.key.clone());
+        meta.jwt = Some(u.shown.clone());
+        meta.expires = expires.map(|(t, _)| t);
         Ok(())
     }
 
@@ -369,6 +419,9 @@ impl Conn {
             Refresh::Goes(Gone::Unsigned) => return Err(Close::Unsigned),
         };
         let account = self.client.account.get();
+        if let Some(a) = shared.accounts.get(account) {
+            a.set_limit(s.conns);
+        }
         // The newest connections past the limit go first.
         if !shared.kept(account, self.client.id, s.conns) {
             return Err(Close::AccountConns);
@@ -386,7 +439,7 @@ impl Conn {
             self.bind(Grant {
                 account,
                 perms: defaults.0,
-            });
+            })?;
             self.drop_forbidden();
         }
         self.lane.flush();
@@ -429,13 +482,13 @@ impl Conn {
 
     /// The rest of a `CONNECT`, from a client that is who it says.
     fn connected(&mut self) -> Result<(), Close> {
+        crate::sys::connected(&self.lane, crate::sys::Of::Client(&self.client));
         if self.stage == Stage::Fresh {
             self.stage = Stage::Connected;
         }
         let interval = self.ping.interval;
         let jitter = super::ping::jitter(interval, |n| self.lane.below(n));
-        let rtt = self.ping.connected(Instant::now(), interval, jitter);
-        self.client.rtt.set(rtt);
+        self.ping.connected(Instant::now(), interval, jitter);
         if !(0..=1).contains(&self.opts.protocol) {
             return Err(Close::Refused(super::BAD_PROTOCOL));
         }

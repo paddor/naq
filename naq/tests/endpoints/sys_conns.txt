@@ -1,0 +1,558 @@
+# The connections of an account on $SYS: each change goes out on the old
+# subject, then the new, before CONNECT or after the client is gone,
+# before DISCONNECT. A client past max_connections is refused, and its
+# DISCONNECT is in the account it was refused by. A CONNS request gets the
+# same counts.
+#! server_name: s1
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#!   A {
+#!     users [{user: a, password: p}]
+#!     limits { max_connections: 2 }
+#!   }
+#! }
+#! system_account: SYS
+#~ id
+#~ time
+#~ seq
+#~ ver
+#~ timestamp
+s> CONNECT {"user":"sys","pass":"p","headers":true}
+s< 0
+s> SUB $SYS.SERVER.ACCOUNT.A.CONNS 1
+s> SUB $SYS.ACCOUNT.A.SERVER.CONNS 2
+s> SUB $SYS.ACCOUNT.A.CONNECT 3
+s> SUB $SYS.ACCOUNT.A.DISCONNECT 4
+s> SUB _R.> 5
+s< 0
+a> CONNECT {"user":"a","pass":"p","name":"one"}
+a< 0
+s< 3
+< MSG $SYS.SERVER.ACCOUNT.A.CONNS 1
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "A",
+<   "name": "A",
+<   "conns": 1,
+<   "leafnodes": 0,
+<   "total_conns": 1,
+<   "num_subscriptions": 4,
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+< MSG $SYS.ACCOUNT.A.SERVER.CONNS 2
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "A",
+<   "name": "A",
+<   "conns": 1,
+<   "leafnodes": 0,
+<   "total_conns": 1,
+<   "num_subscriptions": 4,
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+< MSG $SYS.ACCOUNT.A.CONNECT 3
+< {
+<   "type": "io.nats.server.advisory.v1.client_connect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "A",
+<     "user": "a",
+<     "name": "one",
+<     "name_tag": "A",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   }
+< }
+a> SUB x 1
+a< 0
+b> CONNECT {"user":"a","pass":"p","name":"two"}
+b< 0
+s< 3
+< MSG $SYS.SERVER.ACCOUNT.A.CONNS 1
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "A",
+<   "name": "A",
+<   "conns": 2,
+<   "leafnodes": 0,
+<   "total_conns": 2,
+<   "num_subscriptions": 5,
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+< MSG $SYS.ACCOUNT.A.SERVER.CONNS 2
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "A",
+<   "name": "A",
+<   "conns": 2,
+<   "leafnodes": 0,
+<   "total_conns": 2,
+<   "num_subscriptions": 5,
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+< MSG $SYS.ACCOUNT.A.CONNECT 3
+< {
+<   "type": "io.nats.server.advisory.v1.client_connect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "A",
+<     "user": "a",
+<     "name": "two",
+<     "name_tag": "A",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   }
+< }
+c> CONNECT {"user":"a","pass":"p","name":"three"}
+c< 0
+s< 1
+< MSG $SYS.ACCOUNT.A.DISCONNECT 4
+< {
+<   "type": "io.nats.server.advisory.v1.client_disconnect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "A",
+<     "user": "a",
+<     "name": "three",
+<     "rtt": ~,
+<     "stop": ~,
+<     "name_tag": "A",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   },
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "reason": "Maximum Account Connections Exceeded"
+< }
+s> PUB $SYS.REQ.ACCOUNT.A.CONNS _R.1 0
+s>
+s< 1
+< MSG _R.1 5
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "A",
+<   "name": "A",
+<   "conns": 2,
+<   "leafnodes": 0,
+<   "total_conns": 2,
+<   "num_subscriptions": 5,
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+a.
+s< 3
+< MSG $SYS.SERVER.ACCOUNT.A.CONNS 1
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "A",
+<   "name": "A",
+<   "conns": 1,
+<   "leafnodes": 0,
+<   "total_conns": 1,
+<   "num_subscriptions": 4,
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+< MSG $SYS.ACCOUNT.A.SERVER.CONNS 2
+< {
+<   "type": "io.nats.server.advisory.v1.account_connections",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "acc": "A",
+<   "name": "A",
+<   "conns": 1,
+<   "leafnodes": 0,
+<   "total_conns": 1,
+<   "num_subscriptions": 4,
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0,
+<     "gateways": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "routes": {
+<       "msgs": 0,
+<       "bytes": 0
+<     },
+<     "leafs": {
+<       "msgs": 0,
+<       "bytes": 0
+<     }
+<   },
+<   "slow_consumers": 0
+< }
+< MSG $SYS.ACCOUNT.A.DISCONNECT 4
+< {
+<   "type": "io.nats.server.advisory.v1.client_disconnect",
+<   "id": ~,
+<   "timestamp": ~,
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "client": {
+<     "start": ~,
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "acc": "A",
+<     "user": "a",
+<     "name": "one",
+<     "rtt": ~,
+<     "stop": ~,
+<     "name_tag": "A",
+<     "kind": "Client",
+<     "client_type": "nats"
+<   },
+<   "sent": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "received": {
+<     "msgs": 0,
+<     "bytes": 0
+<   },
+<   "reason": "Client Closed"
+< }

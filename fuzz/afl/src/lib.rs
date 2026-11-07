@@ -12,14 +12,16 @@ use naq_proto::peer;
 pub type Target = fn(&[u8]);
 
 /// Every target, by name.
-pub const TARGETS: [(&str, Target); 8] = [
+pub const TARGETS: [(&str, Target); 10] = [
     ("certs", certs),
     ("client_wire", client_wire),
     ("config", config),
     ("jwts", jwts),
     ("leaf_wire", leaf_wire),
+    ("monitor_http", monitor_http),
     ("peer_frames", peer_frames),
     ("subjects", subjects),
+    ("sys_body", sys_body),
     ("websocket", websocket),
 ];
 
@@ -165,6 +167,26 @@ pub fn subjects(data: &[u8]) {
 /// trip.
 pub fn websocket(data: &[u8]) {
     naq::fuzzing::websocket(data);
+}
+
+/// Reads a request to the monitoring port: its head, path and query, as
+/// the server reads them. A path cleaned for a redirect is clean.
+///
+/// # Panics
+///
+/// When it is not.
+pub fn monitor_http(data: &[u8]) {
+    naq::fuzzing::monitor(data);
+}
+
+/// Reads the input as the body of each request on `$SYS`. Go's check of
+/// JSON agrees with `serde_json`.
+///
+/// # Panics
+///
+/// When they disagree.
+pub fn sys_body(data: &[u8]) {
+    naq::fuzzing::sys_body(data);
 }
 
 /// Decodes the input as a peer control message and as a batch. What

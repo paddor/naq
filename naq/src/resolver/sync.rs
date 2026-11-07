@@ -82,7 +82,7 @@ async fn sync(shared: Weak<Shared>) {
 /// Where the packs this server asked for come: `$SYS._INBOX.`, the hash of
 /// its name, `.`, its pack token.
 pub(crate) fn pack_inbox(shared: &Shared) -> Vec<u8> {
-    let node = shared.node.unwrap_or_default();
+    let node = shared.sys.node.unwrap_or_default();
     let token = shared
         .resolver
         .as_ref()

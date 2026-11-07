@@ -131,7 +131,7 @@ fn user(issuer: &KeyPair, user: &KeyPair, nats: &Value, more: &Value) -> String 
 /// A server running `conf`: naq, or `nats-server`.
 enum Target {
     Naq(Server),
-    Go { _go: GoServer, port: u16 },
+    Go { _go: GoServer, port: u16, http: u16 },
 }
 
 impl Target {
@@ -141,6 +141,55 @@ impl Target {
             Target::Go { port, .. } => SocketAddr::from(([127, 0, 0, 1], *port)),
         }
     }
+
+    /// The JSON of `GET path` on its monitoring port.
+    fn monitor(&self, path: &str) -> Value {
+        let body = self.body(path);
+        serde_json::from_str(&body)
+            .map_err(|e| format!("{path}: {e}: {body:?}"))
+            .unwrap()
+    }
+
+    /// The body of `GET path` at its monitoring port.
+    fn body(&self, path: &str) -> String {
+        let at = match self {
+            Target::Naq(s) => s.monitor_addr().unwrap(),
+            Target::Go { http, .. } => SocketAddr::from(([127, 0, 0, 1], *http)),
+        };
+        let mut c = TcpStream::connect(at).unwrap();
+        c.set_read_timeout(Some(WAIT)).unwrap();
+        write!(
+            c,
+            "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut text = String::new();
+        c.read_to_string(&mut text).unwrap();
+        let (head, mut body) = text.split_once("\r\n\r\n").unwrap_or(("", ""));
+        // Go chunks a long body.
+        let mut whole = String::new();
+        if head.contains("Transfer-Encoding: chunked") {
+            while let Some((size, rest)) = body.split_once("\r\n") {
+                let n = usize::from_str_radix(size, 16).unwrap_or(0);
+                whole += &rest[..n];
+                body = &rest[n..];
+                body = body.strip_prefix("\r\n").unwrap_or(body);
+                if n == 0 {
+                    break;
+                }
+            }
+            body = &whole;
+        }
+        body.to_owned()
+    }
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 /// naq, then `nats-server` if `NAQ_GO` names one, each running `conf`.
@@ -149,17 +198,18 @@ fn targets(conf: &str) -> Vec<(&'static str, Target)> {
     opts.host = "127.0.0.1".into();
     opts.port = 0;
     opts.lanes = 2;
+    opts.http_port = Some(0);
     let mut all = vec![("naq", Target::Naq(Server::start(&opts).unwrap()))];
     if let Some(bin) = std::env::var_os("NAQ_GO").map(PathBuf::from) {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let (port, http) = (free_port(), free_port());
         let dir = std::env::temp_dir().join(format!("naq-operator-{}-{port}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("go.conf");
-        std::fs::write(&path, format!("listen: 127.0.0.1:{port}\n{conf}")).unwrap();
+        std::fs::write(
+            &path,
+            format!("listen: 127.0.0.1:{port}\nhttp: 127.0.0.1:{http}\n{conf}"),
+        )
+        .unwrap();
         let child = Command::new(bin)
             .arg("-c")
             .arg(&path)
@@ -173,7 +223,14 @@ fn targets(conf: &str) -> Vec<(&'static str, Target)> {
             assert!(Instant::now() < deadline, "nats-server did not start");
             std::thread::sleep(Duration::from_millis(20));
         }
-        all.push(("go", Target::Go { _go: go, port }));
+        all.push((
+            "go",
+            Target::Go {
+                _go: go,
+                port,
+                http,
+            },
+        ));
     }
     all
 }
@@ -549,7 +606,7 @@ fn sharing() -> (String, KeyPair, KeyPair, KeyPair) {
                 {"subject": "s.>", "type": "stream"},
                 {"subject": "svc", "type": "service"},
                 {"subject": "priv", "type": "service", "token_req": true},
-                {"subject": "other", "type": "service", "token_req": true},
+                {"subject": "other", "type": "service", "token_req": true, "revocations": {KeyPair::new_account().public_key(): 1}},
             ]})
         ),
         account(
@@ -574,6 +631,7 @@ fn sharing() -> (String, KeyPair, KeyPair, KeyPair) {
 #[test]
 fn accounts_share_streams_and_services_their_jwts_export_and_import() {
     let (conf, x, y, z) = sharing();
+    let mut seen = Vec::new();
     for (name, t) in targets(&conf) {
         let (ux, uy) = (KeyPair::new_user(), KeyPair::new_user());
         let mut cx = Client::login(&t, Some(&ux), &user(&x, &ux, &json!({}), &json!({})), "");
@@ -600,7 +658,45 @@ fn accounts_share_streams_and_services_their_jwts_export_and_import() {
             name,
             "account of a bad token",
         );
+        seen.push([&x, &y].map(|k| shown_account(&t, &k.public_key())));
     }
+    let exports = seen[0][0]["account_detail"]["exports"].as_array().unwrap();
+    let token = exports.iter().find(|e| e["subject"] == "other").unwrap();
+    assert_eq!(token["token_req"], true, "{token}");
+    assert_eq!(token["revoked_activations"].as_object().unwrap().len(), 1);
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go);
+    }
+}
+
+/// `/accountz` of account `key` at `t`, without what changes between
+/// runs and servers: its exports and imports sorted, revocations without
+/// their times. Without what naq leaves out: claims as nats-io/jwt writes
+/// them, its warnings, and the counts of Go's cache of matches.
+fn shown_account(t: &Target, key: &str) -> Value {
+    let mut page = t.monitor(&format!("/accountz?acc={key}"));
+    for k in ["now", "server_id", "system_account"] {
+        page.as_object_mut().unwrap().remove(k);
+    }
+    let info = &mut page["account_detail"];
+    let info = info.as_object_mut().unwrap();
+    for k in ["update_time", "decoded_jwt", "validation_result_jwt"] {
+        info.remove(k);
+    }
+    let stats = info["sublist_stats"].as_object_mut().unwrap();
+    stats.retain(|k, _| ["num_subscriptions", "num_inserts", "num_removes"].contains(&k.as_str()));
+    for list in ["exports", "imports"] {
+        let Some(all) = info.get_mut(list).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for e in all.iter_mut() {
+            if let Some(r) = e["revoked_activations"].as_object_mut() {
+                r.values_mut().for_each(|v| *v = Value::Null);
+            }
+        }
+        all.sort_by_key(ToString::to_string);
+    }
+    page
 }
 
 #[test]
@@ -711,5 +807,211 @@ fn a_strict_operator_takes_only_what_its_signing_keys_signed() {
             name,
             "account by the operator key",
         );
+    }
+}
+
+/// The connection of `/connz` at `t` named `n`, open or `closed`, once
+/// it is there.
+fn conn_named(t: &Target, n: &str, closed: bool) -> Value {
+    let path = if closed {
+        "/connz?state=closed"
+    } else {
+        "/connz?auth=1"
+    };
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let z = t.monitor(path);
+        // Go keeps the probe that saw it start among the closed too.
+        let found = z["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == n)
+            .cloned();
+        if let Some(c) = found {
+            return c;
+        }
+        assert!(Instant::now() < deadline, "no {n} in {z}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn connz_shows_what_issued_a_jwt_user() {
+    let w = World::new();
+    let conf = w.conf();
+    for (name, t) in targets(&conf) {
+        let u = KeyPair::new_user();
+        let tags = json!({"tags": ["t1", "t2"]});
+        let jwt = user(&w.a, &u, &tags, &json!({"name": "alice"}));
+        let mut c = Client::login(&t, Some(&u), &jwt, ",\"name\":\"c1\"");
+        logged_in(&mut c, name, &w.a.public_key(), 1 << 20);
+        let signed = KeyPair::new_user();
+        let of_s = json!({"issuer_account": w.s.public_key()});
+        let by_signer = user(&w.signer, &signed, &of_s, &json!({}));
+        let mut c2 = Client::login(&t, Some(&signed), &by_signer, ",\"name\":\"c2\"");
+        logged_in(&mut c2, name, &w.s.public_key(), 1 << 20);
+        let bearer = KeyPair::new_user();
+        let token = user(&w.a, &bearer, &json!({"bearer_token": true}), &json!({}));
+        let mut c3 = Client::login(&t, None, &token, ",\"name\":\"c3\"");
+        logged_in(&mut c3, name, &w.a.public_key(), 1 << 20);
+        let a = w.a.public_key();
+        let one = conn_named(&t, "c1", false);
+        let shown = |c: &Value, k: &str| c[k].as_str().unwrap_or_default().to_owned();
+        let keys = [
+            "authorized_user",
+            "account",
+            "jwt",
+            "issuer_key",
+            "name_tag",
+        ];
+        let got: Vec<String> = keys.iter().map(|k| shown(&one, k)).collect();
+        assert_eq!(
+            got,
+            [u.public_key(), a.clone(), jwt.clone(), a.clone(), a.clone()],
+            "{name}: {one}"
+        );
+        assert_eq!(one["tags"], json!(["t1", "t2"]), "{name}: {one}");
+        let two = conn_named(&t, "c2", false);
+        assert_eq!(
+            shown(&two, "issuer_key"),
+            w.signer.public_key(),
+            "{name}: {two}"
+        );
+        assert_eq!(shown(&two, "account"), w.s.public_key(), "{name}: {two}");
+        let three = conn_named(&t, "c3", false);
+        assert!(
+            three.get("jwt").is_none(),
+            "{name}: a bearer JWT shows: {three}"
+        );
+        let plain = t.monitor("/connz");
+        assert!(
+            plain["connections"][0].get("jwt").is_none(),
+            "{name}: {plain}"
+        );
+        drop(c);
+        closed_keeps_its_issuer(&t, name, &jwt, &a);
+    }
+}
+
+/// Client `c1` of user JWT `jwt` of account `a` at `t`, closed, keeps
+/// what issued it, and the name in its JWT.
+fn closed_keeps_its_issuer(t: &Target, name: &str, jwt: &str, a: &str) {
+    let closed = conn_named(t, "c1", true);
+    let shown = |k: &str| closed[k].as_str().unwrap_or_default().to_owned();
+    let keys = ["jwt", "issuer_key", "name_tag", "authorized_user"];
+    let got: Vec<String> = keys.iter().map(|k| shown(k)).collect();
+    assert_eq!(got, [jwt, a, "alice", ""], "{name}: {closed}");
+    assert_eq!(closed["tags"], json!(["t1", "t2"]), "{name}: {closed}");
+}
+
+/// `/accountz` of account `key` at `t`, once a user of it logged in, and
+/// `/accountz` and `/varz` then.
+fn account_pages(t: &Target, name: &str, issuer: &KeyPair) -> [Value; 3] {
+    let key = issuer.public_key();
+    // An account of a JWT is in use once a client looks it up.
+    let none = format!("Account {key} does not exist");
+    assert_eq!(t.body(&format!("/accountz?acc={key}")), none, "{name}");
+    let u = KeyPair::new_user();
+    let jwt = user(issuer, &u, &json!({}), &json!({}));
+    let mut c = Client::login(t, Some(&u), &jwt, "");
+    logged_in(&mut c, name, &key, 1 << 20);
+    let mut list = t.monitor("/accountz");
+    let mut names: Vec<Value> = list["accounts"].as_array().unwrap().clone();
+    names.sort_by_key(ToString::to_string);
+    list["accounts"] = names.into();
+    let detail = t.monitor(&format!("/accountz?acc={key}"));
+    [list, detail, t.monitor("/varz")]
+}
+
+#[test]
+fn accountz_and_varz_show_the_jwts_of_accounts_and_operators() {
+    let w = World::new();
+    let conf = w.conf();
+    let d = w.d.public_key();
+    let mut all = targets(&conf)
+        .iter()
+        .map(|(name, t)| account_pages(t, name, &w.d))
+        .collect::<Vec<_>>()
+        .into_iter();
+    let [mut list, mut detail, varz] = all.next().unwrap();
+    assert_eq!(list["accounts"], json!(["$G", "$SYS", d]), "{list}");
+    let claims = detail["account_detail"]["decoded_jwt"].take();
+    let jwt = detail["account_detail"]["jwt"].as_str().unwrap();
+    let payload = BASE64URL_NOPAD.decode(jwt.split('.').nth(1).unwrap().as_bytes());
+    let written: Value = serde_json::from_slice(&payload.unwrap()).unwrap();
+    assert_eq!(claims, written);
+    let revoked = detail["account_detail"]["revoked_user"].take();
+    let at = revoked[w.revoked.public_key()].as_str().unwrap();
+    assert!(at.ends_with('Z'), "{revoked}");
+    let operator = &varz["trusted_operators_claim"][0]["sub"];
+    assert_eq!(operator, &w.operator.public_key());
+    let Some([mut go_list, mut go_detail, go_varz]) = all.next() else {
+        return;
+    };
+    // Go writes the claims as nats-io/jwt has them, empty parts too, and
+    // revocations in local time.
+    let go_claims = go_detail["account_detail"]["decoded_jwt"].take();
+    assert!(holds(&go_claims, &claims), "{go_claims} {claims}");
+    let go_revoked = go_detail["account_detail"]["revoked_user"].take();
+    assert_eq!(go_revoked.as_object().unwrap().len(), 1, "{go_revoked}");
+    // Go makes no system account in operator mode unless one is named.
+    for page in [&mut list, &mut detail, &mut go_list, &mut go_detail] {
+        for key in ["now", "server_id", "system_account"] {
+            page.as_object_mut().unwrap().remove(key);
+        }
+        if let Some(info) = page.get_mut("account_detail") {
+            info["update_time"] = Value::Null;
+        }
+    }
+    assert_eq!((list, detail), (go_list, go_detail));
+    for key in ["trusted_operators_jwt", "trusted_operators_claim"] {
+        assert_eq!(varz[key], go_varz[key], "{key}");
+    }
+}
+
+/// Whether `all` holds `part`: its keys, with values `all` holds.
+fn holds(all: &Value, part: &Value) -> bool {
+    match (all, part) {
+        (Value::Object(a), Value::Object(p)) => {
+            p.iter().all(|(k, v)| a.get(k).is_some_and(|w| holds(w, v)))
+        }
+        _ => all == part,
+    }
+}
+
+#[test]
+fn a_jwt_user_asks_who_it_is_as_of_nats_server() {
+    let w = World::new();
+    let conf = format!("{}system_account: {}\n", w.conf(), w.s.public_key());
+    let mut seen = Vec::new();
+    for (name, t) in targets(&conf) {
+        let u = KeyPair::new_user();
+        let perms = json!({"pub": {"allow": ["x.>", "$SYS.REQ.>"]}, "sub": {"deny": ["y"]}});
+        let more = json!({"name": "alice", "exp": now() + 3600});
+        let jwt = user(&w.a, &u, &perms, &more);
+        let mut c = Client::login(&t, Some(&u), &jwt, "");
+        logged_in(&mut c, name, &w.a.public_key(), 1 << 20);
+        c.send("SUB _R.1 1\r\nPUB $SYS.REQ.USER.INFO _R.1 0\r\n\r\n");
+        assert!(c.line().starts_with("MSG _R.1 1 "), "{name}");
+        let mut answer: Value = serde_json::from_str(&c.line()).unwrap();
+        let data = answer["data"].as_object_mut().unwrap();
+        assert_eq!(data["user_name"], "alice", "{name}");
+        assert_eq!(data["account"], w.a.public_key().as_str(), "{name}");
+        assert_eq!(
+            data.remove("user").unwrap(),
+            u.public_key().as_str(),
+            "{name}"
+        );
+        // Whole seconds, a little less than an hour.
+        let left = data.remove("expires").unwrap().as_u64().unwrap();
+        assert!(
+            left.is_multiple_of(1_000_000_000) && left > 3_500 * 1_000_000_000,
+            "{name}: {left}"
+        );
+        seen.push(answer["data"].clone());
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go);
     }
 }

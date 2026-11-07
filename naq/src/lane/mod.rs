@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub(crate) use data::{Batch, Imported, Outs, Source};
-pub(crate) use publish::{Routing, inject};
+pub(crate) use publish::{Routing, inject, inject_through};
 pub(crate) use route::{Queue, Queued};
 #[cfg(test)]
 pub(crate) use slots::Linked;
@@ -69,8 +69,11 @@ pub(crate) enum Control {
     Refresh { account: u32 },
     /// Account `account` was added with imports: their taps go in.
     Imports { account: u32 },
-    /// Answered with the lane's clients, for monitoring.
-    Clients(oneshot::Sender<Vec<crate::monitor::ConnInfo>>),
+    /// The server shuts down: every client and link closes; answered once
+    /// they are gone, or after a while.
+    Shutdown(oneshot::Sender<()>),
+    /// Work for monitoring, run on the lane.
+    Ask(crate::monitor::Ask),
     /// The server in slot `server` has `weight` members in `subject` of
     /// `account`, in `queue` if given; none to remove them.
     Server {
@@ -104,13 +107,6 @@ pub(crate) enum Control {
         id: Box<[u8]>,
         endpoints: Vec<String>,
     },
-    /// Answered with the lane's leaf node links, for monitoring.
-    Links(oneshot::Sender<crate::monitor::Links>),
-    /// Answered by lane 0 with the routes of the cluster, for monitoring.
-    Routes(
-        crate::monitor::Subs,
-        oneshot::Sender<Vec<crate::monitor::RouteInfo>>,
-    ),
 }
 
 /// The ways into a lane, for every lane.
@@ -124,6 +120,11 @@ impl LaneTx {
     /// Hands the lane a control.
     pub(crate) fn control(&self, c: Control) {
         self.control.push(c);
+    }
+
+    /// Whether no batch waits for the lane: those it took, it delivered.
+    pub(crate) fn no_data(&self) -> bool {
+        self.data.is_empty()
     }
 }
 
@@ -171,8 +172,10 @@ pub(crate) struct Lane {
     spent: RefCell<Vec<Spent>>,
     /// State of the random numbers for queue picks.
     rng: Cell<u64>,
-    /// Messages in and out on this lane.
+    /// Messages in from its clients and out to them.
     pub(crate) tally: Tally,
+    /// Messages in from links and other servers, and out to them.
+    pub(crate) peers: Tally,
     /// Clients on this lane, by ID.
     pub(crate) clients: RefCell<FxHashMap<u64, Rc<Client>>>,
     /// Read buffers of its clients that batches may still refer to.
@@ -201,9 +204,28 @@ pub(crate) struct Lane {
     pub(crate) imported: Cell<bool>,
     /// Account ids by name, as this lane met them.
     account_ids: RefCell<FxHashMap<Box<[u8]>, u32>>,
+    /// Connections that closed and are still writing what was left.
+    pub(crate) ending: Rc<Cell<usize>>,
+}
+
+/// A connection counted as ending on its lane, until dropped.
+#[derive(Debug)]
+pub(crate) struct Ending(Rc<Cell<usize>>);
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
 }
 
 impl Lane {
+    /// Counts a connection as ending until the guard drops: a shutdown
+    /// waits for it.
+    pub(crate) fn ending(&self) -> Ending {
+        self.ending.set(self.ending.get() + 1);
+        Ending(self.ending.clone())
+    }
+
     /// The interest in `account`, an id of the server's.
     #[inline]
     pub(crate) fn index(&self, account: u32) -> &RefCell<Index> {
@@ -265,6 +287,7 @@ impl Lane {
     /// publishes the lane's counts.
     pub(crate) fn flush(&self) {
         self.tally.publish(&self.shared.counts[self.id]);
+        self.peers.publish(&self.shared.peer_counts[self.id]);
         let mut dirty = self.dirty.take();
         for c in dirty.drain(..) {
             c.dirty.set(false);
@@ -378,9 +401,8 @@ impl Lane {
                     }
                 }
             }
-            Control::Clients(answer) => {
-                let _ = answer.send(crate::monitor::conns(self));
-            }
+            Control::Shutdown(done) => crate::stop::lane(self, done),
+            Control::Ask(ask) => ask.run(self),
             Control::Server {
                 account,
                 subject,
@@ -428,12 +450,6 @@ impl Lane {
                     crate::mesh::hub(&me, slot, &id, &endpoints);
                 }
             }
-            Control::Links(answer) => {
-                let _ = answer.send(crate::monitor::links(self));
-            }
-            Control::Routes(subs, answer) => {
-                let _ = answer.send(crate::monitor::routes(self, subs));
-            }
         }
     }
 }
@@ -461,6 +477,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         spent: RefCell::default(),
         rng: Cell::new(seed()),
         tally: Tally::default(),
+        peers: Tally::default(),
         clients: RefCell::default(),
         reads: SpentReads::default(),
         batches: SpentReads::default(),
@@ -474,6 +491,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         taps: RefCell::default(),
         imported: Cell::new(false),
         account_ids: RefCell::default(),
+        ending: Rc::default(),
     });
     crate::imports::service::install(&lane);
     if let Some(c) = &lane.shared.callouts {

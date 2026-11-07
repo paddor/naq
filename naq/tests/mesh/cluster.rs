@@ -48,6 +48,9 @@ pub(crate) fn node(i: usize, port: u16, routes: &[u16]) -> Server {
                 .map(|p| format!("nats-route://127.0.0.1:{p}"))
                 .collect(),
         }),
+        // What routes tell is then the interest of clients, without the
+        // server's own in the system account.
+        no_system_account: true,
         ..Options::default()
     })
     .unwrap()

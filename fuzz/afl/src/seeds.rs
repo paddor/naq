@@ -40,12 +40,20 @@ pub fn for_target(name: &str) -> Vec<Vec<u8>> {
             "CONNECT {\"name\":\"leaf\",\"headers\":true}\r\nLMSG a 3\r\nab",
             "LS+ s q\r\n",
         ],
+        "monitor_http" => &[
+            "GET /varz HTTP/1.1\r\nHost: h\r\n\r\n",
+            "GET //connz/./x/../?subs=detail&limit=-1&cid=18446744073709551616&acc=%24G HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+            "HEAD http://h:8222/healthz?details=t;x=1 HTTP/1.0\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nab",
+            "POST /mon/%7Avarz?a+b=%zz&&state=ANY HTTP/1.1\nHost: h\nTransfer-Encoding: chunked\n\n",
+            "GET /x HTTP/2.0\r\n\r\n",
+        ],
         "subjects" => &[
             "a.b.c\na.b.c\na.*.c\na.>\n>\nb.*\n*.*.*\n",
             "orders.1\norders.*\norders.>\n*.1\n",
             "x\n*\n>\nx.y\n",
         ],
         "websocket" => return websocket(),
+        "sys_body" => return sys_body(),
         "certs" => return certs(),
         "peer_frames" => return peer_frames(),
         _ => &[],
@@ -148,4 +156,19 @@ fn peer_frames() -> Vec<Vec<u8>> {
     .encode(&mut batch);
     all.push(batch);
     all
+}
+
+/// Request bodies on `$SYS`: options of each type, and broken JSON.
+fn sys_body() -> Vec<Vec<u8>> {
+    [
+        "{\"server_name\":\"s1\",\"exact_match\":true,\"tags\":[\"az:1\",null]}",
+        "{\"sort\":\"cid\",\"auth\":true,\"offset\":-1,\"limit\":1e3,\"cid\":18446744073709551616}",
+        "{\"SUBSCRIPTIONS\":1,\"zzz\":[[{\"a\":[true,false,null]}]],\"test\":\"a\\u00e9\\ud800\\n\"}",
+        " [1.5e-3, -0, \"\\\\\"\"] ",
+        "{\"a\":1,}",
+        "nul",
+    ]
+    .iter()
+    .map(|s| s.as_bytes().to_vec())
+    .collect()
 }

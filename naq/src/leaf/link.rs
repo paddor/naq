@@ -151,8 +151,10 @@ pub(super) async fn session(
     told: &RefCell<Option<Told>>,
 ) -> Ended {
     let dial = timeout(DIAL, TcpStream::connect((url.host.as_str(), url.port)));
-    let Ok(Ok(tcp)) = dial.await else {
-        return Ended::Unreached;
+    let tcp = match dial.await {
+        Ok(Ok(tcp)) => tcp,
+        Ok(Err(e)) => return Ended::Unreached(e.to_string()),
+        Err(_) => return Ended::Unreached("i/o timeout".into()),
     };
     let _ = tcp.set_nodelay(true);
     let d = Dial {
@@ -493,10 +495,25 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             self.lane.slots.leafs(),
         );
         self.lane.links.borrow_mut().push(side.clone());
+        crate::sys::conns_changed(shared, account);
+        crate::sys::connected(self.lane, crate::sys::Of::Link(&side));
         self.lane.mark(&client);
+        let label = format!("{}:{} - lid:{}", side.facts.ip, side.facts.port, client.id);
+        shared.log.info(format_args!(
+            "{label} - Leafnode connection created for account: {name} "
+        ));
         let end = self.read_loop(&side, lds).await;
+        let close = client.ended().unwrap_or(crate::conn::Close::Lost);
+        let why = close.reason();
+        crate::monitor::link_closed(self.lane, &side, why);
         self.lane.links.borrow_mut().retain(|l| l.id != side.id);
+        crate::sys::conns_changed(shared, account);
+        crate::sys::closed(self.lane, crate::sys::Of::Link(&side), close, None);
         side.forget_hub(self.lane);
+        shared.log.info(format_args!(
+            "{label} - Leafnode connection closed: {why} - Remote: {}",
+            side.facts.name
+        ));
         client.close();
         if timeout(LINGER, &mut writer).await.is_err() {
             writer.abort();
@@ -526,7 +543,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             };
             // A subscriber past the stall mark slows the hub to its pace.
             if let Some(sub) = self.stalled.take() {
-                conn::stall(&sub, mark).await;
+                conn::stall(&sub, mark, &lane.shared.events.stalls).await;
             }
             tokio::task::yield_now().await;
             conn::make_room(&mut buf, need, &lane.reads);
@@ -627,7 +644,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
     fn inbound(&mut self, m: &leaf::Msg<'_>, buf: &[u8], side: &LinkSide) {
         let lane = self.lane;
         let len = m.payload.len() + m.headers.map_or(0, <[u8]>::len);
-        lane.tally.took(len);
+        lane.peers.took(len);
         side.client.tally.took(len);
         if side::denied(m.subject) || !side.takes(m.subject) {
             return;

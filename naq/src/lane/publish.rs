@@ -332,6 +332,29 @@ fn merged_before(found: &Few<'_, Interest>, k: usize, name: &[u8]) -> bool {
 /// Publishes `m` in `account` from the server itself, copied into the
 /// arena of `out`: routed on `lane`, what goes on held in `out`.
 pub(crate) fn inject(lane: &Lane, out: &mut Outs, account: u32, m: &Pub<'_>) {
+    route_injected(lane, out, account, m, false);
+}
+
+/// Publishes `m` in `account` from the server itself, as [`inject`] does,
+/// and through the imports it meets: an answer to a request that came
+/// through one goes back to the requester. Not for a lane that runs
+/// imports now.
+pub(crate) fn inject_through(lane: &Lane, out: &mut Outs, account: u32, m: &Pub<'_>) {
+    if route_injected(lane, out, account, m, true) {
+        let from = crate::imports::service::From {
+            client: None,
+            skip: 0,
+            source: super::Source::Client,
+            skips: 0,
+        };
+        crate::imports::service::run(lane, out, m, account, from);
+    }
+}
+
+/// Routes `m` in `account` from the server itself, copied into the arena
+/// of `out`, through the imports it meets if `imports`: whether it met
+/// any.
+fn route_injected(lane: &Lane, out: &mut Outs, account: u32, m: &Pub<'_>, imports: bool) -> bool {
     let super::Imported { arena, outs, .. } = out.imported(lane);
     let at = arena.len();
     let (reply, headers) = (m.reply.unwrap_or_default(), m.headers.unwrap_or_default());
@@ -353,7 +376,13 @@ pub(crate) fn inject(lane: &Lane, out: &mut Outs, account: u32, m: &Pub<'_>) {
     };
     let out = super::Imported::outs_of(outs, lane, account, false);
     let index = lane.index(account).borrow();
-    if let Some(found) = index.matches(p.subject) {
-        Routing::new(lane, out, &p, base, 0).route(&found);
+    let Some(found) = index.matches(p.subject) else {
+        return false;
+    };
+    let mut r = Routing::new(lane, out, &p, base, 0);
+    if imports {
+        r = r.with_imports();
     }
+    r.route(&found);
+    r.tapped()
 }
