@@ -485,8 +485,8 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
     };
     let (ip, port) = peer(&stream);
     let (hello, info) = greet(&lane, ip, port, false);
-    if lane.shared.tls.is_some() {
-        return crate::tls::serve(lane, hello, info, stream).await;
+    if let Some(acc) = lane.shared.tls.get() {
+        return crate::tls::serve(lane, &acc, hello, info, stream).await;
     }
     hello.client.out.borrow_mut().extend_from_slice(&info);
     let shared = lane.shared.clone();

@@ -71,7 +71,7 @@ pub(crate) struct Shared {
     /// Clients that went away.
     pub(crate) gone: AtomicU64,
     /// TLS for clients, if they must use it.
-    pub(crate) tls: Option<crate::tls::Acceptor>,
+    pub(crate) tls: crate::tls::Current,
     /// The WebSocket port, if there is one.
     pub(crate) ws: Option<crate::ws::Door>,
     /// TLS to the hub of each leaf node remote.
@@ -260,7 +260,7 @@ impl Server {
             events: stats::Events::default(),
             started,
             gone: AtomicU64::new(0),
-            tls: setup.tls,
+            tls: crate::tls::Current::new(setup.tls),
             ws: door(opts, at.ws, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
             system,
@@ -461,7 +461,7 @@ fn door(
     let opts = opts.websocket.clone()?;
     Some(crate::ws::Door {
         opts,
-        tls,
+        tls: crate::tls::Current::new(tls),
         addr: addr?,
     })
 }
@@ -550,10 +550,11 @@ fn run(
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     let first = ctx.lane(0);
+    shared.monitor.set_tls(monitor_tls);
     if let Some(m) = ports.monitor {
         let s = shared.clone();
         first
-            .spawn(move || crate::monitor::serve(m, s, monitor_tls))
+            .spawn(move || crate::monitor::serve(m, s))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     if let Some(w) = ports.ws {

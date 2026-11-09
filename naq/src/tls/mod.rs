@@ -36,6 +36,37 @@ pub(crate) struct Acceptor {
     roots: Vec<CertificateDer<'static>>,
     /// When the server's certificate expires, if it tells.
     pub(crate) not_after: Option<std::time::SystemTime>,
+    /// The SHA-256 of its certificates, key and certificate authorities,
+    /// and whether it verifies clients: a reload tells by it whether they
+    /// changed.
+    material: [u8; 32],
+}
+
+/// The TLS of a port, if it has any: a reload swaps it, and each client
+/// takes the one there as it arrives.
+#[derive(Debug, Default)]
+pub(crate) struct Current(std::sync::RwLock<Option<Arc<Acceptor>>>);
+
+impl Current {
+    pub(crate) fn new(acceptor: Option<Acceptor>) -> Current {
+        Current(std::sync::RwLock::new(acceptor.map(Arc::new)))
+    }
+
+    /// The TLS now, if any.
+    pub(crate) fn get(&self) -> Option<Arc<Acceptor>> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Takes `acceptor` from now on.
+    pub(crate) fn set(&self, acceptor: Option<Acceptor>) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = acceptor.map(Arc::new);
+    }
 }
 
 impl std::fmt::Debug for Acceptor {
@@ -80,6 +111,7 @@ impl Acceptor {
             (None, true) => return Err(Error::Tls("verify needs a ca_file".into())),
             (_, false) => builder.with_no_client_auth(),
         };
+        let material = digest(&certs, &key, &cas, o.verify);
         let config = builder
             .with_single_cert(certs, key)
             .map_err(|e| bad("certificate and key", &e))?;
@@ -92,8 +124,40 @@ impl Acceptor {
             map: o.map,
             roots: cas,
             not_after,
+            material,
         })
     }
+
+    /// Whether `other` serves other certificates, keys or authorities, or
+    /// verifies clients otherwise.
+    pub(crate) fn differs(&self, other: &Acceptor) -> bool {
+        self.material != other.material
+    }
+}
+
+/// The SHA-256 of `certs`, `key`, `cas` and `verify`, each part counted.
+fn digest(
+    certs: &[CertificateDer<'_>],
+    key: &PrivateKeyDer<'_>,
+    cas: &[CertificateDer<'_>],
+    verify: bool,
+) -> [u8; 32] {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    let mut part = |b: &[u8]| {
+        h.update((b.len() as u64).to_be_bytes());
+        h.update(b);
+    };
+    part(&(certs.len() as u64).to_be_bytes());
+    for c in certs {
+        part(c);
+    }
+    part(key.secret_der());
+    for c in cas {
+        part(c);
+    }
+    part(&[u8::from(verify)]);
+    h.finalize().into()
 }
 
 /// A TLS error: `e` went wrong with `what`.
@@ -252,10 +316,13 @@ impl PeerCert {
 
 /// Runs a TLS client:  `info` goes out in the clear before the handshake, or
 /// over TLS after it, as the server is set up.
-pub(crate) async fn serve(lane: Rc<Lane>, mut hello: Hello, info: Vec<u8>, stream: Stream) {
-    let Some(acc) = lane.shared.tls.as_ref() else {
-        return;
-    };
+pub(crate) async fn serve(
+    lane: Rc<Lane>,
+    acc: &Acceptor,
+    mut hello: Hello,
+    info: Vec<u8>,
+    stream: Stream,
+) {
     let Some((tls, sent)) = handshake(acc, &info, stream).await else {
         lane.shared.client_gone();
         return;

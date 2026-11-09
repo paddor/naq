@@ -299,7 +299,8 @@ fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[OnLane]) -> Varz<'a> {
     let now = SystemTime::now();
     let (mem, cpu) = usage(&s.monitor.cpu);
     let loaded = s.monitor.loaded();
-    let tls = s.tls.as_ref();
+    let tls = s.tls.get();
+    let tls = tls.as_deref();
     Varz {
         server_id: &s.server_id,
         server_name: Some(o.server_name.as_str())
@@ -469,11 +470,7 @@ fn websocket<'a>(s: &'a Shared, o: &'a Options) -> Websocket<'a> {
         same_origin: w.same_origin,
         allowed_origins: &w.allowed_origins,
         compression: w.compression,
-        tls_cert_not_after: door
-            .tls
-            .as_ref()
-            .and_then(|t| t.not_after)
-            .map(rfc3339_nano),
+        tls_cert_not_after: door.tls.get().and_then(|t| t.not_after).map(rfc3339_nano),
     }
 }
 

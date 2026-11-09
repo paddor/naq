@@ -157,10 +157,11 @@ pub(super) enum Kind<'a> {
 pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u8>) {
     // A WebSocket client sees its own port, and TLS as that port has it.
     let ws = shared.ws.as_ref().filter(|_| to.ws);
+    let current = shared.tls.get();
     let opts = shared.opts();
     let (host, port, tls) = match ws {
-        Some(w) => (w.opts.host.as_str(), w.addr.port(), w.tls.is_some()),
-        None => (opts.host.as_str(), shared.addr.port(), shared.tls.is_some()),
+        Some(w) => (w.opts.host.as_str(), w.addr.port(), w.tls.get().is_some()),
+        None => (opts.host.as_str(), shared.addr.port(), current.is_some()),
     };
     let bound = match kind {
         Kind::Bound(account) => Some(account),
@@ -188,7 +189,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
         headers: true,
         auth_required,
         tls_required: tls,
-        tls_verify: shared.tls.as_ref().is_some_and(|t| t.verify),
+        tls_verify: current.as_ref().is_some_and(|t| t.verify),
         tls_available: tls && ws.is_some(),
         max_payload: to.max_payload,
         client_id: to.id,

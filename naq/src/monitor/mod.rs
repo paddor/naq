@@ -109,6 +109,16 @@ fn digest(opts: &Options) -> String {
         .unwrap_or_default()
 }
 
+/// The TLS of the HTTPS port, if it has one.
+#[derive(Default)]
+struct HttpsTls(std::sync::RwLock<Option<tokio_rustls::TlsAcceptor>>);
+
+impl std::fmt::Debug for HttpsTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpsTls").finish_non_exhaustive()
+    }
+}
+
 /// What monitoring keeps for a server.
 #[derive(Debug)]
 pub(crate) struct State {
@@ -120,6 +130,8 @@ pub(crate) struct State {
     http: Option<SocketAddr>,
     /// Where monitoring is served over HTTPS, if it is.
     https: Option<SocketAddr>,
+    /// The TLS of the HTTPS port: a reload swaps it.
+    tls: HttpsTls,
     /// The configuration, as last loaded.
     loaded: Mutex<Loaded>,
     /// The ports the cluster and naq leafs were bound at, once they are.
@@ -142,6 +154,7 @@ impl State {
             base: base_path(&opts.http_base_path),
             http: at.filter(|_| !secure),
             https: at.filter(|_| secure),
+            tls: HttpsTls::default(),
             loaded: Mutex::new(Loaded {
                 digest: digest(opts),
                 at: now,
@@ -176,6 +189,20 @@ impl State {
             at: SystemTime::now(),
         };
         shown
+    }
+
+    /// The TLS of the HTTPS port, if it has one.
+    fn tls(&self) -> Option<tokio_rustls::TlsAcceptor> {
+        self.tls
+            .0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Takes `tls` for the HTTPS port from now on.
+    pub(crate) fn set_tls(&self, tls: Option<tokio_rustls::TlsAcceptor>) {
+        *self.tls.0.write().unwrap_or_else(PoisonError::into_inner) = tls;
     }
 
     /// Where monitoring is served, over HTTP or HTTPS, if it is.
@@ -302,11 +329,7 @@ pub(crate) fn acceptor(opts: &Options) -> Result<Option<tokio_rustls::TlsAccepto
 
 /// Serves monitoring on `listener`, over TLS if `tls` is set, until it
 /// closes or the server stops.
-pub(crate) async fn serve(
-    mut listener: Listener,
-    shared: Arc<Shared>,
-    tls: Option<tokio_rustls::TlsAcceptor>,
-) {
+pub(crate) async fn serve(mut listener: Listener, shared: Arc<Shared>) {
     loop {
         let stream = match listener.accept().await {
             Ok(s) => s,
@@ -320,7 +343,7 @@ pub(crate) async fn serve(
             return;
         }
         let Stream::Tcp(s) = stream else { continue };
-        let (shared, tls) = (shared.clone(), tls.clone());
+        let (shared, tls) = (shared.clone(), shared.monitor.tls());
         tokio::task::spawn_local(async move {
             if s.set_nonblocking(true).is_err() {
                 return;

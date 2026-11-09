@@ -35,6 +35,11 @@ pub(super) enum Change {
     RemoteSyslog(String),
     WriteDeadline(Duration),
     MaxTracedMsgLen(usize),
+    TlsTimeout(Duration),
+    /// TLS now, if `true`.
+    Tls(bool),
+    HandshakeFirst(bool),
+    Fallback(Duration),
     Tags,
     Metadata,
 }
@@ -99,16 +104,27 @@ fn fixed<T: PartialEq + Go>(name: &str, old: &T, new: &T) -> Result<(), String> 
     Err(refusal(name, &old.go(), &new.go()))
 }
 
-/// The changes from `old` to `new`, for a server whose client port is
-/// bound at `port`: in the order of `nats-server`'s options, or the first
+/// What the server has now, that its options do not tell.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct At {
+    /// Where its client port is bound.
+    pub(super) port: u16,
+    /// The TLS of the new options serves other certificates, or verifies
+    /// clients otherwise, or there is TLS now and was none, or the other
+    /// way.
+    pub(super) tls: bool,
+}
+
+/// The changes from `old` to `new`, for a server at `at`: in the order of `nats-server`'s options, or the first
 /// change the server cannot take, in Go's words.
-pub(super) fn changes(old: &Options, new: &Options, port: u16) -> Result<Vec<Change>, String> {
+pub(super) fn changes(old: &Options, new: &Options, at: At) -> Result<Vec<Change>, String> {
     let mut d = Diff {
         old,
         new,
+        tls: at.tls,
         out: Vec::new(),
     };
-    d.head(port)?;
+    d.head(at.port)?;
     d.logging();
     d.auth()?;
     d.limits()?;
@@ -122,6 +138,8 @@ pub(super) fn changes(old: &Options, new: &Options, port: u16) -> Result<Vec<Cha
 struct Diff<'a> {
     old: &'a Options,
     new: &'a Options,
+    /// See [`At::tls`].
+    tls: bool,
     out: Vec<Change>,
 }
 
@@ -219,7 +237,18 @@ impl Diff<'_> {
         if !leafs {
             return Err(refusal("LeafNode", "{...}", "{...}"));
         }
-        if o.websocket != n.websocket {
+        // Its TLS may change, not come or go.
+        let bare = |x: &Options| {
+            let w = x.websocket.as_ref()?;
+            Some((
+                w.tls.is_some(),
+                crate::Websocket {
+                    tls: None,
+                    ..w.clone()
+                },
+            ))
+        };
+        if bare(o) != bare(n) {
             return Err(refusal("Websocket", "{...}", "{...}"));
         }
         Ok(())
@@ -249,9 +278,23 @@ impl Diff<'_> {
         fixed("LogMaxFiles", &o.log.max_files, &n.log.max_files)?;
         self.push(syslog(o) != syslog(n), Change::Syslog(syslog(n)));
         self.push(remote(o) != remote(n), Change::RemoteSyslog(remote(n)));
-        if o.tls != n.tls {
-            return Err(refusal("TLSConfig", "{...}", "{...}"));
-        }
+        self.tls_of_clients()
+    }
+
+    /// The TLS of clients, as Go's `TLSTimeout`, `TLSMap`, `TLSConfig` and
+    /// `TLSHandshakeFirst`, with its fallback. Without TLS, the timeout is
+    /// Go's default.
+    fn tls_of_clients(&mut self) -> Result<(), String> {
+        let (o, n) = (self.old, self.new);
+        let timeout = |x: &Options| x.tls.as_ref().map_or(Duration::from_secs(2), |t| t.timeout);
+        self.push(timeout(o) != timeout(n), Change::TlsTimeout(timeout(n)));
+        let map = |x: &Options| x.tls.as_ref().is_some_and(|t| t.map);
+        fixed("TLSMap", &map(o), &map(n))?;
+        self.push(self.tls, Change::Tls(n.tls.is_some()));
+        let first = |x: &Options| x.tls.as_ref().is_some_and(|t| t.handshake_first);
+        self.push(first(o) != first(n), Change::HandshakeFirst(first(n)));
+        let fallback = |x: &Options| x.tls.as_ref().and_then(|t| t.fallback).unwrap_or_default();
+        self.push(fallback(o) != fallback(n), Change::Fallback(fallback(n)));
         Ok(())
     }
 
@@ -336,6 +379,11 @@ pub(super) fn seconds(d: Duration) -> String {
 mod tests {
     use super::*;
 
+    /// A server bound at `port`, its TLS as it was.
+    const fn at(port: u16) -> At {
+        At { port, tls: false }
+    }
+
     fn opts() -> Options {
         Options {
             port: 4222,
@@ -353,7 +401,7 @@ mod tests {
         new.ping_interval = Duration::from_secs(5);
         new.log.trace = Trace::Headers;
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Ok(vec![
                 Change::Trace(true),
                 Change::Debug(true),
@@ -375,30 +423,30 @@ mod tests {
         new.port = 4223;
         new.server_name = "zed".into();
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Err("config reload not supported for ServerName: old=naq, new=zed".into())
         );
         new.server_name = "naq".into();
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Err("config reload not supported for Port: old=4222, new=4223".into())
         );
         let mut new = opts();
         new.lame_duck_duration = Duration::from_secs(60);
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Err("config reload not supported for LameDuckDuration: old=2m0s, new=1m0s".into())
         );
         let mut new = opts();
         new.log.size_limit = 1000;
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Err("config reload not supported for LogSizeLimit: old=0, new=1000".into())
         );
         let mut new = opts();
         new.http_port = Some(0);
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Err("config reload not supported for HTTPPort: old=0, new=-1".into())
         );
     }
@@ -409,10 +457,10 @@ mod tests {
         old.port = 0;
         let new = old.clone();
         let none = Ok(vec![Change::Users, Change::Accounts]);
-        assert_eq!(changes(&old, &new, 34567), none);
+        assert_eq!(changes(&old, &new, at(34567)), none);
         let mut new = old.clone();
         new.port = 34567;
-        assert_eq!(changes(&old, &new, 34567), none);
+        assert_eq!(changes(&old, &new, at(34567)), none);
     }
 
     #[test]
@@ -422,7 +470,7 @@ mod tests {
         let mut new = opts();
         new.log.to = Some(LogTo::File("/x.log".into()));
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Ok(vec![
                 Change::Users,
                 Change::Accounts,
@@ -438,7 +486,7 @@ mod tests {
         let mut new = opts();
         new.resolver = Some(crate::Resolver::Memory);
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Err("config reload does not support moving to or from an account resolver".into())
         );
     }
@@ -447,7 +495,7 @@ mod tests {
         let old = opts();
         let mut new = opts();
         change(&mut new);
-        changes(&old, &new, 4222).unwrap_err()
+        changes(&old, &new, at(4222)).unwrap_err()
     }
 
     #[test]
@@ -507,7 +555,7 @@ mod tests {
         old.resolver = Some(crate::Resolver::Memory);
         let mut new = old.clone();
         new.resolver_preload = vec![("A".into(), "jwt".into())];
-        assert_eq!(changes(&old, &new, 4222), Err(whole("AccountResolver")));
+        assert_eq!(changes(&old, &new, at(4222)), Err(whole("AccountResolver")));
     }
 
     #[test]
@@ -517,7 +565,7 @@ mod tests {
         new.log.to = Some(LogTo::RemoteSyslog("udp://h:514".into()));
         new.log.time = false;
         assert_eq!(
-            changes(&old, &new, 4222),
+            changes(&old, &new, at(4222)),
             Ok(vec![
                 Change::Logtime(false),
                 Change::Users,

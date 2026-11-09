@@ -27,7 +27,8 @@ use crate::{Websocket, tls};
 #[derive(Debug)]
 pub(crate) struct Door {
     pub(crate) opts: Websocket,
-    pub(crate) tls: Option<tls::Acceptor>,
+    /// Its TLS, if any: a reload may swap it, not take it away.
+    pub(crate) tls: tls::Current,
     /// Where it listens, as bound.
     pub(crate) addr: SocketAddr,
 }
@@ -95,7 +96,7 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
         facts: None,
         deadline,
     };
-    match &door.tls {
+    match door.tls.get() {
         None => {
             let (r, w) = tcp.into_split();
             open(lane, r, w, arrival).await;

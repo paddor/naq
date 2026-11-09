@@ -1008,3 +1008,178 @@ fn a_bcrypt_password_holds_against_a_new_hash_of_it_and_not_another() {
     p.hup();
     assert_eq!(c.rest(), "-ERR 'Authorization Violation'\r\n");
 }
+
+/// Writes a certificate for 127.0.0.1 that expires in `year`, and its key,
+/// to `name-cert.pem` and `name-key.pem` in `dir`.
+fn cert(dir: &Path, name: &str, year: i32) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
+    params.not_after = rcgen::date_time_ymd(year, 1, 1);
+    let cert = params.self_signed(&key).unwrap();
+    std::fs::write(dir.join(format!("{name}-cert.pem")), cert.pem()).unwrap();
+    std::fs::write(dir.join(format!("{name}-key.pem")), key.serialize_pem()).unwrap();
+}
+
+/// The first `INFO` a client of `port` gets.
+fn first_info(port: u16) -> serde_json::Value {
+    let w = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    w.set_read_timeout(Some(WAIT)).unwrap();
+    let mut line = String::new();
+    BufReader::new(w).read_line(&mut line).unwrap();
+    serde_json::from_str(line.strip_prefix("INFO ").unwrap().trim_end()).unwrap()
+}
+
+/// What `bin` does as its TLS changes: whether its first and last
+/// clients must use TLS, and its reload lines.
+fn tls_steps(i: usize, bin: &Path) -> (serde_json::Value, serde_json::Value, Vec<String>) {
+    let d = dir(&format!("tls-{i}"));
+    cert(&d, "a", 2030);
+    let files = format!(
+        "cert_file: {:?}, key_file: {:?}",
+        d.join("a-cert.pem").display().to_string(),
+        d.join("a-key.pem").display().to_string()
+    );
+    let tls = format!("tls {{ {files} }}\n");
+    let p = Proc::start(bin, &d, &tls, &[]);
+    let before = first_info(p.port)["tls_required"].clone();
+    // The same files, then others in their place.
+    p.hup();
+    cert(&d, "a", 2031);
+    p.hup();
+    p.write(&format!(
+        "tls {{ {files}, timeout: 3, handshake_first: \"300ms\" }}\n"
+    ));
+    p.hup();
+    p.write("");
+    p.hup();
+    let after = first_info(p.port)["tls_required"].clone();
+    let ca = d.join("a-cert.pem").display().to_string();
+    p.write(&format!(
+        "tls {{ {files}, verify_and_map: true, ca_file: {ca:?} }}\n"
+    ));
+    p.hup();
+    let lines = lines_once(&p.log(), |l| {
+        l.iter().filter(|l| ends_reload(l)).count() >= 5
+    });
+    (before, after, reload_lines(&lines))
+}
+
+#[test]
+fn tls_reloads_for_new_clients_when_its_files_or_settings_change() {
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        seen.push(tls_steps(i, bin));
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    let (before, after, lines) = &seen[0];
+    assert_eq!(
+        (before, after),
+        (&serde_json::json!(true), &serde_json::Value::Null)
+    );
+    let trapped = r#"[INF] Trapped "hangup" signal"#;
+    let (users, accounts) = (
+        "[INF] Reloaded: authorization users",
+        "[INF] Reloaded: accounts",
+    );
+    let done = "[INF] Reloaded server configuration (sha256:...)";
+    assert_eq!(
+        lines,
+        &[
+            trapped,
+            users,
+            accounts,
+            done,
+            trapped,
+            users,
+            accounts,
+            "[INF] Reloaded: tls = enabled",
+            done,
+            trapped,
+            users,
+            accounts,
+            "[INF] Reloaded: authorization timeout = 4",
+            "[INF] Reloaded: tls timeout = 3",
+            "[INF] Reloaded: Client TLS handshake first: true",
+            "[INF] Reloaded: Client TLS handshake first fallback delay: 300ms",
+            done,
+            trapped,
+            users,
+            accounts,
+            "[INF] Reloaded: authorization timeout = 2",
+            "[INF] Reloaded: tls timeout = 2",
+            "[INF] Reloaded: tls = disabled",
+            "[INF] Reloaded: Client TLS handshake first: false",
+            "[INF] Reloaded: Client TLS handshake first fallback delay: 0s",
+            done,
+            trapped,
+            "[ERR] Failed to reload server configuration: \
+             config reload not supported for TLSMap: old=false, new=true",
+        ]
+    );
+}
+
+#[test]
+fn new_clients_get_the_certificates_a_reload_read_and_websocket_ones_too() {
+    let at = dir("certs");
+    cert(&at, "a", 2030);
+    cert(&at, "w", 2030);
+    let tls = |name: &str| naq::Tls {
+        cert_file: at.join(format!("{name}-cert.pem")),
+        key_file: at.join(format!("{name}-key.pem")),
+        ca_file: None,
+        verify: false,
+        map: false,
+        timeout: Duration::from_secs(2),
+        handshake_first: false,
+        fallback: None,
+    };
+    let opts = Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        http_port: Some(0),
+        tls: Some(tls("a")),
+        websocket: Some(naq::Websocket {
+            host: "127.0.0.1".into(),
+            tls: Some(tls("w")),
+            ..naq::Websocket::default()
+        }),
+        ..Options::default()
+    };
+    let server = Server::start(&opts).unwrap();
+    let varz = || {
+        let mut c = TcpStream::connect(server.monitor_addr().unwrap()).unwrap();
+        c.write_all(b"GET /varz HTTP/1.0\r\n\r\n").unwrap();
+        let mut body = String::new();
+        c.read_to_string(&mut body).unwrap();
+        let (_, json) = body.split_once("\r\n\r\n").unwrap();
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        (
+            v["tls_cert_not_after"].as_str().unwrap()[..4].to_owned(),
+            v["websocket"]["tls_cert_not_after"].as_str().unwrap()[..4].to_owned(),
+        )
+    };
+    assert_eq!(varz(), ("2030".to_owned(), "2030".to_owned()));
+    let next = std::sync::Arc::new(std::sync::Mutex::new(opts.clone()));
+    let read = next.clone();
+    server.reload_with(move || Ok(read.lock().unwrap().clone()));
+    cert(&at, "a", 2031);
+    cert(&at, "w", 2032);
+    server.reload().unwrap();
+    assert_eq!(varz(), ("2031".to_owned(), "2032".to_owned()));
+    // WebSocket TLS may change, not go.
+    let mut plain = opts.clone();
+    if let Some(w) = plain.websocket.as_mut() {
+        w.tls = None;
+        w.no_tls = true;
+    }
+    *next.lock().unwrap() = plain;
+    let e = server.reload().unwrap_err().to_string();
+    assert!(
+        e.starts_with("config reload not supported for Websocket"),
+        "{e}"
+    );
+    server.shutdown();
+}

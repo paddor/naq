@@ -142,6 +142,11 @@ Notable changes to naq. The format follows
   password no longer holds gets `Authorization Violation`, and the
   subscriptions its permissions no longer allow end with an `-ERR` and a
   log line. Every server has room for accounts added while it runs.
+- `naq`: a reload takes the TLS of clients for those that come next, as
+  `nats-server` does: its certificates when their files change,
+  `timeout`, `handshake_first` and its fallback, TLS turned on or off.
+  WebSocket clients and the HTTPS monitoring port take new certificates
+  too.
 
 ### Changed
 
