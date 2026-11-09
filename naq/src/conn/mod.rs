@@ -5,6 +5,7 @@ mod log;
 mod login;
 mod ping;
 mod read;
+mod reload;
 mod trace;
 mod write;
 
@@ -319,6 +320,9 @@ enum Stage {
 pub(crate) enum Close {
     /// The client closed it, or reading failed.
     Lost,
+    /// A reload took its user away, or moved it to another account: closed
+    /// without a word, as by the client.
+    Moved,
     /// The server closed it.
     Kicked,
     /// It let more output wait than `max_pending`: a slow consumer.
@@ -362,7 +366,7 @@ impl Close {
     /// Why it ended, in the words of `nats-server`.
     pub(crate) fn reason(self) -> &'static str {
         match self {
-            Close::Lost => "Client Closed",
+            Close::Lost | Close::Moved => "Client Closed",
             Close::Kicked => "Kicked",
             Close::SlowPending => "Slow Consumer (Pending Bytes)",
             Close::SlowWrite(_) => "Slow Consumer (Write Deadline)",
@@ -451,6 +455,9 @@ struct Bounds {
     /// The largest payload its login allows, below the server's; -1 for
     /// none.
     payload: i64,
+    /// What it logged in with, to check again on a reload: not for users
+    /// of JWTs or auth callouts.
+    login: Option<Box<Proven>>,
     /// When it is closed, and why: its JWT expires.
     deadline: Option<(tokio::time::Instant, Close)>,
     /// The account whose connection count holds it.
@@ -461,6 +468,14 @@ struct Bounds {
     /// The account it was in as its login was refused, which
     /// `nats-server` tells of it; the auth callout's if that refused it.
     refused: Option<u32>,
+}
+
+/// What a client logged in with: its credentials, and the bcrypt hash its
+/// password held against, if it did.
+#[derive(Debug)]
+struct Proven {
+    creds: crate::auth::Creds,
+    hash: Option<String>,
 }
 
 /// Runs a client connection that reached lane `index`.
@@ -496,7 +511,8 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
     let client = Rc::new(Client::new(lane.shared.next_client()));
     let nonce = lane
         .shared
-        .auth_for(ws)
+        .logins()
+        .of(ws)
         .filter(|a| a.wants_nonce())
         .map(|_| crate::auth::nonce().into_boxed_str());
     let mut info = Vec::new();
@@ -567,7 +583,7 @@ where
     let now = tokio::time::Instant::now();
     let ws_ping = via.ws.then(|| lane.shared.ws.as_ref()?.opts.ping_interval);
     let ping = ping::Pinger::new(now, ws_ping.flatten().unwrap_or(opts.ping_interval));
-    let auth_by = lane.shared.auth_for(via.ws).map(|a| now + a.timeout);
+    let auth_by = lane.shared.logins().of(via.ws).map(|a| now + a.timeout);
     let out = Outs::new(&lane);
     let ip = client.meta.borrow().ip.clone();
     let limits = naq_proto::client::Limits {
@@ -597,6 +613,7 @@ where
             limits,
             subs: -1,
             payload: -1,
+            login: None,
             deadline: None,
             counted: None,
             kept: None,
@@ -704,6 +721,7 @@ impl Conn {
             self.client.unsubscribe(&self.lane, &sid);
         }
         self.lane.clients.borrow_mut().remove(&self.client.id);
+        self.lane.refreshed(self.client.id);
         if let Some(a) = self.bounds.counted.take() {
             self.lane.shared.uncount(a, self.client.id);
         }
@@ -740,6 +758,7 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::AccountExpired => Some("Account Authentication Expired"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
+        | Close::Moved
         | Close::Kicked
         | Close::SlowPending
         | Close::SlowWrite(_)

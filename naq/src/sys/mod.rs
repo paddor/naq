@@ -192,7 +192,7 @@ pub(crate) fn install(lane: &Lane) {
 
 /// The trust of `shared`'s server, in operator mode.
 fn trust(shared: &Shared) -> Option<&crate::jwt::trust::Trust> {
-    shared.auth.as_ref().and_then(crate::auth::Auth::trust)
+    shared.trust()
 }
 
 /// Answers request `m` for `service`, which came in the system account on

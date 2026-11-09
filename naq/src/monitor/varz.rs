@@ -310,7 +310,7 @@ fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[OnLane]) -> Varz<'a> {
         go: "",
         host: &o.host,
         port: s.addr.port(),
-        auth_required: s.auth.is_some(),
+        auth_required: s.logins().auth.is_some(),
         tls_required: tls.is_some(),
         tls_verify: tls.is_some_and(|t| t.verify),
         connect_urls: connect_urls(s),

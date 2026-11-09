@@ -217,7 +217,7 @@ pub(super) fn closing(why: Option<Close>) -> (u16, &'static str) {
         return (frame::GOING_AWAY, "Server Shutdown");
     };
     let status = match why {
-        Close::Lost => frame::NORMAL,
+        Close::Lost | Close::Moved => frame::NORMAL,
         Close::Parse(ParseError::MaxPayload(_)) => frame::TOO_BIG,
         Close::Parse(ParseError::ControlLine)
         | Close::SlowPending

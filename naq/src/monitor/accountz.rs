@@ -23,7 +23,7 @@ use crate::{Export, ExportKind, ResponseType, Sampling};
 
 /// The account of a JWT of `name`, if the server trusts one.
 fn jwt_of(shared: &Shared, name: &str) -> Option<Arc<JwtAccount>> {
-    shared.auth.as_ref()?.trust()?.claims_of(name)
+    shared.trust()?.claims_of(name)
 }
 
 /// Whether account `name` is in use as `nats-server` has accounts: one of

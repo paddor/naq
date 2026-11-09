@@ -18,7 +18,7 @@ pub(super) const UPDATES: [&[u8]; 2] = [
 /// and tells every lane once an account took it.
 pub(super) fn update(lane: &Lane, out: &mut Outs, m: &Pub<'_>) -> bool {
     let shared = &lane.shared;
-    let Some(trust) = shared.auth.as_ref().and_then(crate::auth::Auth::trust) else {
+    let Some(trust) = shared.trust() else {
         return false;
     };
     let Some(key) = account_of(m.subject) else {

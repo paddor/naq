@@ -134,6 +134,14 @@ Notable changes to naq. The format follows
   `server_metadata` (with a `STATSZ`), the pid file and the ports file.
   `Server::reload_with` reads the options another way; the `naq` binary
   reads its flags again over the file.
+- `naq`: a reload takes users, NKeys, the single user, the token,
+  permissions, the login timeout, accounts it adds and their connection
+  limits, and the removal of the `no_auth_user` with its user. Every
+  client is checked again, as by `nats-server`: one whose user went or
+  moved to another account is closed as `Client Closed`, one whose
+  password no longer holds gets `Authorization Violation`, and the
+  subscriptions its permissions no longer allow end with an `-ERR` and a
+  log line. Every server has room for accounts added while it runs.
 
 ### Changed
 

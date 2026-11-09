@@ -91,7 +91,7 @@ impl Conn {
             // passes its wake on, and the timer keeps its deadline.
             tokio::select! {
                 biased;
-                () = self.client.stop.notified() => if let Some(close) = self.woken() {
+                () = self.client.stop.notified() => if let Some(close) = self.woken().await {
                     return close;
                 },
                 () = &mut timer => {
@@ -109,7 +109,7 @@ impl Conn {
 
     /// Acts on a wake by the server: a close, an `INFO` to send, or a
     /// change of its account.
-    fn woken(&mut self) -> Option<Close> {
+    async fn woken(&mut self) -> Option<Close> {
         if self.client.is_closed() {
             return Some(Close::Kicked);
         }
@@ -117,7 +117,7 @@ impl Conn {
             self.inform(ldm);
         }
         if self.client.take_refresh() {
-            return self.refresh().err();
+            return self.refresh().await.err();
         }
         None
     }

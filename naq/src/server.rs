@@ -8,7 +8,7 @@ use std::time::Duration;
 use zzq_tokio::transport::{Listener, TransportOptions};
 use zzq_tokio::{Config, Context, Endpoint, LaneHandle};
 
-use crate::auth::{self, Auth};
+use crate::auth::{self, Auth, Logins};
 use crate::error::io;
 use crate::tls::Acceptor;
 use crate::{Error, Options, conn, lane, stats};
@@ -46,9 +46,10 @@ pub(crate) struct Shared {
     /// What the server keeps for its services on `$SYS`.
     pub(crate) sys: crate::sys::State,
     /// What clients must authenticate with, if anything.
-    pub(crate) auth: Option<Auth>,
-    /// What WebSocket clients authenticate with, where it is not `auth`.
-    ws_auth: Option<Auth>,
+    logins: std::sync::RwLock<Arc<Logins>>,
+    /// The operator mode users log in under, if any: no reload changes
+    /// it.
+    trust: Option<Arc<crate::jwt::trust::Trust>>,
     /// The auth callouts clients log in through, if any.
     pub(crate) callouts: Option<crate::callout::Callouts>,
     /// Where the server logs to.
@@ -98,11 +99,23 @@ impl Shared {
     }
 
     /// What clients authenticate with, over WebSocket if `ws`, if anything.
-    pub(crate) const fn auth_for(&self, ws: bool) -> Option<&Auth> {
-        match &self.ws_auth {
-            Some(a) if ws => Some(a),
-            _ => self.auth.as_ref(),
-        }
+    pub(crate) fn logins(&self) -> Arc<Logins> {
+        self.logins
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Takes the logins `opts` ask for, of users in `accounts`, the
+    /// server's by id, from now on.
+    pub(crate) fn relogin(&self, opts: &Options, accounts: &[String]) {
+        let logins = Logins::new(opts, accounts, self.trust.as_ref());
+        *self.logins.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(logins);
+    }
+
+    /// The operator mode users log in under, if any.
+    pub(crate) fn trust(&self) -> Option<&crate::jwt::trust::Trust> {
+        self.trust.as_deref()
     }
 
     /// A new client ID, unique in this server. IDs start at 1.
@@ -213,7 +226,7 @@ impl Server {
         let log = crate::log::Log::new(&opts.log).map_err(Error::Log)?;
         let accounts = auth::accounts(opts);
         let system = auth::system(opts, &accounts);
-        let auth = Auth::new(opts, &accounts);
+        let logins = Logins::new(opts, &accounts, None);
         let ctx = context(opts)?;
         let (ports, at) = bind_all(&ctx, opts)?;
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
@@ -225,7 +238,7 @@ impl Server {
             options: std::sync::RwLock::new(Arc::new(opts.clone())),
             max_pending: opts.max_pending,
             addr: at.client,
-            callouts: crate::callout::Callouts::new(opts, &accounts, auth.as_ref(), node),
+            callouts: crate::callout::Callouts::new(opts, &accounts, logins.auth.as_ref(), node),
             server_id: keys.server.public_key(),
             keys,
             lanes: txs.into_boxed_slice(),
@@ -236,8 +249,8 @@ impl Server {
                 opts,
             )),
             resolver: setup.resolver,
-            ws_auth: Auth::websocket(opts, auth.as_ref()),
-            auth,
+            trust: logins.auth.as_ref().and_then(Auth::trust_arc).cloned(),
+            logins: std::sync::RwLock::new(Arc::new(logins)),
             log,
             stopping: std::sync::atomic::AtomicBool::new(false),
             lame: crate::lame::Lame::default(),

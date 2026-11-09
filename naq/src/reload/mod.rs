@@ -5,6 +5,7 @@
 //! options.
 
 mod diff;
+mod users;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -52,8 +53,6 @@ impl State {
 struct After {
     /// The log is set up anew.
     logging: bool,
-    /// The clients take the new limits, pings and traces.
-    clients: bool,
     /// `STATSZ` goes out.
     statsz: bool,
 }
@@ -112,9 +111,10 @@ fn take(shared: &Shared, mut new: Options) -> Result<(), Error> {
             .log
             .error(format_args!("Failed to reload the log: {e}"));
     }
-    if after.clients {
-        refresh(shared);
-    }
+    // As `nats-server`: users and accounts always, and the clients
+    // checked again, with the new limits, pings and traces.
+    users::take(shared, &new);
+    users::recheck(shared);
     if after.statsz {
         crate::sys::statsz(shared);
     }
@@ -135,8 +135,16 @@ fn apply(shared: &Shared, new: &Options, c: &Change, after: &mut After) {
         Change::Debug(on) => info(format_args!("Reloaded: debug = {on}")),
         Change::TraceHeaders(on) => info(format_args!("Reloaded: trace_headers = {on}")),
         Change::Logtime(on) => info(format_args!("Reloaded: logtime = {on}")),
+        Change::NkeyUsers => info(format_args!("Reloaded: authorization nkey users")),
         Change::Users => info(format_args!("Reloaded: authorization users")),
         Change::Accounts => info(format_args!("Reloaded: accounts")),
+        Change::Username => info(format_args!("Reloaded: authorization username")),
+        Change::Password => info(format_args!("Reloaded: authorization password")),
+        Change::Token => info(format_args!("Reloaded: authorization token")),
+        Change::AuthTimeout(d) => {
+            let d = diff::seconds(*d);
+            info(format_args!("Reloaded: authorization timeout = {d}"));
+        }
         Change::LogFile(path) => info(format_args!("Reloaded: log_file = {path}")),
         Change::Syslog(on) => info(format_args!("Reloaded: syslog = {on}")),
         Change::RemoteSyslog(url) => info(format_args!("Reloaded: remote_syslog = {url}")),
@@ -166,20 +174,8 @@ fn apply(shared: &Shared, new: &Options, c: &Change, after: &mut After) {
         | Change::Syslog(_)
         | Change::RemoteSyslog(_)
         | Change::MaxTracedMsgLen(_) => after.logging = true,
-        Change::PingInterval(_) | Change::MaxControlLine(_) | Change::MaxPayload(_) => {
-            after.clients = true;
-        }
         Change::Tags | Change::Metadata => after.statsz = true,
-        Change::Users
-        | Change::Accounts
-        | Change::PingMax(_)
-        | Change::WriteDeadline(_)
-        | Change::PidFile(_)
-        | Change::PortsFileDir(_) => {}
-    }
-    // Clients trace as the log does.
-    if matches!(c, Change::Trace(_)) {
-        after.clients = true;
+        _ => {}
     }
 }
 
@@ -224,17 +220,6 @@ fn ports_file(shared: &Shared, new: &Options, dir: Option<&std::path::Path>) {
     drop(held);
     let dir = dir.map(|d| d.display().to_string()).unwrap_or_default();
     log.info(format_args!("Reloaded: ports_file_dir = {dir}"));
-}
-
-/// Has every client of `shared`'s server take the options anew.
-fn refresh(shared: &Shared) {
-    for lane in 0..shared.lanes.len() {
-        crate::monitor::on_lane(shared, lane, |lane| {
-            for c in lane.clients.borrow().values() {
-                c.refresh();
-            }
-        });
-    }
 }
 
 #[cfg(test)]

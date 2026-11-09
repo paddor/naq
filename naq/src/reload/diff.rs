@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::log::go_duration;
-use crate::{LogTo, Options, Trace};
+use crate::{LogTo, Login, Options, Trace};
 
 /// A change a reload applies, in the order `nats-server` applies them.
 #[derive(Debug, Clone, PartialEq)]
@@ -15,12 +15,17 @@ pub(super) enum Change {
     Debug(bool),
     TraceHeaders(bool),
     Logtime(bool),
+    NkeyUsers,
     /// Always, as `nats-server` takes users and accounts as changed.
     Users,
     /// Always, as for [`Change::Users`].
     Accounts,
+    Username,
+    Password,
+    Token,
     PingInterval(Duration),
     PingMax(u32),
+    AuthTimeout(Duration),
     MaxControlLine(usize),
     MaxPayload(usize),
     PidFile(Option<PathBuf>),
@@ -151,25 +156,30 @@ impl Diff<'_> {
         self.push(o.time != n.time, Change::Logtime(n.time));
     }
 
-    /// Who may log in: no change yet.
+    /// Who may log in. Users and accounts change always, as
+    /// `nats-server` takes them.
     fn auth(&mut self) -> Result<(), String> {
         let (o, n) = (self.old, self.new);
-        let same = o.users == n.users
-            && o.accounts == n.accounts
-            && o.user == n.user
-            && o.token == n.token
-            && o.no_auth_user == n.no_auth_user
-            && o.default_permissions == n.default_permissions;
-        if !same {
-            return Err(refusal("Users", "[...]", "[...]"));
-        }
+        let nkeys = |x: &'_ Options| {
+            let of = |u: &&crate::User| matches!(u.login, Login::Nkey(_));
+            x.users.iter().filter(of).cloned().collect::<Vec<_>>()
+        };
+        self.push(nkeys(o) != nkeys(n), Change::NkeyUsers);
         self.out.extend([Change::Users, Change::Accounts]);
-        fixed("SystemAccount", &o.system_account, &n.system_account)?;
+        accounts(o, n)?;
+        no_auth_user(o, n)?;
+        let sys = |x: &Options| x.system_account.clone().unwrap_or_else(|| "$SYS".into());
+        fixed("SystemAccount", &sys(o), &sys(n))?;
         fixed(
             "NoSystemAccount",
             &o.no_system_account,
             &n.no_system_account,
         )?;
+        let user = |x: &Options| x.user.as_ref().map(|u| u.0.clone());
+        let pass = |x: &Options| x.user.as_ref().map(|u| u.1.clone());
+        self.push(user(o) != user(n), Change::Username);
+        self.push(pass(o) != pass(n), Change::Password);
+        self.push(o.token != n.token, Change::Token);
         if o.auth_callout != n.auth_callout {
             return Err(refusal("AuthCallout", "{...}", "{...}"));
         }
@@ -188,8 +198,8 @@ impl Diff<'_> {
         fixed("HTTPBasePath", &o.http_base_path, &n.http_base_path)?;
         let https = (http_port(o.https_port), http_port(n.https_port));
         fixed("HTTPSPort", &https.0, &https.1)?;
-        let auth = (seconds(o.auth_timeout), seconds(n.auth_timeout));
-        fixed("AuthTimeout", &auth.0, &auth.1)?;
+        let auth = o.auth_timeout != n.auth_timeout;
+        self.push(auth, Change::AuthTimeout(n.auth_timeout));
         let line = o.max_control_line != n.max_control_line;
         self.push(line, Change::MaxControlLine(n.max_control_line));
         let payload = o.max_payload != n.max_payload;
@@ -274,6 +284,37 @@ impl Diff<'_> {
         self.push(o.server_tags != n.server_tags, Change::Tags);
         self.push(o.server_metadata != n.server_metadata, Change::Metadata);
         Ok(())
+    }
+}
+
+/// Refuses changes of the exports and imports of an account both `old`
+/// and `new` have: naq links them once.
+fn accounts(old: &Options, new: &Options) -> Result<(), String> {
+    for a in &new.accounts {
+        let before = old.accounts.iter().find(|b| b.name == a.name);
+        if before.is_some_and(|b| b.exports != a.exports || b.imports != a.imports) {
+            return Err(format!(
+                "config reload not supported for Accounts: the exports and imports of {:?}",
+                a.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a change of the `no_auth_user`, as `nats-server` does, but its
+/// removal with the user of its name.
+fn no_auth_user(old: &Options, new: &Options) -> Result<(), String> {
+    let (o, n) = (&old.no_auth_user, &new.no_auth_user);
+    let kept = |name: &str| {
+        new.users
+            .iter()
+            .any(|u| matches!(&u.login, Login::Password { user, .. } if user == name))
+    };
+    match (o, n) {
+        _ if o == n => Ok(()),
+        (Some(name), None) if !kept(name) => Ok(()),
+        _ => Err(refusal("NoAuthUser", &o.go(), &n.go())),
     }
 }
 

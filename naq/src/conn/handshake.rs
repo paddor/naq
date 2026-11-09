@@ -166,14 +166,15 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
         Kind::Bound(account) => Some(account),
         Kind::First | Kind::Async { .. } => None,
     };
-    let auth_required = match (kind, shared.auth_for(to.ws)) {
+    let logins = shared.logins();
+    let auth_required = match (kind, logins.of(to.ws)) {
         // Before the CONNECT, a client need not authenticate if it may
         // connect as the no_auth_user; over WebSocket, `nats-server` asks
         // all the same.
         (Kind::First, Some(a)) => to.ws || !a.open(),
         (Kind::Bound(_), a) => a.is_some(),
         // As the server's own INFO has it: for clients not over WebSocket.
-        (Kind::Async { .. }, _) => shared.auth.is_some(),
+        (Kind::Async { .. }, _) => logins.auth.is_some(),
         (Kind::First, None) => false,
     };
     let info = Info {

@@ -68,7 +68,7 @@ impl Logins {
     pub(super) fn new(shared: &Shared, account: u32) -> Logins {
         let opts = &shared.opts();
         Logins {
-            auth: Auth::leafnodes(opts, &shared.accounts, shared.auth.as_ref()),
+            auth: Auth::leafnodes(opts, &shared.accounts, shared.logins().auth.as_ref()),
             account,
             timeout: opts
                 .leafnodes

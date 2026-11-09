@@ -96,7 +96,8 @@ impl Conn {
     /// `fetched`, the account its JWT named fetched since.
     fn login(&mut self, mut creds: Creds, names: Names, fetched: bool) -> Result<Step, Close> {
         let shared = self.lane.shared.clone();
-        let auth = shared.auth_for(self.via.ws);
+        let logins = shared.logins();
+        let auth = logins.of(self.via.ws);
         let check = auth.map(|auth| {
             let nonce = self.nonce.as_deref().unwrap_or_default();
             auth.check(&mut creds, nonce.as_bytes(), self.origin())
@@ -116,18 +117,9 @@ impl Conn {
             Hook::Keep | Hook::Own(_) => None,
             Hook::Call(plan) | Hook::Verify(plan) => Some(self.call(plan, auth, &creds, &names)),
         };
-        {
-            let mut meta = self.client.meta.borrow_mut();
-            (meta.name, meta.lang, meta.version) = names;
-            meta.websocket = self.via.ws;
-            meta.how = super::log::How::of(&creds);
-            // A client without credentials is the no_auth_user, if any.
-            let free = auth
-                .filter(|_| creds.is_blank())
-                .and_then(|a| a.id_of(&creds))
-                .map(str::to_owned);
-            meta.user = creds.user.or(creds.nkey).or(free);
-        }
+        self.note_login(auth, &creds, names);
+        // What a reload checks again: logins without a callout.
+        let keep = matches!(hook, Hook::Keep);
         // A user of the service may not ask for others in its account.
         let own = |account: u32, perms: Option<std::sync::Arc<crate::perms::Perms>>| match hook {
             Hook::Own(a) if a == account => Some(callout::guarded(perms.as_deref())),
@@ -137,10 +129,12 @@ impl Conn {
             (_, Some(c)) if matches!(hook, Hook::Call(_)) => Later::Call(c),
             (Some(Check::Bcrypt(mut p)), call) => {
                 p.grant.perms = own(p.grant.account, p.grant.perms.take());
+                self.prove(keep, creds, Some(p.hash()));
                 Later::Verify(p, call)
             }
             (Some(Check::Pass(mut g)), _) => {
                 g.perms = own(g.account, g.perms.take());
+                self.prove(keep, creds, None);
                 self.bind(g)?;
                 return self.connected().map(|()| Step::Next);
             }
@@ -149,10 +143,39 @@ impl Conn {
                 self.bind_user(&u)?;
                 return self.connected().map(|()| Step::Next);
             }
-            (None, _) => return self.connected().map(|()| Step::Next),
+            (None, _) => {
+                self.prove(keep, creds, None);
+                return self.connected().map(|()| Step::Next);
+            }
             (Some(Check::Fail | Check::Fetch(_)), _) => return Err(Close::Auth),
         };
         Ok(Step::Login(Box::new(later)))
+    }
+
+    /// Notes who the client says it is, with `creds` and `names`, as
+    /// `auth` knows it.
+    fn note_login(&self, auth: Option<&Auth>, creds: &Creds, names: Names) {
+        let mut meta = self.client.meta.borrow_mut();
+        (meta.name, meta.lang, meta.version) = names;
+        meta.websocket = self.via.ws;
+        meta.how = super::log::How::of(creds);
+        // A client without credentials is the no_auth_user, if any.
+        let free = auth
+            .filter(|_| creds.is_blank())
+            .and_then(|a| a.id_of(creds))
+            .map(str::to_owned);
+        meta.user = creds.user.clone().or_else(|| creds.nkey.clone()).or(free);
+    }
+
+    /// Keeps `creds`, which held against bcrypt `hash` if any, for a reload
+    /// to check again, if `keep`.
+    fn prove(&mut self, keep: bool, creds: Creds, hash: Option<&str>) {
+        self.bounds.login = keep.then(|| {
+            Box::new(super::Proven {
+                creds,
+                hash: hash.map(str::to_owned),
+            })
+        });
     }
 
     /// The callout of `plan` for a client that gave `creds` to `auth`.
@@ -198,7 +221,8 @@ impl Conn {
     #[inline(never)]
     pub(super) fn without_connect(&mut self) -> Result<(), Close> {
         let shared = self.lane.shared.clone();
-        let auth = shared.auth_for(self.via.ws);
+        let logins = shared.logins();
+        let auth = logins.of(self.via.ws);
         let check = auth.map(|a| a.check(&mut Creds::default(), b"", self.origin()));
         if let Some(c) = &shared.callouts
             && matches!(
@@ -209,7 +233,10 @@ impl Conn {
             return Err(Close::Auth);
         }
         match check {
-            Some(Check::Pass(account)) => self.bind(account),
+            Some(Check::Pass(grant)) => {
+                self.prove(true, Creds::default(), None);
+                self.bind(grant)
+            }
             _ => Err(Close::Auth),
         }
     }
@@ -224,7 +251,7 @@ impl Conn {
     }
 
     /// How the client connects, for the checks of its login.
-    fn origin(&self) -> Origin<'_> {
+    pub(super) fn origin(&self) -> Origin<'_> {
         Origin {
             ip: self.ip.parse().ok(),
             kind: self.kind(),
@@ -244,10 +271,13 @@ impl Conn {
                 let fetched = loop {
                     tokio::select! {
                         biased;
-                        // Not logged in yet: a change of its account is
-                        // nothing to it.
-                        () = self.client.stop.notified() => if self.client.is_closed() {
-                            return Err(Close::Kicked);
+                        () = self.client.stop.notified() => {
+                            if self.client.is_closed() {
+                                return Err(Close::Kicked);
+                            }
+                            // Not logged in yet: a reload or a change of
+                            // its account is nothing to it.
+                            self.lane.refreshed(self.client.id);
                         },
                         id = &mut fetch => break id,
                     }
@@ -301,9 +331,13 @@ impl Conn {
         let answer = loop {
             tokio::select! {
                 biased;
-                // Not logged in yet: a change of its account is nothing to it.
-                () = self.client.stop.notified() => if self.client.is_closed() {
-                    return Err(Close::Kicked);
+                () = self.client.stop.notified() => {
+                    if self.client.is_closed() {
+                        return Err(Close::Kicked);
+                    }
+                    // Not logged in yet: a reload or a change of its
+                    // account is nothing to it.
+                    self.lane.refreshed(self.client.id);
                 },
                 a = &mut ticket.answer => break a.ok(),
                 () = &mut timeout => break None,
@@ -321,6 +355,8 @@ impl Conn {
         if user.account == account {
             user.perms = Some(callout::guarded(user.perms.as_deref()));
         }
+        // As the service decided: no reload checks it again.
+        self.bounds.login = None;
         self.bind_user(&user)?;
         self.connected()
     }
@@ -404,16 +440,30 @@ impl Conn {
         Ok(())
     }
 
-    /// Checks the login again once its account changed, as `nats-server`
-    /// checks its clients after an update: the client may stay with new
-    /// limits and permissions, or go.
+    /// Checks the login again once the server's options or its account
+    /// changed, as `nats-server` checks its clients after a reload or an
+    /// update: the client may stay with new limits and permissions, or go.
+    pub(super) async fn refresh(&mut self) -> Result<(), Close> {
+        self.retake();
+        let done = if self.bounds.login.is_some() {
+            self.relogin().await
+        } else {
+            self.recheck()
+        };
+        // A client that goes tells as it ends, its close logged.
+        if done.is_ok() {
+            self.lane.refreshed(self.client.id);
+        }
+        done
+    }
+
+    /// Checks a JWT login again, as for an update of its account.
     #[cold]
     #[inline(never)]
-    pub(super) fn refresh(&mut self) -> Result<(), Close> {
+    fn recheck(&mut self) -> Result<(), Close> {
         use crate::jwt::trust::live::{Gone, Refresh};
-        self.retake();
         let shared = self.lane.shared.clone();
-        let trust = shared.auth.as_ref().and_then(Auth::trust);
+        let trust = shared.trust();
         let (Some(trust), Some(kept)) = (trust, self.bounds.kept.as_deref_mut()) else {
             return Ok(());
         };
@@ -445,7 +495,7 @@ impl Conn {
                 account,
                 perms: defaults.0,
             })?;
-            self.drop_forbidden();
+            self.drop_forbidden(false);
         }
         self.lane.flush();
         Ok(())
@@ -478,8 +528,9 @@ impl Conn {
         self.watch.on = tracing || self.auth_by.is_some();
     }
 
-    /// Ends the subscriptions its permissions no longer allow, and tells it.
-    fn drop_forbidden(&mut self) {
+    /// Ends the subscriptions its permissions no longer allow, and tells
+    /// it; logs each if `logged`, as `nats-server` does on a reload.
+    pub(super) fn drop_forbidden(&mut self, logged: bool) {
         let held = self.client.held.borrow().clone();
         let Some(held) = held else {
             return;
@@ -492,23 +543,21 @@ impl Conn {
             .filter(|(_, s)| !held.perms.subscribe(&s.subject, s.queue.as_deref()))
             .map(|(sid, s)| (sid.clone(), s.subject.clone(), s.queue.clone()))
             .collect();
+        let who = logged.then(|| self.auth_user());
         for (sid, subject, queue) in forbidden {
             self.client.unsubscribe(&self.lane, &sid);
             let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-            let why = match queue {
-                Some(q) => format!(
-                    "Permissions Violation for Subscription to {:?} using queue {:?} (sid {:?})",
-                    text(&subject),
-                    text(&q),
-                    text(&sid)
-                ),
-                None => format!(
-                    "Permissions Violation for Subscription to {:?} (sid {:?})",
-                    text(&subject),
-                    text(&sid)
-                ),
-            };
-            self.error(&why);
+            let (subject, sid) = (text(&subject), text(&sid));
+            let using = queue.map(|q| format!(" using queue {:?}", text(&q)));
+            let using = using.unwrap_or_default();
+            self.error(&format!(
+                "Permissions Violation for Subscription to {subject:?}{using} (sid {sid:?})"
+            ));
+            if let Some(who) = &who {
+                self.lane.shared.log.info(format_args!(
+                    "Removed sub {subject:?}{using} (sid {sid:?}) for {who} - not authorized"
+                ));
+            }
         }
     }
 

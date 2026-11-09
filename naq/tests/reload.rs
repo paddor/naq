@@ -647,3 +647,364 @@ fn a_reload_from_its_file_logs_what_it_cannot_write_and_goes_on() {
     );
     s.shutdown();
 }
+
+/// Users `a` and `b` in account `APP`, and what `extra` adds.
+fn app(extra: &str, a: &str, b: &str) -> String {
+    format!("debug: true\naccounts {{\n  APP {{ users: [{a}, {b}] }}\n{extra}}}\n")
+}
+
+/// The lines of the log a reload of live clients leaves: those of the
+/// server at `INF` and above but for its start, and those of clients
+/// closing, from the first reload on.
+/// Clients closed by one reload are in no set order: `nats-server` walks
+/// a map.
+fn auth_lines(lines: &[String]) -> Vec<String> {
+    let from = lines.iter().position(|l| l.contains("Trapped")).unwrap();
+    let mut all: Vec<String> = lines[from..]
+        .iter()
+        .map(|l| plain(l))
+        .filter(|l| {
+            !l.starts_with("[DBG]") && !l.starts_with("[TRC]")
+                || l.contains("Client connection closed")
+        })
+        .map(|l| {
+            l.split_once(" (sha256:")
+                .map_or(l.clone(), |(h, _)| format!("{h} (sha256:...)"))
+        })
+        .collect();
+    let closed = |l: &String| l.contains("Client connection closed: Client Closed");
+    let mut i = 0;
+    while i < all.len() {
+        let run = all[i..].iter().take_while(|l| closed(l)).count();
+        all[i..i + run].sort();
+        i += run.max(1);
+    }
+    all
+}
+
+#[test]
+fn live_clients_lose_subscriptions_their_permissions_no_longer_allow() {
+    let a = "{user: a, password: a}";
+    let b = "{user: b, password: b}";
+    let denied =
+        "{user: a, password: a, permissions: {publish: {deny: foo}, subscribe: {deny: foo}}}";
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        let d = dir(&format!("perms-{i}"));
+        let p = Proc::start(bin, &d, &app("", a, b), &[]);
+        let mut ca = Client::new(
+            p.port,
+            r#"{"verbose":false,"user":"a","pass":"a","name":"ca"}"#,
+        );
+        ca.send("SUB foo 1\r\nSUB bar q 2\r\nPING\r\n");
+        while ca.line() != "PONG\r\n" {}
+        p.write(&app("", denied, b));
+        p.hup();
+        let got = ca.line();
+        ca.send("PUB foo 1\r\nx\r\nPUB bar 1\r\ny\r\nPING\r\n");
+        let after = [ca.line(), ca.line(), ca.line()];
+        let lines = lines_once(&p.log(), |l| l.iter().any(|l| ends_reload(l)));
+        seen.push((got, after, auth_lines(&lines)));
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    let (got, after, lines) = &seen[0];
+    assert_eq!(
+        got,
+        "-ERR 'Permissions Violation for Subscription to \"foo\" (sid \"1\")'\r\n"
+    );
+    assert_eq!(
+        after[0],
+        "-ERR 'Permissions Violation for Publish to \"foo\"'\r\n"
+    );
+    assert_eq!(after[1], "MSG bar 2 1\r\n");
+    assert_eq!(
+        lines,
+        &[
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            r#"[INF] Removed sub "foo" (sid "1") for User "a" - not authorized"#,
+            "[INF] Reloaded server configuration (sha256:...)",
+            r#"[ERR] 127.0.0.1:P - cid:N - "ca" - "APP/user:a" - Publish Violation - Subject "foo""#,
+        ]
+    );
+}
+
+#[test]
+fn live_clients_whose_users_went_moved_or_lost_their_password_go() {
+    let (user_a, user_b, user_c) = (
+        "{user: a, password: a}",
+        "{user: b, password: b}",
+        "{user: c, password: c}",
+    );
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        let d = dir(&format!("users-{i}"));
+        let first = app(
+            "  OTHER { users: [] }\n",
+            user_a,
+            &format!("{user_b}, {user_c}"),
+        );
+        let p = Proc::start(bin, &d, &first, &[]);
+        let login = |u: &str| {
+            let connect = format!(r#"{{"verbose":false,"user":"{u}","pass":"{u}","name":"{u}"}}"#);
+            Client::new(p.port, &connect)
+        };
+        let (ca, cb, cc) = (login("a"), login("b"), login("c"));
+        // b goes, c moves to OTHER.
+        p.write(&app(
+            &format!("  OTHER {{ users: [{user_c}] }}\n"),
+            user_a,
+            "{user: x, password: x}",
+        ));
+        p.hup();
+        let (b_got, c_got) = (cb.rest(), cc.rest());
+        // a's password changes.
+        p.write(&app("", "{user: a, password: a2}", user_b));
+        p.hup();
+        let a_got = ca.rest();
+        let lines = lines_once(&p.log(), |l| {
+            l.iter().filter(|l| ends_reload(l)).count() >= 2
+        });
+        seen.push((a_got, b_got, c_got, auth_lines(&lines)));
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    let (a_got, b_got, c_got, lines) = &seen[0];
+    assert_eq!(a_got, "-ERR 'Authorization Violation'\r\n");
+    assert_eq!((b_got.as_str(), c_got.as_str()), ("", ""));
+    assert_eq!(
+        lines,
+        &[
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            r#"[DBG] 127.0.0.1:P - cid:N - "b" - "APP/user:b" - Client connection closed: Client Closed"#,
+            r#"[DBG] 127.0.0.1:P - cid:N - "c" - "APP/user:c" - Client connection closed: Client Closed"#,
+            "[INF] Reloaded server configuration (sha256:...)",
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            r#"[ERR] 127.0.0.1:P - cid:N - "a" - "APP/user:a" - authentication error - User "a""#,
+            r#"[DBG] 127.0.0.1:P - cid:N - "a" - "APP/user:a" - Client connection closed: Authentication Failure"#,
+            "[INF] Reloaded server configuration (sha256:...)",
+        ]
+    );
+}
+
+#[test]
+fn the_single_user_and_the_token_reload_and_hold_their_clients_to_them() {
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        let d = dir(&format!("single-{i}"));
+        let single = "authorization { user: u, password: p }\n";
+        let p = Proc::start(bin, &d, single, &[]);
+        let mut cu = Client::new(
+            p.port,
+            r#"{"verbose":false,"user":"u","pass":"p","name":"u"}"#,
+        );
+        // Unchanged: the client stays.
+        p.write(single);
+        p.hup();
+        cu.send("PING\r\n");
+        let stayed = cu.line();
+        p.write("authorization { user: u, password: p2 }\n");
+        p.hup();
+        let u_got = cu.rest();
+        p.write("authorization { token: t }\n");
+        p.hup();
+        let ct = Client::new(p.port, r#"{"verbose":false,"auth_token":"t","name":"t"}"#);
+        p.write("authorization { token: t2 }\n");
+        p.hup();
+        let t_got = ct.rest();
+        let lines = lines_once(&p.log(), |l| {
+            l.iter().filter(|l| ends_reload(l)).count() >= 4
+        });
+        seen.push((stayed, u_got, t_got, reload_lines(&lines)));
+    }
+    // nats-server closes the clients of the single user at every reload,
+    // as moved: they are not of its user list.
+    if let [naq, go] = &seen[..] {
+        assert_eq!((&naq.2, &naq.3), (&go.2, &go.3), "naq, then nats-server");
+    }
+    let (stayed, u_got, t_got, lines) = &seen[0];
+    assert_eq!(stayed, "PONG\r\n");
+    assert_eq!(u_got, "-ERR 'Authorization Violation'\r\n");
+    assert_eq!(t_got, "-ERR 'Authorization Violation'\r\n");
+    assert_eq!(
+        lines,
+        &[
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            "[INF] Reloaded server configuration (sha256:...)",
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            "[INF] Reloaded: authorization password",
+            "[INF] Reloaded server configuration (sha256:...)",
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            "[INF] Reloaded: authorization username",
+            "[INF] Reloaded: authorization password",
+            "[INF] Reloaded: authorization token",
+            "[INF] Reloaded server configuration (sha256:...)",
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            "[INF] Reloaded: authorization token",
+            "[INF] Reloaded server configuration (sha256:...)",
+        ]
+    );
+}
+
+#[test]
+fn an_account_a_reload_adds_takes_its_users_apart_from_the_others() {
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        let d = dir(&format!("added-{i}"));
+        let first = "accounts { APP { users: [{user: a, password: a}] } }\n";
+        let p = Proc::start(bin, &d, first, &[]);
+        let mut ca = Client::new(p.port, r#"{"verbose":false,"user":"a","pass":"a"}"#);
+        ca.send("SUB x 1\r\nPING\r\n");
+        while ca.line() != "PONG\r\n" {}
+        p.write(
+            "accounts { APP { users: [{user: a, password: a}] }, \
+             NEW { users: [{user: n, password: n}] } }\n",
+        );
+        p.hup();
+        let mut cn = Client::new(p.port, r#"{"verbose":false,"user":"n","pass":"n"}"#);
+        cn.send("SUB x 1\r\nPUB x 2\r\nhi\r\nPING\r\n");
+        let n_got = [cn.line(), cn.line(), cn.line()];
+        ca.send("PING\r\n");
+        let a_got = ca.line();
+        seen.push((n_got, a_got));
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    let (n_got, a_got) = &seen[0];
+    assert_eq!(n_got, &["MSG x 1 2\r\n", "hi\r\n", "PONG\r\n"]);
+    assert_eq!(a_got, "PONG\r\n", "APP got nothing of NEW");
+}
+
+#[test]
+fn clients_of_a_server_without_users_must_log_in_once_it_has_some() {
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        let d = dir(&format!("open-{i}"));
+        let p = Proc::start(bin, &d, "", &[]);
+        let c = Client::new(p.port, r#"{"verbose":false}"#);
+        p.write("authorization { users: [{user: a, password: a}] }\n");
+        p.hup();
+        let fresh = Client::new(p.port, r#"{"verbose":false,"user":"a","pass":"a"}"#);
+        seen.push((c.rest(), fresh.info["auth_required"].clone()));
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    assert_eq!(seen[0].0, "-ERR 'Authorization Violation'\r\n");
+    assert_eq!(seen[0].1, true);
+}
+
+#[test]
+fn the_no_auth_user_goes_only_with_its_user() {
+    let users = "authorization { users: [{user: a, password: a}, {user: b, password: b}] }\n";
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        let d = dir(&format!("noauth-{i}"));
+        let p = Proc::start(bin, &d, &format!("{users}no_auth_user: a\n"), &[]);
+        p.write(&format!("{users}no_auth_user: b\n"));
+        p.hup();
+        p.write(users);
+        p.hup();
+        p.write("authorization { users: [{user: b, password: b}] }\n");
+        p.hup();
+        let lines = lines_once(&p.log(), |l| {
+            l.iter().filter(|l| ends_reload(l)).count() >= 3
+        });
+        seen.push(reload_lines(&lines));
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    let refused =
+        "[ERR] Failed to reload server configuration: config reload not supported for NoAuthUser";
+    assert_eq!(
+        seen[0],
+        [
+            r#"[INF] Trapped "hangup" signal"#.to_owned(),
+            format!("{refused}: old=a, new=b"),
+            r#"[INF] Trapped "hangup" signal"#.to_owned(),
+            format!("{refused}: old=a, new="),
+            r#"[INF] Trapped "hangup" signal"#.to_owned(),
+            "[INF] Reloaded: authorization users".to_owned(),
+            "[INF] Reloaded: accounts".to_owned(),
+            "[INF] Reloaded server configuration (sha256:...)".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn nkey_users_and_the_login_timeout_reload_and_links_of_accounts_do_not() {
+    let key = nkeys::KeyPair::new_user().public_key();
+    let accounts =
+        "accounts { A { exports: [{stream: x}] }, B { users: [{user: b, password: b}] } }\n";
+    let mut seen = Vec::new();
+    for (i, bin) in binaries().iter().enumerate() {
+        let d = dir(&format!("nkeys-{i}"));
+        let p = Proc::start(bin, &d, accounts, &[]);
+        let users = format!("authorization {{ timeout: 3, users: [{{nkey: {key}}}] }}\n");
+        p.write(&format!("{accounts}{users}"));
+        p.hup();
+        let imports = accounts.replace(
+            "users:",
+            "imports: [{stream: {account: A, subject: x}}], users:",
+        );
+        p.write(&format!("{imports}{users}"));
+        p.hup();
+        let lines = lines_once(&p.log(), |l| {
+            l.iter().filter(|l| ends_reload(l)).count() >= 2
+        });
+        seen.push(reload_lines(&lines));
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq[..6], go[..6], "naq, then nats-server");
+    }
+    assert_eq!(
+        seen[0],
+        [
+            r#"[INF] Trapped "hangup" signal"#,
+            "[INF] Reloaded: authorization nkey users",
+            "[INF] Reloaded: authorization users",
+            "[INF] Reloaded: accounts",
+            "[INF] Reloaded: authorization timeout = 3",
+            "[INF] Reloaded server configuration (sha256:...)",
+            r#"[INF] Trapped "hangup" signal"#,
+            "[ERR] Failed to reload server configuration: config reload not supported for \
+             Accounts: the exports and imports of \"B\"",
+        ]
+    );
+}
+
+#[test]
+fn a_bcrypt_password_holds_against_a_new_hash_of_it_and_not_another() {
+    let hash = |p: &str| bcrypt::hash(p, 4).unwrap();
+    let d = dir("bcrypt");
+    let conf = |h: &str| format!("authorization {{ users: [{{user: a, password: \"{h}\"}}] }}\n");
+    let p = Proc::start(NAQ.as_ref(), &d, &conf(&hash("p")), &[]);
+    let mut c = Client::new(p.port, r#"{"verbose":false,"user":"a","pass":"p"}"#);
+    for h in [hash("p"), hash("p")] {
+        p.write(&conf(&h));
+        p.hup();
+        c.send("PING\r\n");
+        assert_eq!(c.line(), "PONG\r\n", "the same password holds");
+    }
+    p.write(&conf(&hash("q")));
+    p.hup();
+    assert_eq!(c.rest(), "-ERR 'Authorization Violation'\r\n");
+}

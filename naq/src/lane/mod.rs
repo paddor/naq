@@ -206,6 +206,17 @@ pub(crate) struct Lane {
     account_ids: RefCell<FxHashMap<Box<[u8]>, u32>>,
     /// Connections that closed and are still writing what was left.
     pub(crate) ending: Rc<Cell<usize>>,
+    /// The clients a reload waits for, until each checked itself again.
+    reloading: RefCell<Option<Reloading>>,
+}
+
+/// Clients of a lane a reload waits for: `done` drops once all checked
+/// themselves again, or went.
+#[derive(Debug)]
+struct Reloading {
+    left: rustc_hash::FxHashSet<u64>,
+    // Held, not used: its receiver hears once it drops.
+    _done: std::sync::mpsc::Sender<()>,
 }
 
 /// A connection counted as ending on its lane, until dropped.
@@ -219,6 +230,30 @@ impl Drop for Ending {
 }
 
 impl Lane {
+    /// Has every client check itself again, as after a reload: `done`
+    /// drops once all did, or went. One reload at a time: a reload before
+    /// stopped waiting.
+    pub(crate) fn reload(&self, done: std::sync::mpsc::Sender<()>) {
+        let clients = self.clients.borrow();
+        for c in clients.values() {
+            c.refresh();
+        }
+        let left: rustc_hash::FxHashSet<u64> = clients.keys().copied().collect();
+        *self.reloading.borrow_mut() =
+            (!left.is_empty()).then_some(Reloading { left, _done: done });
+    }
+
+    /// Notes that client `id` checked itself again, or went.
+    pub(crate) fn refreshed(&self, id: u64) {
+        let mut r = self.reloading.borrow_mut();
+        if let Some(w) = r.as_mut()
+            && w.left.remove(&id)
+            && w.left.is_empty()
+        {
+            *r = None;
+        }
+    }
+
     /// Counts a connection as ending until the guard drops: a shutdown
     /// waits for it.
     pub(crate) fn ending(&self) -> Ending {
@@ -492,6 +527,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         imported: Cell::new(false),
         account_ids: RefCell::default(),
         ending: Rc::default(),
+        reloading: RefCell::default(),
     });
     crate::imports::service::install(&lane);
     if let Some(c) = &lane.shared.callouts {
