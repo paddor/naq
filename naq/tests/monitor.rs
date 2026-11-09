@@ -69,6 +69,10 @@ fn health_vars_and_connections_come_as_nats_server_writes_them() {
     assert_eq!(varz["in_bytes"], 10);
     assert_eq!(varz["out_msgs"], 5);
     assert_eq!(varz["max_payload"], 1 << 20);
+    assert_eq!(
+        varz["version"], "2.15.2",
+        "the nats-server version naq matches"
+    );
     assert!(varz["start"].as_str().unwrap().ends_with('Z'));
     let (_, conn_list) = get(m, "/connz?limit=10");
     assert_eq!(conn_list["num_connections"], 2);
@@ -284,4 +288,24 @@ fn accounts_count_what_their_own_clients_publish_and_get() {
         seen,
         [want("$G", 0, 0, 0), want("A", 2, 6, 2), want("B", 1, 5, 0)]
     );
+}
+
+#[test]
+fn vars_count_the_subscriptions_subsz_counts() {
+    let mut opts: Options = "accounts { SYS { users [{user: sys, password: p}] }, A { users [{user: a, password: p}] } }\nsystem_account: SYS"
+        .parse()
+        .unwrap();
+    opts.host = "127.0.0.1".into();
+    opts.port = 0;
+    opts.lanes = 2;
+    opts.http_port = Some(0);
+    let s = Server::start(&opts).unwrap();
+    let _a = login(&s, "a", "SUB x 1\r\nSUB y 2\r\n");
+    let _b = login(&s, "a", "SUB z 1\r\n");
+    let m = s.monitor_addr().unwrap();
+    let (_, subsz) = get(m, "/subsz");
+    let (_, varz) = get(m, "/varz");
+    // With the system account's imports into A, as nats-server has them.
+    assert!(subsz["num_subscriptions"].as_u64().unwrap() > 3, "{subsz}");
+    assert_eq!(varz["subscriptions"], subsz["num_subscriptions"]);
 }

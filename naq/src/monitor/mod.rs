@@ -570,13 +570,7 @@ fn text(b: &[u8]) -> String {
 /// A round trip as `nats-server` shows it: to the microsecond between
 /// one and a thousand of them, else to the nanosecond.
 fn rtt(d: Duration) -> String {
-    let micros = Duration::from_micros(1)..Duration::from_millis(1);
-    let d = if micros.contains(&d) && d != micros.start {
-        Duration::from_micros(d.as_micros() as u64)
-    } else {
-        d
-    };
-    crate::times::go_duration(d)
+    crate::times::go_duration(crate::times::go_rtt(d))
 }
 
 /// Now, as a time to show.

@@ -128,7 +128,7 @@ pub(super) struct Counts {
     pub(super) slow_consumers: u64,
     pub(super) stale_connections: u64,
     pub(super) stalled_clients: u64,
-    pub(super) subscriptions: usize,
+    pub(super) subscriptions: u64,
 }
 
 /// `cluster` of `/varz`.
@@ -257,20 +257,15 @@ struct DiskIo {
 /// What a lane counts for `/varz`.
 #[derive(Debug, Default)]
 pub(super) struct OnLane {
-    subscriptions: usize,
+    subscriptions: u64,
     leafs: usize,
     routes: usize,
 }
 
-/// The counts of `lane`: the subscriptions of its clients, its links to
-/// Go hubs, and on lane 0, the naq links and routes that are up.
+/// The counts of `lane`: its subscriptions, as `/subsz` counts them, its
+/// links to Go hubs, and on lane 0, the naq links and routes that are up.
 pub(super) fn on_lane(lane: &Lane) -> OnLane {
-    let subscriptions = lane
-        .clients
-        .borrow()
-        .values()
-        .map(|c| c.subs.borrow().len())
-        .sum();
+    let subscriptions = super::subsz::on_lane(lane);
     let mut leafs = lane.links.borrow().len();
     let mut routes = 0;
     if let Some(mesh) = lane.mesh.borrow().as_ref() {
@@ -306,7 +301,7 @@ fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[OnLane]) -> Varz<'a> {
         server_name: Some(o.server_name.as_str())
             .filter(|n| !n.is_empty())
             .unwrap_or(&s.server_id),
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::server::NATS_VERSION,
         proto: 1,
         go: "",
         host: &o.host,
@@ -387,7 +382,7 @@ pub(super) fn counts(s: &Shared, lanes: &[OnLane]) -> Counts {
         slow_consumers: e.slow_clients.get() + e.slow_leafs.get(),
         stale_connections: e.stale_clients.get(),
         stalled_clients: e.stalls.get(),
-        subscriptions: lanes.iter().map(|l| l.subscriptions).sum(),
+        subscriptions: lanes.iter().map(|l| l.subscriptions).sum::<u64>() + super::subsz::extras(s),
     }
 }
 

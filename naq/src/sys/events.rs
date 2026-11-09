@@ -200,7 +200,8 @@ impl<'a> Who<'a> {
     fn of(s: &'a Shared, of: Of<'_>, stop: Option<SystemTime>) -> Who<'a> {
         let c = of.client();
         let acc = s.accounts.name(c.account.get());
-        let rtt = u64::try_from(c.rtt.get().as_nanos()).unwrap_or(u64::MAX);
+        let rtt = crate::times::go_rtt(c.rtt.get());
+        let rtt = u64::try_from(rtt.as_nanos()).unwrap_or(u64::MAX);
         let meta = c.meta.borrow();
         let mut who = Who {
             start: rfc3339_nano(meta.start),

@@ -175,7 +175,7 @@ pub(crate) fn jwt(f: &From<'_>, c: &About<'_>) -> String {
                 name: f.name,
                 host: f.host,
                 id: &server_id,
-                version: env!("CARGO_PKG_VERSION"),
+                version: crate::server::NATS_VERSION,
                 cluster: f.cluster,
                 xkey: f.xkey,
             },

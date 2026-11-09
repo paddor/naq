@@ -114,6 +114,9 @@ struct Info<'a> {
     client_ip: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<&'a str>,
+    /// The name of the server's cluster, if it has one.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    cluster: &'a str,
     /// With a cluster: this server's client URL, unless it is in lame duck
     /// mode, then the others'.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -181,7 +184,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
     let info = Info {
         server_id: &shared.server_id,
         server_name: &opts.server_name,
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::server::NATS_VERSION,
         proto: 1,
         go: "",
         host,
@@ -195,6 +198,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
         client_id: to.id,
         client_ip: to.ip,
         nonce: to.nonce,
+        cluster: opts.cluster.as_ref().map_or("", |c| c.name.as_str()),
         connect_urls: connect_urls(shared),
         ldm: matches!(kind, Kind::Async { ldm: true }),
         bound: bound.is_some(),

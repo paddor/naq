@@ -17,6 +17,11 @@ use crate::{Error, Options, conn, lane, stats};
 /// process is out of file descriptors.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
 
+/// The `nats-server` version naq answers as, to clients, tools, hubs and
+/// auth callouts: the one it matches, on which they gate features. naq's
+/// own version is in its banner and `--version`.
+pub(crate) const NATS_VERSION: &str = "2.15.2";
+
 /// Tells servers in one process apart, for the lanes' state.
 static NEXT_SERVER: AtomicU64 = AtomicU64::new(1);
 

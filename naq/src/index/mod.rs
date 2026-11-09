@@ -130,33 +130,49 @@ impl Group {
             && self.servers.is_empty()
     }
 
-    /// Sets the members at server `server`; none removes it.
-    fn set_server(&mut self, server: u16, m: Members) {
+    /// Sets the members at server `server`; none removes it. Returns the
+    /// entries gained: 1, 0, or -1 for one lost.
+    fn set_server(&mut self, server: u16, m: Members) -> i64 {
         let at = self.servers.iter().position(|&(s, _)| s == server);
         match (at, m.all) {
             (Some(at), 0) => {
                 self.servers.swap_remove(at);
+                -1
             }
-            (Some(at), _) => self.servers[at].1 = m,
-            (None, 0) => {}
-            (None, _) => self.servers.push((server, m)),
+            (Some(at), _) => {
+                self.servers[at].1 = m;
+                0
+            }
+            (None, 0) => 0,
+            (None, _) => {
+                self.servers.push((server, m));
+                1
+            }
         }
     }
 
-    /// Adds `peer`, or its new weight; with weight 0, removes it.
-    fn set_peer(&mut self, peer: Peer) {
+    /// Adds `peer`, or its new weight; with weight 0, removes it. Returns
+    /// the entries gained: 1, 0, or -1 for one lost.
+    fn set_peer(&mut self, peer: Peer) -> i64 {
         let add = peer.weight > 0;
         let at = self
             .peers
             .iter()
             .position(|p| p.lane == peer.lane && p.link == peer.link && p.shadow == peer.shadow);
         match (at, add) {
-            (Some(at), true) => self.peers[at] = peer,
-            (None, true) => self.peers.push(peer),
+            (Some(at), true) => {
+                self.peers[at] = peer;
+                0
+            }
+            (None, true) => {
+                self.peers.push(peer);
+                1
+            }
             (Some(at), false) => {
                 self.peers.swap_remove(at);
+                -1
             }
-            (None, false) => {}
+            (None, false) => 0,
         }
     }
 
@@ -340,6 +356,8 @@ pub(crate) struct Index {
     /// Subscriptions of this lane added and removed, shadows too.
     inserts: u64,
     removes: u64,
+    /// Entries of other servers and of links, alike on every lane.
+    others: u64,
 }
 
 impl Index {
@@ -352,6 +370,12 @@ impl Index {
     /// Subscriptions of this lane added and removed so far, shadows too.
     pub(crate) const fn changes(&self) -> (u64, u64) {
         (self.inserts, self.removes)
+    }
+
+    /// Subscriptions held: of this lane, shadows too, and the entries of
+    /// other servers and of links.
+    pub(crate) const fn held(&self) -> (u64, u64) {
+        (self.inserts.saturating_sub(self.removes), self.others)
     }
 
     /// Adds `tap` to `filter`.
@@ -435,11 +459,14 @@ impl Index {
     /// Adds `peer`'s interest in `filter`, in `queue` if given, or its new
     /// weight; with weight 0, removes it.
     pub(crate) fn peer(&mut self, filter: &[u8], queue: Option<&[u8]>, peer: Peer) {
-        if peer.weight > 0 {
-            self.interest(filter).group(queue).set_peer(peer);
+        let gained = if peer.weight > 0 {
+            self.interest(filter).group(queue).set_peer(peer)
         } else {
-            self.change(filter, queue, |g| g.set_peer(peer));
-        }
+            let mut gained = 0;
+            self.change(filter, queue, |g| gained = g.set_peer(peer));
+            gained
+        };
+        self.others = self.others.saturating_add_signed(gained);
     }
 
     /// Sets the members `m` server `server` has in `filter`, in `queue` if
@@ -452,11 +479,14 @@ impl Index {
         m: impl Into<Members>,
     ) {
         let m = m.into();
-        if m.all > 0 {
-            self.interest(filter).group(queue).set_server(server, m);
+        let gained = if m.all > 0 {
+            self.interest(filter).group(queue).set_server(server, m)
         } else {
-            self.change(filter, queue, |g| g.set_server(server, m));
-        }
+            let mut gained = 0;
+            self.change(filter, queue, |g| gained = g.set_server(server, m));
+            gained
+        };
+        self.others = self.others.saturating_add_signed(gained);
     }
 
     /// The subscribers of the plain subscriptions of `filter`, or of its

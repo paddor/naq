@@ -116,7 +116,10 @@ fn info_comes_first() {
     assert!(id.starts_with('N') && id.len() == 56, "a server NKey: {id}");
     assert!(json["xkey"].as_str().unwrap().starts_with('X'));
     assert!(json["client_id"].as_u64().unwrap() > 0);
-    assert!(json["version"].is_string());
+    assert_eq!(
+        json["version"], "2.15.2",
+        "the nats-server version naq matches"
+    );
 }
 
 #[test]

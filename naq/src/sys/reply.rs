@@ -37,7 +37,7 @@ impl<'a> ServerInfo<'a> {
             host: &o.host,
             id: &shared.server_id,
             cluster: o.cluster.as_ref().map_or("", |c| c.name.as_str()),
-            ver: env!("CARGO_PKG_VERSION"),
+            ver: crate::server::NATS_VERSION,
             tags: &o.server_tags,
             metadata: &o.server_metadata,
             jetstream: false,

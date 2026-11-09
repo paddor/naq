@@ -162,6 +162,11 @@ Notable changes to naq. The format follows
 - `naq`: in operator mode, the system account is the one named, by
   `system_account` or the operator JWT; without one there is none, as in
   `nats-server`.
+- `naq`: the server tells clients, tools, `nats-server` hubs and auth
+  callouts it is version `2.15.2`, the `nats-server` version it matches
+  (INFO, `/varz`, `$SYS` replies, leaf `CONNECT`): they gate features on
+  it, such as `nats account info`, which asks `USER.INFO` from 2.10.0 on.
+  naq's own version is in its banner and `naq --version`.
 
 ### Fixed
 
@@ -175,6 +180,14 @@ Notable changes to naq. The format follows
 - `naq`: plain subscriptions get a message from another server of the
   cluster, or from a naq hub or leaf, once, not twice, where a queue group
   of theirs matches it too and gets its pick there.
+- `naq`: `/varz` and `STATSZ` count the subscriptions `/subsz` counts,
+  those of other servers and links and the imports of `$SYS` too, as
+  `nats-server` does; they counted those of clients alone.
+- `naq`: the round trip in `$SYS` connection events drops its
+  nanoseconds below a millisecond, as in `nats-server`.
+- `naq`: `INFO` names the cluster, as `nats-server`'s does.
+- `naq` binary: `--routes` takes effect before `--cluster` too, and
+  `--cluster_name` alone makes no cluster, as in `nats-server`.
 
 ## [0.1.0] - 2026-11-05
 

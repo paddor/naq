@@ -393,7 +393,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         let proof = creds::prove(r, &info.nonce).map_err(|_| End::ZERO)?;
         let token = url.pass.is_none().then_some(url.user.as_deref()).flatten();
         let connect = Connect {
-            version: env!("CARGO_PKG_VERSION"),
+            version: crate::server::NATS_VERSION,
             name: &opts.server_name,
             cluster: opts.cluster.as_ref().map(|c| c.name.as_str()),
             headers: info.headers,
