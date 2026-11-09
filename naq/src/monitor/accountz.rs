@@ -231,7 +231,7 @@ struct Accountz<'a> {
 /// server adds to it.
 fn def_of(shared: &Shared, id: u32, acc: &str, jwt: Option<&Arc<JwtAccount>>) -> Def {
     let def = jwt.map_or_else(
-        || defs::of(&shared.opts, &[acc.to_owned()]).pop(),
+        || defs::of(&shared.opts(), &[acc.to_owned()]).pop(),
         |j| Some(defs::of_jwt(acc, &j.claims.nats)),
     );
     let mut def = def.unwrap_or_default();

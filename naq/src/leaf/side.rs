@@ -175,7 +175,7 @@ impl LinkSide {
         lane.peers.gave(size);
         c.tally.gave(size);
         lane.mark(c);
-        let opts = &lane.shared.opts;
+        let opts = &lane.shared.opts();
         if len > opts.max_pending {
             lane.shared.events.slow_leafs.note();
             c.close();

@@ -202,7 +202,7 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
     let Some(lane) = lane::get(shared.id, lane) else {
         return;
     };
-    let remote = &shared.opts.remotes[index];
+    let remote = &shared.opts().remotes[index];
     // Valid: the options were checked.
     let all: Vec<HubUrl> = remote
         .urls
@@ -216,7 +216,7 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
             urls.swap(i, j);
         }
     }
-    let interval = shared.opts.leaf_reconnect;
+    let interval = shared.opts().leaf_reconnect;
     let told = RefCell::new(None);
     let mut attempts = 0u64;
     loop {

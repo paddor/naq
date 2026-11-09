@@ -53,6 +53,7 @@ mod mesh;
 mod monitor;
 mod options;
 mod perms;
+mod reload;
 mod resolver;
 mod server;
 mod signals;

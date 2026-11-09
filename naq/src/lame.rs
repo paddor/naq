@@ -107,7 +107,7 @@ pub(crate) async fn run(shared: Arc<Shared>) {
     shuffle(&mut all, &mut below);
     tell_routes(&shared);
     tell_clients(&shared).await;
-    let o = &shared.opts;
+    let o = &shared.opts();
     tokio::time::sleep(o.lame_duck_grace_period).await;
     shared.log.info(format_args!("Closing existing clients"));
     let spread = Spread::new(o.lame_duck_duration, o.lame_duck_grace_period, all.len());

@@ -144,6 +144,14 @@ pub(super) fn start(lane: &Lane) {
     }
 }
 
+/// Sends `STATSZ` soon, as after a change of what it tells, within the
+/// rate limit.
+pub(crate) fn statsz(shared: &Shared) {
+    if shared.system.is_some() {
+        shared.sys.outbox.post(Event::Statsz { forced: false });
+    }
+}
+
 /// Sends the server's last word, `word`, and waits until it left, a
 /// second at most. The server sends nothing on `$SYS` after it, nor a
 /// second last word.
@@ -354,7 +362,7 @@ impl<'l> Sender<'l> {
             let name = shared.accounts.name(id);
             let to = format!("$SYS.REQ.ACCOUNT.{name}.CONNS");
             let mut payload = b"{\"server\":".to_vec();
-            payload.extend(json::compact(&ServerInfo::of(&shared)));
+            payload.extend(json::compact(&ServerInfo::of(&shared, &shared.opts())));
             payload.extend_from_slice(b",\"acc\":");
             payload.extend(json::compact(&name));
             payload.push(b'}');
@@ -387,7 +395,7 @@ impl<'l> Sender<'l> {
         let head = super::events::head(CONNS, std::time::SystemTime::now());
         let tail = [&b","[..], &c.fields, b"}"].concat();
         let numbered = |shared: &Shared| {
-            let info = json::compact(&ServerInfo::of(shared));
+            let info = json::compact(&ServerInfo::of(shared, &shared.opts()));
             [&head[..], &info, &tail].concat()
         };
         if let Some(reply) = reply {
@@ -410,7 +418,7 @@ impl<'l> Sender<'l> {
 
     /// Sends `n`, numbered now.
     fn note(&mut self, n: &Note) {
-        let info = json::compact(&ServerInfo::of(&self.lane.shared));
+        let info = json::compact(&ServerInfo::of(&self.lane.shared, &self.lane.shared.opts()));
         let payload = [&n.head[..], &info, &n.tail].concat();
         self.send(n.account, &n.to, &payload);
     }
@@ -439,7 +447,7 @@ impl<'l> Sender<'l> {
         // Relaxed: answers that see it late are sent still, as in Go.
         shared.sys.quiet.store(true, Ordering::Relaxed);
         let to = format!("$SYS.SERVER.{}.{}", shared.server_id, word.token());
-        let payload = json::compact(&ServerInfo::of(&shared));
+        let payload = json::compact(&ServerInfo::of(&shared, &shared.opts()));
         self.send(sys, to.as_bytes(), &payload);
     }
 
@@ -455,7 +463,7 @@ impl<'l> Sender<'l> {
 /// binds the system account; else when something subscribes to it.
 fn heard(lane: &Lane, sys: u32, to: &[u8]) -> bool {
     let shared = &lane.shared;
-    let o = &shared.opts;
+    let o = &shared.opts();
     let name = shared.accounts.name(sys);
     let linked = o.remotes.iter().any(|r| r.account.as_deref() == Some(name));
     o.cluster.is_some() || o.leafnodes.is_some() || linked || lane.index(sys).borrow().wanted(to)

@@ -181,12 +181,12 @@ impl Lane {
         if e.is_spent() {
             self.spent.borrow_mut().push((c.clone(), e.sid.clone()));
         }
-        let opts = &self.shared.opts;
-        if len > opts.max_pending {
+        let max = self.shared.max_pending;
+        if len > max {
             // A slow consumer.
             self.shared.events.slow_clients.note();
             c.kick(crate::conn::Close::SlowPending);
-        } else if len > opts.max_pending / 4 * 3 {
+        } else if len > max / 4 * 3 {
             *stalled = Some(c.clone());
         }
         true

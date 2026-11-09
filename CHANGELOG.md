@@ -33,7 +33,7 @@ Notable changes to naq. The format follows
 - `naq`: `Signals::catch` and `Server::wait_for_signals`, caught before
   the server starts, as by `nats-server`: `INT` and `TERM` shut the server
   down, `USR2` puts it in lame duck mode first, `USR1` opens the log file
-  again, `HUP` is logged.
+  again, `HUP` reloads the configuration.
 - `naq`: `Options::pid_file` (`pid_file`, `-P`) and
   `Options::ports_file_dir` (`ports_file_dir`, `--ports_file_dir`): the
   process ID, and the URLs the server listens at, in a file removed as it
@@ -122,6 +122,18 @@ Notable changes to naq. The format follows
   client.
 - `naq`: clients that take an `INFO` at any time get one as the client
   URLs of the cluster change, as from `nats-server`.
+- `naq`: config reload, as in `nats-server`: `Server::reload`, `HUP`,
+  `--signal reload` and `$SYS.REQ.SERVER.<id>.RELOAD`. The options are
+  read again and taken whole, or refused at the first change the server
+  cannot take, with Go's texts (`Error::Reload`); each change is logged
+  as Go logs it, and `/varz` shows the new options and
+  `config_load_time`. Reloaded: the log's levels, format and sink,
+  `max_traced_msg_len`, `max_payload` and `max_control_line` (live
+  clients at once), `ping_interval` and `ping_max` (live clients from
+  their next `PING`), `write_deadline`, `server_tags` and
+  `server_metadata` (with a `STATSZ`), the pid file and the ports file.
+  `Server::reload_with` reads the options another way; the `naq` binary
+  reads its flags again over the file.
 
 ### Changed
 

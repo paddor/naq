@@ -8,6 +8,7 @@ use serde::Serialize;
 use super::http::Response;
 use super::json::Ordered;
 use super::{ask_all, pretty};
+use crate::Options;
 use crate::lane::Lane;
 use crate::server::Shared;
 use crate::stats::Totals;
@@ -73,7 +74,7 @@ struct Varz<'a> {
     counts: Counts,
     http_req_stats: BTreeMap<&'static str, u64>,
     config_load_time: String,
-    config_digest: &'a str,
+    config_digest: String,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     tags: &'a [String],
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -291,13 +292,13 @@ pub(super) fn on_lane(lane: &Lane) -> OnLane {
 /// `/varz`.
 pub(super) async fn answer(shared: &Shared) -> Response {
     let lanes = ask_all(shared, on_lane).await;
-    pretty(&varz(shared, &lanes))
+    pretty(&varz(shared, &shared.opts(), &lanes))
 }
 
-fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
-    let o = &s.opts;
+fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[OnLane]) -> Varz<'a> {
     let now = SystemTime::now();
     let (mem, cpu) = usage(&s.monitor.cpu);
+    let loaded = s.monitor.loaded();
     let tls = s.tls.as_ref();
     Varz {
         server_id: &s.server_id,
@@ -324,11 +325,11 @@ fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
         max_control_line: o.max_control_line,
         max_payload: o.max_payload,
         max_pending: o.max_pending,
-        cluster: cluster(s),
+        cluster: cluster(s, o),
         gateway: Empty {},
-        leaf: leaf(s),
+        leaf: leaf(s, o),
         mqtt: Empty {},
-        websocket: websocket(s),
+        websocket: websocket(s, o),
         jetstream: Empty {},
         tls_timeout: o.tls.as_ref().map_or(2.0, |t| t.timeout.as_secs_f64()),
         write_deadline: nanos(o.write_deadline),
@@ -341,8 +342,8 @@ fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
         cpu,
         counts: counts(s, lanes),
         http_req_stats: s.monitor.stats(),
-        config_load_time: rfc3339_nano(s.monitor.loaded),
-        config_digest: &s.monitor.digest,
+        config_load_time: rfc3339_nano(loaded.at),
+        config_digest: loaded.digest,
         tags: &o.server_tags,
         metadata: &o.server_metadata,
         operators: Operators::of(&o.operators),
@@ -405,8 +406,8 @@ fn connect_urls(s: &Shared) -> Vec<String> {
         .collect()
 }
 
-fn cluster(s: &Shared) -> Cluster<'_> {
-    let Some(c) = &s.opts.cluster else {
+fn cluster<'a>(s: &Shared, o: &'a Options) -> Cluster<'a> {
+    let Some(c) = &o.cluster else {
         return Cluster::default();
     };
     Cluster {
@@ -424,8 +425,7 @@ fn cluster(s: &Shared) -> Cluster<'_> {
     }
 }
 
-fn leaf(s: &Shared) -> Leaf<'_> {
-    let o = &s.opts;
+fn leaf<'a>(s: &Shared, o: &'a Options) -> Leaf<'a> {
     let mut l = Leaf::default();
     if let Some(n) = &o.leafnodes {
         l.host = &n.host;
@@ -454,8 +454,8 @@ fn leaf(s: &Shared) -> Leaf<'_> {
     l
 }
 
-fn websocket(s: &Shared) -> Websocket<'_> {
-    let (Some(w), Some(door)) = (&s.opts.websocket, &s.ws) else {
+fn websocket<'a>(s: &'a Shared, o: &'a Options) -> Websocket<'a> {
+    let (Some(w), Some(door)) = (&o.websocket, &s.ws) else {
         return Websocket::default();
     };
     let default = crate::Websocket::default().handshake_timeout;

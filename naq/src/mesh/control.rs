@@ -50,7 +50,7 @@ impl Me {
                 account: b"",
                 epoch,
                 server_id: shared.server_id.as_bytes(),
-                name: shared.opts.server_name.as_bytes(),
+                name: shared.opts().server_name.as_bytes(),
                 cluster: c.name.as_bytes(),
                 data: data.as_bytes(),
                 client_urls,

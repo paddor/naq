@@ -448,6 +448,9 @@ struct Bounds {
     limits: naq_proto::client::Limits,
     /// Most subscriptions it may have; -1 for no limit.
     subs: i64,
+    /// The largest payload its login allows, below the server's; -1 for
+    /// none.
+    payload: i64,
     /// When it is closed, and why: its JWT expires.
     deadline: Option<(tokio::time::Instant, Close)>,
     /// The account whose connection count holds it.
@@ -502,7 +505,7 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
         ip: &ip,
         nonce: nonce.as_deref(),
         ws,
-        max_payload: lane.shared.opts.max_payload,
+        max_payload: lane.shared.opts().max_payload,
     };
     handshake::info(&lane.shared, &to, handshake::Kind::First, &mut info);
     {
@@ -555,10 +558,10 @@ where
 {
     let Hello { client, nonce, via } = hello;
     lane.clients.borrow_mut().insert(client.id, client.clone());
-    let opts = &lane.shared.opts;
+    let opts = &lane.shared.opts();
     let shared = lane.shared.clone();
     let slow = move || shared.events.slow_clients.note();
-    let deadline = lane.shared.opts.write_deadline;
+    let deadline = lane.shared.opts().write_deadline;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, deadline, slow));
     client.wake_writer();
     let now = tokio::time::Instant::now();
@@ -593,6 +596,7 @@ where
         bounds: Bounds {
             limits,
             subs: -1,
+            payload: -1,
             deadline: None,
             counted: None,
             kept: None,

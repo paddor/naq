@@ -314,7 +314,7 @@ impl Out {
 
 /// Delivers what other lanes forward, to this lane's subscribers.
 pub(super) async fn run(lane: Rc<Lane>, rx: Receiver<Batch>) {
-    let mark = lane.shared.opts.max_pending / 4 * 3;
+    let mark = lane.shared.max_pending / 4 * 3;
     let mut batches = Vec::new();
     while rx.recv_all(&mut batches).await {
         let mut stalled = None;

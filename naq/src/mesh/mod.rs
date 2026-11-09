@@ -128,9 +128,9 @@ pub(crate) struct Mesh {
 impl Mesh {
     /// The mesh of `shared`'s server, of start `epoch`.
     fn new(shared: &Shared, epoch: u64) -> Mesh {
-        let first = routes(&shared.opts);
-        let hubs = (0..shared.opts.remotes.len())
-            .filter(|&r| crate::leaf::is_naq(&shared.opts.remotes[r]))
+        let first = routes(&shared.opts());
+        let hubs = (0..shared.opts().remotes.len())
+            .filter(|&r| crate::leaf::is_naq(&shared.opts().remotes[r]))
             .enumerate()
             // Slots are below 64: they fit.
             .map(|(k, r)| spoke::Hub::new(shared, r, (first + k) as u16, epoch))
@@ -284,8 +284,8 @@ pub(crate) fn hubs(opts: &ServerOptions) -> usize {
 
 /// The account every naq leaf binds on `shared`'s server.
 fn leafnodes_account(shared: &Shared) -> u32 {
-    let name = shared
-        .opts
+    let opts = shared.opts();
+    let name = opts
         .leafnodes
         .as_ref()
         .and_then(|l| l.account.as_deref())
@@ -358,7 +358,7 @@ pub(crate) async fn run(
     mesh.tell_taps(&lane);
     let ctx = omq_tokio::Context::current();
     let mut bound = Bound::default();
-    let cluster = match &shared.opts.cluster {
+    let cluster = match &shared.opts().cluster {
         Some(c) => match router(&ctx, &c.host, c.port).await {
             Ok((r, _, at)) => {
                 bound.cluster = Some(at);
@@ -371,7 +371,7 @@ pub(crate) async fn run(
         },
         None => None,
     };
-    let leafs = match &shared.opts.leafnodes {
+    let leafs = match &shared.opts().leafnodes {
         Some(l) => match router(&ctx, &l.host, l.port).await {
             Ok((r, events, at)) => {
                 bound.leafnodes = Some(at);

@@ -172,7 +172,7 @@ where
     let (mut hello, info) = conn::greet(&lane, ip, port, true);
     hello.client.out.borrow_mut().extend_from_slice(&info);
     let link = stream::Link::new(hello.client.clone());
-    let reader = stream::Reader::new(r, link.clone(), &u, shared.opts.max_payload);
+    let reader = stream::Reader::new(r, link.clone(), &u, shared.opts().max_payload);
     let writer = stream::Writer::new(w, link, &u);
     hello.via.cookies = Some(Box::new(u.cookies));
     hello.via.cert = arrival.cert;

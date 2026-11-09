@@ -271,9 +271,9 @@ const fn state(n: i64) -> &'static str {
 /// Whether this server answers a request filtered by `set`, as
 /// `nats-server`'s `filterRequest` decides.
 pub(super) fn wanted(shared: &Shared, set: &Set) -> bool {
-    let o = &shared.opts;
+    let o = &shared.opts();
     let me = Me {
-        name: reply::name(shared),
+        name: reply::name(shared, o),
         host: &o.host,
         cluster: o.cluster.as_ref().map_or("", |c| c.name.as_str()),
         tags: &o.server_tags,
@@ -351,9 +351,10 @@ pub(super) fn take(lane: &Lane, out: &mut Outs, z: Z, m: &Pub<'_>) -> bool {
     match (z, reply) {
         (Z::Idz, Some(to)) => {
             let shared = &*lane.shared;
+            let o = shared.opts();
             let id = Idz {
-                name: reply::name(shared),
-                host: &shared.opts.host,
+                name: reply::name(shared, &o),
+                host: &o.host,
                 id: &shared.server_id,
             };
             if let Some(sys) = shared.system {
@@ -439,7 +440,7 @@ fn broadcast_asked(s: &Shared, body: &[u8]) {
 pub(super) async fn broadcast(s: &Shared) -> Vec<u8> {
     let statsz = monitor::statsz(s).await;
     json::compact(&Statsz {
-        server: ServerInfo::of(s),
+        server: ServerInfo::of(s, &s.opts()),
         statsz,
     })
 }

@@ -98,7 +98,8 @@ impl Me {
     /// The hub `Hello` of `shared`'s server, naming where leafs dial it and
     /// the servers of `mesh` that are up, with `nonce` for a leaf to sign.
     fn hello(&self, shared: &Shared, mesh: &Mesh, nonce: &str) -> Bytes {
-        let cluster = shared.opts.cluster.as_ref().map_or("", |c| &c.name);
+        let opts = shared.opts();
+        let cluster = opts.cluster.as_ref().map_or("", |c| &c.name);
         let mut urls = self.url.clone();
         for u in mesh
             .peers
@@ -116,7 +117,7 @@ impl Me {
             account: shared.accounts.name(self.account).as_bytes(),
             epoch: self.epoch,
             server_id: shared.server_id.as_bytes(),
-            name: shared.opts.server_name.as_bytes(),
+            name: shared.opts().server_name.as_bytes(),
             cluster: cluster.as_bytes(),
             data: self.data.as_bytes(),
             client_urls: b"",

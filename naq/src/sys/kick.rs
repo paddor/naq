@@ -48,8 +48,8 @@ impl Act {
     }
 }
 
-/// The filters a kick takes, as Go's `EventFilterOptions`.
-const FILTERED: Fields = Fields {
+/// The filters a kick or reload takes, as Go's `EventFilterOptions`.
+pub(super) const FILTERED: Fields = Fields {
     name: "EventFilterOptions",
     keys: [FILTERS, &[]],
 };

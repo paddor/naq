@@ -95,9 +95,12 @@ impl Signals {
                     Caught::Int | Caught::Term => return,
                     Caught::Usr2 => lame = Some(Box::pin(server.lame_duck())),
                     Caught::Usr1 => server.reopen_log(),
-                    Caught::Hup => log.error(format_args!(
-                        "Failed to reload server configuration: config reload not supported"
-                    )),
+                    Caught::Hup => {
+                        if let Err(e) = server.reload() {
+                            let e = crate::error::chain(&e);
+                            log.error(format_args!("Failed to reload server configuration: {e}"));
+                        }
+                    }
                 }
             }
         });

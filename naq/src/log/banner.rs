@@ -17,7 +17,7 @@ pub(crate) struct Bound {
 
 /// Logs the start of the server `shared`, bound at `at`.
 pub(crate) fn log(shared: &Shared, at: &Bound) {
-    let (log, o) = (&shared.log, &shared.opts);
+    let (log, o) = (&shared.log, &shared.opts());
     log.info(format_args!("Starting naq"));
     log.info(format_args!("  Version:  {}", env!("CARGO_PKG_VERSION")));
     if let Some(c) = &o.cluster {
@@ -31,7 +31,7 @@ pub(crate) fn log(shared: &Shared, at: &Bound) {
         ));
     }
     if let Some(path) = &o.config_file {
-        let digest = &shared.monitor.digest;
+        let digest = shared.monitor.loaded().digest;
         let digest = if digest.is_empty() {
             String::new()
         } else {

@@ -157,13 +157,10 @@ pub(super) enum Kind<'a> {
 pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u8>) {
     // A WebSocket client sees its own port, and TLS as that port has it.
     let ws = shared.ws.as_ref().filter(|_| to.ws);
+    let opts = shared.opts();
     let (host, port, tls) = match ws {
         Some(w) => (w.opts.host.as_str(), w.addr.port(), w.tls.is_some()),
-        None => (
-            shared.opts.host.as_str(),
-            shared.addr.port(),
-            shared.tls.is_some(),
-        ),
+        None => (opts.host.as_str(), shared.addr.port(), shared.tls.is_some()),
     };
     let bound = match kind {
         Kind::Bound(account) => Some(account),
@@ -181,7 +178,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
     };
     let info = Info {
         server_id: &shared.server_id,
-        server_name: &shared.opts.server_name,
+        server_name: &opts.server_name,
         version: env!("CARGO_PKG_VERSION"),
         proto: 1,
         go: "",
@@ -210,7 +207,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
 /// The client URLs of the cluster, this server's first, unless it is in
 /// lame duck mode, as `nats-server` lists them; none without a cluster.
 fn connect_urls(shared: &Shared) -> Vec<String> {
-    if shared.opts.cluster.is_none() {
+    if shared.opts().cluster.is_none() {
         return Vec::new();
     }
     let mut all = Vec::new();

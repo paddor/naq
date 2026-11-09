@@ -187,7 +187,7 @@ async fn receive_hub(lane: Rc<Lane>, dealer: Socket, s: u16) {
 /// Routes batch `chunk` from `from` on `lane`, and hands on what is for
 /// its other lanes.
 async fn take(lane: &Lane, out: &mut Outs, chunk: Bytes, from: From) {
-    let mark = lane.shared.opts.max_pending / 4 * 3;
+    let mark = lane.shared.max_pending / 4 * 3;
     let stalled = route(lane, out, &chunk, from);
     lane.flush();
     lane.expire();

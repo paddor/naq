@@ -127,15 +127,18 @@ fn naq_answers_as_nats_server_does() {
         }
         let opts: naq::Options = script.conf.parse().unwrap();
         let secure = opts.https_port.is_some();
-        let server = naq::Server::start(&naq::Options {
+        let opts = naq::Options {
             host: "127.0.0.1".into(),
             port: 0,
             lanes: 2,
             http_port: (!secure).then_some(0),
             https_port: secure.then_some(0),
             ..opts
-        })
-        .unwrap();
+        };
+        let server = naq::Server::start(&opts).unwrap();
+        // A reload finds the configuration as it was, as nats-server
+        // finds its file.
+        server.reload_with(move || Ok(opts.clone()));
         let got = script.replay(server.addr(), server.monitor_addr().unwrap());
         if got != want {
             failed += &mismatch(&path, "naq", &want, &got);

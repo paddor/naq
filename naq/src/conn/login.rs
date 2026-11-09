@@ -40,6 +40,12 @@ fn deadline(
     })
 }
 
+/// The largest payload a client may send: the server's, or `user`'s
+/// limit if that is lower; -1 is none.
+fn cap(user: i64, server: usize) -> usize {
+    usize::try_from(user).map_or(server, |p| p.min(server))
+}
+
 /// A subscription its permissions no longer allow: its SID, subject and
 /// queue group.
 type Forbidden = (Box<[u8]>, Box<[u8]>, Option<Box<[u8]>>);
@@ -290,7 +296,7 @@ impl Conn {
         self.lane.ship_imported(&mut self.out).await;
         // Cancel-safe: a dropped wait loses nothing; the ticket keeps the
         // request until it goes.
-        let timeout = tokio::time::sleep(shared.opts.auth_timeout);
+        let timeout = tokio::time::sleep(shared.opts().auth_timeout);
         tokio::pin!(timeout);
         let answer = loop {
             tokio::select! {
@@ -379,9 +385,8 @@ impl Conn {
             account: u.account,
             perms: u.perms.clone(),
         })?;
-        let server = shared.opts.max_payload;
-        self.bounds.limits.max_payload =
-            usize::try_from(u.payload).map_or(server, |p| p.min(server));
+        self.bounds.payload = u.payload;
+        self.bounds.limits.max_payload = cap(u.payload, shared.opts().max_payload);
         self.bounds.subs = u.subs;
         let user = u.expires.map(|t| (t, false));
         let account = u.account_expires.map(|t| (t, true));
@@ -406,6 +411,7 @@ impl Conn {
     #[inline(never)]
     pub(super) fn refresh(&mut self) -> Result<(), Close> {
         use crate::jwt::trust::live::{Gone, Refresh};
+        self.retake();
         let shared = self.lane.shared.clone();
         let trust = shared.auth.as_ref().and_then(Auth::trust);
         let (Some(trust), Some(kept)) = (trust, self.bounds.kept.as_deref_mut()) else {
@@ -429,9 +435,8 @@ impl Conn {
         if let Some(defaults) = &s.defaults {
             kept.defaults = Some(defaults.clone());
         }
-        let server = shared.opts.max_payload;
-        self.bounds.limits.max_payload =
-            usize::try_from(s.payload).map_or(server, |p| p.min(server));
+        self.bounds.payload = s.payload;
+        self.bounds.limits.max_payload = cap(s.payload, shared.opts().max_payload);
         self.bounds.subs = s.subs;
         let subs = self.client.subs.borrow().len();
         self.bounds.deadline = deadline(s.subs, subs, s.expires);
@@ -444,6 +449,33 @@ impl Conn {
         }
         self.lane.flush();
         Ok(())
+    }
+
+    /// Takes the server's options anew, as after a reload: the limits of
+    /// what the client sends, the time between pings, and whether it is
+    /// traced.
+    fn retake(&mut self) {
+        let shared = self.lane.shared.clone();
+        let opts = shared.opts();
+        let limits = &mut self.bounds.limits;
+        limits.max_control_line = opts.max_control_line;
+        limits.max_payload = cap(self.bounds.payload, opts.max_payload);
+        // WebSocket clients may ping at their own pace.
+        let own = self.via.ws
+            && shared
+                .ws
+                .as_ref()
+                .is_some_and(|w| w.opts.ping_interval.is_some());
+        if !own {
+            self.ping.interval = opts.ping_interval;
+        }
+        let tracing = shared.log.traces();
+        self.client.traced.set(tracing);
+        self.client
+            .guarded
+            .set(tracing || self.client.held.borrow().is_some());
+        self.watch.tracing = tracing;
+        self.watch.on = tracing || self.auth_by.is_some();
     }
 
     /// Ends the subscriptions its permissions no longer allow, and tells it.

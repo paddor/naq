@@ -233,7 +233,7 @@ impl Dial<'_> {
 
 /// Limits of a link: `nats-server` allows it 16 control lines.
 fn limits(lane: &Lane) -> Limits {
-    let opts = &lane.shared.opts;
+    let opts = &lane.shared.opts();
     Limits {
         max_control_line: opts.max_control_line.saturating_mul(16),
         max_payload: opts.max_payload,
@@ -325,7 +325,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         let Ok(Some(pre)) = timeout(FIRST_INFO, up).await else {
             return End::ZERO;
         };
-        let max = self.lane.shared.opts.max_payload;
+        let max = self.lane.shared.opts().max_payload;
         let Link {
             lane,
             io,
@@ -386,7 +386,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             let _ = send(&mut self.io, &out).await;
             return Err(End::ZERO);
         }
-        let opts = &self.lane.shared.opts;
+        let opts = &self.lane.shared.opts();
         let r = &opts.remotes[remote];
         let account = r.account.as_deref().unwrap_or("$G");
         // A file gone or broken ends this dial; the next reads it again.
@@ -466,10 +466,8 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         terms: Terms,
     ) -> End {
         let shared = &self.lane.shared;
-        let name = shared.opts.remotes[remote]
-            .account
-            .as_deref()
-            .unwrap_or("$G");
+        let opts = shared.opts();
+        let name = opts.remotes[remote].account.as_deref().unwrap_or("$G");
         // Known to exist: the options were checked.
         let account = shared.accounts.id(name).unwrap_or(0);
         let client = self.client.clone();
@@ -478,7 +476,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         let mut writer: JoinHandle<()> = tokio::task::spawn_local(crate::conn::writer(
             client.clone(),
             w,
-            shared.opts.write_deadline,
+            shared.opts().write_deadline,
             || (),
         ));
         let side = Rc::new(LinkSide::new(
@@ -524,7 +522,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
     async fn read_loop(&mut self, side: &LinkSide, lds: &[u8]) -> End {
         let lane = self.lane;
         let client = &side.client;
-        let opts = &lane.shared.opts;
+        let opts = &lane.shared.opts();
         let interval = opts.ping_interval;
         let mark = opts.max_pending / 4 * 3;
         let mut st = State::default();

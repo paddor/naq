@@ -51,7 +51,7 @@ pub(super) enum Step {
 
 impl Conn {
     pub(super) async fn read_loop<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Close {
-        let stall_mark = self.lane.shared.opts.max_pending / 4 * 3;
+        let stall_mark = self.lane.shared.max_pending / 4 * 3;
         let mut buf = self.lane.reads.take(READ_CHUNK);
         let timer = tokio::time::sleep_until(self.ping.next);
         tokio::pin!(timer);
@@ -298,7 +298,7 @@ impl Conn {
     /// The ping timer fired: maybe a `PING`, maybe the end.
     #[inline(never)]
     fn ping_tick(&mut self) -> Option<Close> {
-        let opts = &self.lane.shared.opts;
+        let opts = &self.lane.shared.opts();
         match self
             .ping
             .tick(Instant::now(), self.ping.interval, opts.max_pings_out)

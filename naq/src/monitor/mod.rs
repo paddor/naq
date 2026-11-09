@@ -18,7 +18,7 @@ mod varz;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use sha2::Digest as _;
@@ -90,6 +90,25 @@ impl Counted {
     }
 }
 
+/// A configuration as loaded.
+#[derive(Debug, Clone)]
+pub(crate) struct Loaded {
+    /// `sha256:` and the hex SHA-256 of the configuration file; empty
+    /// without one.
+    pub(crate) digest: String,
+    /// When.
+    pub(crate) at: SystemTime,
+}
+
+/// The digest of the configuration file of `opts`, as `Loaded` keeps it.
+fn digest(opts: &Options) -> String {
+    opts.config_file
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| format!("sha256:{}", hex(&sha2::Sha256::digest(b))))
+        .unwrap_or_default()
+}
+
 /// What monitoring keeps for a server.
 #[derive(Debug)]
 pub(crate) struct State {
@@ -101,11 +120,8 @@ pub(crate) struct State {
     http: Option<SocketAddr>,
     /// Where monitoring is served over HTTPS, if it is.
     https: Option<SocketAddr>,
-    /// `sha256:` and the hex SHA-256 of the configuration file; empty
-    /// without one.
-    pub(crate) digest: String,
-    /// When the configuration was loaded.
-    pub(crate) loaded: SystemTime,
+    /// The configuration, as last loaded.
+    loaded: Mutex<Loaded>,
     /// The ports the cluster and naq leafs were bound at, once they are.
     pub(crate) mesh: OnceLock<crate::mesh::Bound>,
     /// The process's CPU time at the last sample.
@@ -126,18 +142,45 @@ impl State {
             base: base_path(&opts.http_base_path),
             http: at.filter(|_| !secure),
             https: at.filter(|_| secure),
-            digest: opts
-                .config_file
-                .as_ref()
-                .and_then(|p| std::fs::read(p).ok())
-                .map(|b| format!("sha256:{}", hex(&sha2::Sha256::digest(b))))
-                .unwrap_or_default(),
-            loaded: now,
+            loaded: Mutex::new(Loaded {
+                digest: digest(opts),
+                at: now,
+            }),
             mesh: OnceLock::new(),
             cpu: Mutex::new(None),
             closed: conns::Closed::new(opts.max_closed_clients),
             gone: accstatz::Gone::default(),
         }
+    }
+
+    /// The configuration, as last loaded.
+    pub(crate) fn loaded(&self) -> Loaded {
+        self.loaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Notes that `opts` were loaded now, as a reload took them. Returns
+    /// how the reload logs their digest: `(sha256:...)`, or nothing
+    /// without a configuration file.
+    pub(crate) fn reloaded(&self, opts: &Options) -> String {
+        let digest = digest(opts);
+        let shown = if digest.is_empty() {
+            String::new()
+        } else {
+            format!("({digest})")
+        };
+        *self.loaded.lock().unwrap_or_else(PoisonError::into_inner) = Loaded {
+            digest,
+            at: SystemTime::now(),
+        };
+        shown
+    }
+
+    /// Where monitoring is served, over HTTP or HTTPS, if it is.
+    pub(crate) fn addr(&self) -> Option<SocketAddr> {
+        self.http.or(self.https)
     }
 
     fn count(&self, e: Counted) {

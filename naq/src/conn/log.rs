@@ -113,7 +113,7 @@ impl Conn {
     /// Logs why the connection ends.
     #[cold]
     pub(super) fn log_why(&self, close: Close) {
-        let o = &self.lane.shared.opts;
+        let o = &self.lane.shared.opts();
         match close {
             Close::Auth => {
                 let meta = self.client.meta.borrow();

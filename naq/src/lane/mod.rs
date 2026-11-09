@@ -465,7 +465,7 @@ fn indexes() -> Indexes {
 pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
     let key = (shared.id, id);
     let servers = routes(&shared);
-    let hubs = crate::mesh::hubs(&shared.opts);
+    let hubs = crate::mesh::hubs(&shared.opts());
     let lane = Rc::new(Lane {
         id,
         first: Box::new(std::array::from_fn(|_| RefCell::default())),
@@ -530,5 +530,5 @@ fn seed() -> u64 {
 
 /// Routes of `shared`'s cluster.
 fn routes(shared: &Shared) -> usize {
-    shared.opts.cluster.as_ref().map_or(0, |c| c.routes.len())
+    shared.opts().cluster.as_ref().map_or(0, |c| c.routes.len())
 }

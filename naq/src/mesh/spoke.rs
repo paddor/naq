@@ -57,7 +57,7 @@ impl Hub {
     /// The hub of remote `remote` of `shared`'s server, a naq one, in slot
     /// `slot`, told by a teller of start `epoch`.
     pub(super) fn new(shared: &Shared, remote: usize, slot: u16, epoch: u64) -> Hub {
-        let r = &shared.opts.remotes[remote];
+        let r = &shared.opts().remotes[remote];
         // Valid: the options were checked.
         let url = r.urls.first().and_then(|u| HubUrl::parse(u).ok());
         let (host, port) = url.map(|u| (u.host, u.port)).unwrap_or_default();
@@ -95,7 +95,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
         return;
     };
     let remote = mesh.hubs.borrow()[at].remote;
-    let r = &shared.opts.remotes[remote];
+    let r = &shared.opts().remotes[remote];
     // Valid: the options were checked.
     let configured: Vec<HubUrl> = r
         .urls
@@ -109,7 +109,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
             urls.swap(i, j);
         }
     }
-    let interval = shared.opts.leaf_reconnect;
+    let interval = shared.opts().leaf_reconnect;
     let mut n = 0u64;
     loop {
         let Some(url) = urls.pop_front() else {
@@ -268,14 +268,15 @@ impl Link<'_> {
     fn hello(&self) -> Bytes {
         let shared = self.shared;
         let account = self.mesh.hubs.borrow()[self.at].account;
-        let cluster = shared.opts.cluster.as_ref().map_or("", |c| &c.name);
+        let opts = shared.opts();
+        let cluster = opts.cluster.as_ref().map_or("", |c| &c.name);
         let mut out = Vec::new();
         Control::Hello(Hello {
             role: Role::Leaf,
             account: shared.accounts.name(account).as_bytes(),
             epoch: self.mesh.epoch,
             server_id: shared.server_id.as_bytes(),
-            name: shared.opts.server_name.as_bytes(),
+            name: shared.opts().server_name.as_bytes(),
             cluster: cluster.as_bytes(),
             data: b"",
             client_urls: b"",
@@ -356,7 +357,7 @@ impl Link<'_> {
     /// A seed that cannot sign.
     fn login(&self, nonce: &[u8]) -> Result<Bytes, String> {
         let remote = self.mesh.hubs.borrow()[self.at].remote;
-        let r = &self.shared.opts.remotes[remote];
+        let r = &self.shared.opts().remotes[remote];
         let proof = crate::leaf::prove(r, &String::from_utf8_lossy(nonce))?;
         let (user, pass, token) = match (&self.url.user, &self.url.pass) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str(), ""),
