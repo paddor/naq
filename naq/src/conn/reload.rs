@@ -28,7 +28,7 @@ impl Conn {
         // another account, moved; the client reconnects to find out.
         let named = creds.user.is_some() || creds.nkey.is_some();
         if named && auth.and_then(|a| a.account_of(&creds)) != Some(account) {
-            return Err(Close::Moved);
+            return Err(Close::Dropped);
         }
         let Some(auth) = auth else {
             self.regrant(Grant {
@@ -56,7 +56,7 @@ impl Conn {
             Check::Fail | Check::User(_) | Check::Fetch(_) => return Err(Close::Auth),
         };
         if grant.account != account {
-            return Err(Close::Moved);
+            return Err(Close::Dropped);
         }
         self.regrant(grant);
         Ok(())

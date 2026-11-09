@@ -43,8 +43,8 @@ A configuration key it does not serve is an error, not ignored.
 - JetStream. A naq leaf reaches the JetStream of its `nats-server` hub.
 - Routes to `nats-server`, gateways, and `nats-server` leaf nodes on a naq
   hub.
-- Prometheus metrics. A config reload takes no changes yet to the
-  cluster or leaf nodes.
+- Prometheus metrics. A config reload takes no changes to the cluster,
+  nor to the remotes to naq hubs.
 
 ## Usage
 

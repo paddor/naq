@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use super::{Ended, Facts, HubUrl, LinkSide, Told, creds, side};
+use super::{Ended, Facts, HubRemote, HubUrl, LinkSide, Told, creds, side};
 use crate::Rules;
 use crate::conn::{self, Client};
 use crate::lane::{Lane, Outs, Routing, Source};
@@ -145,7 +145,7 @@ struct Link<'l, R> {
 /// link and returns how it ended.
 pub(super) async fn session(
     lane: &Rc<Lane>,
-    remote: usize,
+    remote: &HubRemote,
     url: &HubUrl,
     urls: &[HubUrl],
     told: &RefCell<Option<Told>>,
@@ -175,7 +175,7 @@ pub(super) async fn session(
 /// A connection to a hub, made for a remote.
 struct Dial<'a> {
     lane: &'a Rc<Lane>,
-    remote: usize,
+    remote: &'a HubRemote,
     url: &'a HubUrl,
     /// All of the remote's URLs.
     urls: &'a [HubUrl],
@@ -187,7 +187,7 @@ impl Dial<'_> {
     /// or not at all, as remote and hub say.
     async fn nats(&self, mut tcp: TcpStream) -> End {
         let (lane, remote, url) = (self.lane, self.remote, self.url);
-        let tls = &lane.shared.leaf_tls[remote];
+        let tls = remote.tls();
         let mut buf = lane.reads.take(conn::READ_CHUNK);
         if tls.first() {
             return match tls.connect(tcp, url, self.urls).await {
@@ -218,7 +218,7 @@ impl Dial<'_> {
     /// `nats-server`.
     async fn websocket(&self, tcp: TcpStream) -> End {
         let (lane, remote, url) = (self.lane, self.remote, self.url);
-        let tls = &lane.shared.leaf_tls[remote];
+        let tls = remote.tls();
         let buf = lane.reads.take(conn::READ_CHUNK);
         if url.wss || tls.after_info(false) {
             match tls.connect(tcp, url, self.urls).await {
@@ -319,7 +319,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
 
     /// Upgrades the link to WebSocket, then the handshake for remote
     /// `remote` and the link over its frames.
-    async fn over_ws(mut self, remote: usize, url: &HubUrl) -> End {
+    async fn over_ws(mut self, remote: &HubRemote, url: &HubUrl) -> End {
         let path = url.ws.as_deref().unwrap_or_default();
         let up = ws::client::upgrade(&mut self.io, &url.host, url.port, path);
         let Ok(Some(pre)) = timeout(FIRST_INFO, up).await else {
@@ -352,7 +352,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
 
     /// The handshake for remote `remote` with the hub at `url`, after its
     /// `first` INFO if read already, then the link until it ends.
-    async fn run(mut self, remote: usize, url: &HubUrl, first: Option<HubInfo>) -> End {
+    async fn run(mut self, remote: &HubRemote, url: &HubUrl, first: Option<HubInfo>) -> End {
         match self.handshake(remote, url, first).await {
             Ok(terms) => {
                 let (mut link, w) = self.split();
@@ -366,7 +366,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
     /// `CONNECT`, and the `INFO` that answers it. Returns what they settled.
     async fn handshake(
         &mut self,
-        remote: usize,
+        remote: &HubRemote,
         url: &HubUrl,
         first: Option<HubInfo>,
     ) -> Result<Terms, End> {
@@ -387,7 +387,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
             return Err(End::ZERO);
         }
         let opts = &self.lane.shared.opts();
-        let r = &opts.remotes[remote];
+        let r = &remote.remote;
         let account = r.account.as_deref().unwrap_or("$G");
         // A file gone or broken ends this dial; the next reads it again.
         let proof = creds::prove(r, &info.nonce).map_err(|_| End::ZERO)?;
@@ -461,13 +461,12 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
     /// the hub sends, and notes what it says.
     async fn serve<W: AsyncWrite + Unpin + 'static>(
         &mut self,
-        remote: usize,
+        remote: &HubRemote,
         w: W,
         terms: Terms,
     ) -> End {
         let shared = &self.lane.shared;
-        let opts = shared.opts();
-        let name = opts.remotes[remote].account.as_deref().unwrap_or("$G");
+        let name = remote.remote.account.as_deref().unwrap_or("$G");
         // Known to exist: the options were checked.
         let account = shared.accounts.id(name).unwrap_or(0);
         let client = self.client.clone();
@@ -493,6 +492,10 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             self.lane.slots.leafs(),
         );
         self.lane.links.borrow_mut().push(side.clone());
+        // A reload may have removed it as it came up.
+        if !remote.linked(client.id) {
+            client.kick(crate::conn::Close::Dropped);
+        }
         crate::sys::conns_changed(shared, account);
         crate::sys::connected(self.lane, crate::sys::Of::Link(&side));
         self.lane.mark(&client);
@@ -505,6 +508,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         let why = close.reason();
         crate::monitor::link_closed(self.lane, &side, why);
         self.lane.links.borrow_mut().retain(|l| l.id != side.id);
+        remote.linked(0);
         crate::sys::conns_changed(shared, account);
         crate::sys::closed(self.lane, crate::sys::Of::Link(&side), close, None);
         side.forget_hub(self.lane);

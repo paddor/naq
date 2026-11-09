@@ -129,8 +129,11 @@ impl Mesh {
     /// The mesh of `shared`'s server, of start `epoch`.
     fn new(shared: &Shared, epoch: u64) -> Mesh {
         let first = routes(&shared.opts());
-        let hubs = (0..shared.opts().remotes.len())
-            .filter(|&r| crate::leaf::is_naq(&shared.opts().remotes[r]))
+        let opts = shared.opts();
+        let hubs = opts
+            .remotes
+            .iter()
+            .filter(|r| crate::leaf::is_naq(r))
             .enumerate()
             // Slots are below 64: they fit.
             .map(|(k, r)| spoke::Hub::new(shared, r, (first + k) as u16, epoch))

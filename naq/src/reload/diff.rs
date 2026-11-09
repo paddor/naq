@@ -42,6 +42,8 @@ pub(super) enum Change {
     Fallback(Duration),
     Tags,
     Metadata,
+    /// Remotes to `nats-server` hubs came or went.
+    Remotes,
 }
 
 /// A value as Go's `%v` writes it.
@@ -225,18 +227,13 @@ impl Diff<'_> {
         fixed("MaxPending", &o.max_pending, &n.max_pending)
     }
 
-    /// The cluster and leaf nodes: no change yet.
-    fn mesh(&self) -> Result<(), String> {
+    /// The cluster, which stays as it is, its routes too, and leaf nodes:
+    /// remotes to `nats-server` hubs may come and go.
+    fn mesh(&mut self) -> Result<(), String> {
         let (o, n) = (self.old, self.new);
-        if o.cluster != n.cluster {
-            return Err(refusal("Cluster", "{...}", "{...}"));
-        }
-        let leafs = o.leafnodes == n.leafnodes
-            && o.remotes == n.remotes
-            && o.leaf_reconnect == n.leaf_reconnect;
-        if !leafs {
-            return Err(refusal("LeafNode", "{...}", "{...}"));
-        }
+        cluster(o.cluster.as_ref(), n.cluster.as_ref())?;
+        let remotes = super::leafs::changed(o, n)?;
+        self.push(remotes, Change::Remotes);
         // Its TLS may change, not come or go.
         let bare = |x: &Options| {
             let w = x.websocket.as_ref()?;
@@ -278,6 +275,13 @@ impl Diff<'_> {
         fixed("LogMaxFiles", &o.log.max_files, &n.log.max_files)?;
         self.push(syslog(o) != syslog(n), Change::Syslog(syslog(n)));
         self.push(remote(o) != remote(n), Change::RemoteSyslog(remote(n)));
+        let routes = |x: &Options| {
+            x.cluster
+                .as_ref()
+                .map(|c| c.routes.clone())
+                .unwrap_or_default()
+        };
+        fixed("Routes", &routes(o), &routes(n))?;
         self.tls_of_clients()
     }
 
@@ -328,6 +332,30 @@ impl Diff<'_> {
         self.push(o.server_metadata != n.server_metadata, Change::Metadata);
         Ok(())
     }
+}
+
+/// Refuses a change of the cluster: of its host and port in Go's words,
+/// else of its name; its routes come later, in Go's order.
+fn cluster(old: Option<&crate::Cluster>, new: Option<&crate::Cluster>) -> Result<(), String> {
+    let none = crate::Cluster {
+        host: String::new(),
+        port: 0,
+        ..crate::Cluster::default()
+    };
+    let (o, n) = (old.unwrap_or(&none), new.unwrap_or(&none));
+    if o.host != n.host {
+        let (a, b) = (&o.host, &n.host);
+        return Err(format!(
+            "config reload not supported for cluster host: old={a}, new={b}"
+        ));
+    }
+    if o.port != n.port {
+        let (a, b) = (o.port, n.port);
+        return Err(format!(
+            "config reload not supported for cluster port: old={a}, new={b}"
+        ));
+    }
+    fixed("ClusterName", &o.name, &n.name)
 }
 
 /// Refuses changes of the exports and imports of an account both `old`
@@ -556,6 +584,40 @@ mod tests {
         let mut new = old.clone();
         new.resolver_preload = vec![("A".into(), "jwt".into())];
         assert_eq!(changes(&old, &new, at(4222)), Err(whole("AccountResolver")));
+    }
+
+    #[test]
+    fn the_cluster_and_its_routes_stay() {
+        let cluster = crate::Cluster {
+            name: "c".into(),
+            routes: vec!["nats-route://h:1".into()],
+            ..crate::Cluster::default()
+        };
+        assert_eq!(
+            refused(|o| o.cluster = Some(cluster.clone())),
+            "config reload not supported for cluster host: old=, new=0.0.0.0"
+        );
+        let mut old = opts();
+        old.cluster = Some(cluster.clone());
+        let change = |f: &dyn Fn(&mut crate::Cluster)| {
+            let mut new = old.clone();
+            if let Some(c) = new.cluster.as_mut() {
+                f(c);
+            }
+            changes(&old, &new, at(4222)).unwrap_err()
+        };
+        assert_eq!(
+            change(&|c| c.port = 6223),
+            "config reload not supported for cluster port: old=6222, new=6223"
+        );
+        assert_eq!(
+            change(&|c| c.name = "d".into()),
+            "config reload not supported for ClusterName: old=c, new=d"
+        );
+        assert_eq!(
+            change(&|c| c.routes.clear()),
+            "config reload not supported for Routes: old=[nats-route://h:1], new=[]"
+        );
     }
 
     #[test]

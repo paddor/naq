@@ -74,8 +74,8 @@ pub(crate) struct Shared {
     pub(crate) tls: crate::tls::Current,
     /// The WebSocket port, if there is one.
     pub(crate) ws: Option<crate::ws::Door>,
-    /// TLS to the hub of each leaf node remote.
-    pub(crate) leaf_tls: Box<[crate::leaf::Connector]>,
+    /// The remotes to `nats-server` hubs it dials.
+    pub(crate) hubs: crate::leaf::HubRemotes,
     /// Where the clients of the other servers of the cluster connect, as
     /// they told it.
     pub(crate) connect_urls: std::sync::Mutex<Vec<String>>,
@@ -262,7 +262,7 @@ impl Server {
             gone: AtomicU64::new(0),
             tls: crate::tls::Current::new(setup.tls),
             ws: door(opts, at.ws, setup.ws_tls),
-            leaf_tls: setup.leaf_tls,
+            hubs: crate::leaf::HubRemotes::new(setup.hubs, ctx.lanes()),
             system,
             sys: crate::sys::State::new(system.map(|_| node)),
             connect_urls: std::sync::Mutex::default(),
@@ -472,8 +472,8 @@ struct Setup {
     tls: Option<Acceptor>,
     /// For the WebSocket port.
     ws_tls: Option<Acceptor>,
-    /// For each leaf node remote.
-    leaf_tls: Box<[crate::leaf::Connector]>,
+    /// The remotes to `nats-server` hubs, with their TLS.
+    hubs: Vec<(crate::Remote, crate::leaf::Connector)>,
     /// The imports of each account, by id.
     imports: Box<[crate::imports::Imports]>,
     /// The directory resolver, if there is one.
@@ -494,15 +494,11 @@ fn check(opts: &Options) -> Result<Setup, Error> {
         .and_then(|w| w.tls.as_ref())
         .map(Acceptor::new)
         .transpose()?;
-    let leaf_tls = opts
-        .remotes
-        .iter()
-        .map(crate::leaf::Connector::new)
-        .collect::<Result<_, _>>()?;
+    let hubs = crate::leaf::to_hubs(opts)?;
     Ok(Setup {
         tls,
         ws_tls,
-        leaf_tls,
+        hubs,
         imports,
         resolver: crate::resolver::Dir::open(opts).map_err(Error::Options)?,
         monitor_tls: crate::monitor::acceptor(opts)?,
@@ -568,12 +564,10 @@ fn run(
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     // A naq hub is dialed with the cluster, over OMQ.
-    let go = (0..shared.opts().remotes.len())
-        .filter(|&i| !crate::leaf::is_naq(&shared.opts().remotes[i]));
-    for index in go {
-        let lane = &lanes[index % lanes.len()];
-        let (s, at) = (shared.clone(), lane.index());
-        lane.spawn(move || crate::leaf::run(s, at, index))
+    for hub in shared.hubs.all() {
+        let s = shared.clone();
+        lanes[hub.lane]
+            .spawn(move || crate::leaf::run(s, hub))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     let mesh = if crate::mesh::wanted(&shared.opts()) {

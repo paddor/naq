@@ -31,8 +31,8 @@ const GREET: Duration = Duration::from_secs(3);
 #[derive(Debug)]
 pub(crate) struct Hub {
     pub(crate) slot: u16,
-    /// Its remote, by index.
-    remote: usize,
+    /// Its remote.
+    remote: Rc<crate::Remote>,
     /// The local account the link binds.
     pub(crate) account: u32,
     pub(crate) host: String,
@@ -54,10 +54,10 @@ pub(crate) struct Hub {
 }
 
 impl Hub {
-    /// The hub of remote `remote` of `shared`'s server, a naq one, in slot
+    /// The hub of remote `remote`, a naq one, of `shared`'s server, in slot
     /// `slot`, told by a teller of start `epoch`.
-    pub(super) fn new(shared: &Shared, remote: usize, slot: u16, epoch: u64) -> Hub {
-        let r = &shared.opts().remotes[remote];
+    pub(super) fn new(shared: &Shared, remote: &crate::Remote, slot: u16, epoch: u64) -> Hub {
+        let r = remote;
         // Valid: the options were checked.
         let url = r.urls.first().and_then(|u| HubUrl::parse(u).ok());
         let (host, port) = url.map(|u| (u.host, u.port)).unwrap_or_default();
@@ -70,7 +70,7 @@ impl Hub {
         told.take();
         Hub {
             slot,
-            remote,
+            remote: Rc::new(remote.clone()),
             // Accounts are few: their count fits.
             account,
             host,
@@ -94,8 +94,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
     let Some(lane) = crate::lane::get(shared.id, 0) else {
         return;
     };
-    let remote = mesh.hubs.borrow()[at].remote;
-    let r = &shared.opts().remotes[remote];
+    let r = mesh.hubs.borrow()[at].remote.clone();
     // Valid: the options were checked.
     let configured: Vec<HubUrl> = r
         .urls
@@ -117,7 +116,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
         };
         urls.push_back(url.clone());
         n += 1;
-        let id = format!("{}/{remote}/{n}", shared.server_id);
+        let id = format!("{}/{at}/{n}", shared.server_id);
         let (found, delay) = connect(&shared, &mesh, at, &url, id).await;
         let wait = match found {
             Some(found) => {
@@ -356,9 +355,8 @@ impl Link<'_> {
     ///
     /// A seed that cannot sign.
     fn login(&self, nonce: &[u8]) -> Result<Bytes, String> {
-        let remote = self.mesh.hubs.borrow()[self.at].remote;
-        let r = &self.shared.opts().remotes[remote];
-        let proof = crate::leaf::prove(r, &String::from_utf8_lossy(nonce))?;
+        let r = self.mesh.hubs.borrow()[self.at].remote.clone();
+        let proof = crate::leaf::prove(&r, &String::from_utf8_lossy(nonce))?;
         let (user, pass, token) = match (&self.url.user, &self.url.pass) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str(), ""),
             (Some(t), None) => ("", "", t.as_str()),

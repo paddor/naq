@@ -320,9 +320,10 @@ enum Stage {
 pub(crate) enum Close {
     /// The client closed it, or reading failed.
     Lost,
-    /// A reload took its user away, or moved it to another account: closed
-    /// without a word, as by the client.
-    Moved,
+    /// A reload took away its user, moved that to another account, or
+    /// removed the remote of its link: closed without a word, as by the
+    /// client.
+    Dropped,
     /// The server closed it.
     Kicked,
     /// It let more output wait than `max_pending`: a slow consumer.
@@ -366,7 +367,7 @@ impl Close {
     /// Why it ended, in the words of `nats-server`.
     pub(crate) fn reason(self) -> &'static str {
         match self {
-            Close::Lost | Close::Moved => "Client Closed",
+            Close::Lost | Close::Dropped => "Client Closed",
             Close::Kicked => "Kicked",
             Close::SlowPending => "Slow Consumer (Pending Bytes)",
             Close::SlowWrite(_) => "Slow Consumer (Write Deadline)",
@@ -758,7 +759,7 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::AccountExpired => Some("Account Authentication Expired"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
-        | Close::Moved
+        | Close::Dropped
         | Close::Kicked
         | Close::SlowPending
         | Close::SlowWrite(_)

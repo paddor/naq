@@ -5,6 +5,7 @@
 //! options.
 
 mod diff;
+mod leafs;
 mod users;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -138,6 +139,8 @@ struct Tls {
     ws: Option<crate::tls::Acceptor>,
     /// Of the HTTPS monitoring port.
     https: Option<tokio_rustls::TlsAcceptor>,
+    /// Of the remotes to `nats-server` hubs.
+    hubs: Vec<(crate::Remote, crate::leaf::Connector)>,
 }
 
 impl Tls {
@@ -148,6 +151,7 @@ impl Tls {
             clients: o.tls.as_ref().map(crate::tls::Acceptor::new).transpose()?,
             ws: ws.map(crate::tls::Acceptor::new).transpose()?,
             https: crate::monitor::acceptor(o)?,
+            hubs: crate::leaf::to_hubs(o)?,
         })
     }
 
@@ -163,6 +167,7 @@ impl Tls {
     fn take(self, shared: &Shared) {
         shared.tls.set(self.clients);
         shared.monitor.set_tls(self.https);
+        leafs::retls(shared, self.hubs);
         if let Some(door) = &shared.ws {
             door.tls.set(self.ws);
         }
@@ -174,6 +179,7 @@ impl Tls {
 fn apply(shared: &Shared, new: &Options, c: &Change, after: &mut After) {
     match c {
         Change::PidFile(path) => pid_file(shared, path.as_deref()),
+        Change::Remotes => leafs::apply(shared, new),
         Change::PortsFileDir(dir) => ports_file(shared, new, dir.as_deref()),
         c => shared.log.info(format_args!("Reloaded: {}", said(c))),
     }
@@ -192,7 +198,7 @@ fn apply(shared: &Shared, new: &Options, c: &Change, after: &mut After) {
 }
 
 /// What `nats-server` logs of change `c`, after `Reloaded: `; the pid and
-/// ports files log their own.
+/// ports files, and remotes, log their own.
 fn said(c: &Change) -> String {
     use crate::log::go_duration;
     match c {
@@ -226,7 +232,7 @@ fn said(c: &Change) -> String {
         ),
         Change::Tags => "tags".into(),
         Change::Metadata => "metadata".into(),
-        Change::PidFile(_) | Change::PortsFileDir(_) => String::new(),
+        Change::PidFile(_) | Change::PortsFileDir(_) | Change::Remotes => String::new(),
     }
 }
 

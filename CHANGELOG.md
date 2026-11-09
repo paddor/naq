@@ -147,6 +147,10 @@ Notable changes to naq. The format follows
   `timeout`, `handshake_first` and its fallback, TLS turned on or off.
   WebSocket clients and the HTTPS monitoring port take new certificates
   too.
+- `naq`: a reload adds and removes leaf node remotes to `nats-server`
+  hubs, as `nats-server` does: the links of those removed close as
+  `Client Closed` and dial no more, those added dial at once, and those
+  kept take their new TLS at their next dial.
 
 ### Changed
 

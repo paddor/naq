@@ -1183,3 +1183,101 @@ fn new_clients_get_the_certificates_a_reload_read_and_websocket_ones_too() {
     );
     server.shutdown();
 }
+
+/// The leaf node lines of `lines`, ports and link IDs masked.
+fn leaf_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|l| l.contains("Leafnode connection") || l.contains("LeafNode"))
+        .map(|l| {
+            let rest = l.split_once("] ").map_or(l.as_str(), |(_, r)| r);
+            let rest = match rest.split_once(" - lid:") {
+                Some((head, tail)) => {
+                    let head = head.rsplit_once(':').map_or(head, |(h, _)| h);
+                    let tail = tail.split_once(' ').map_or("", |(_, t)| t);
+                    format!("{head}:P - lid:N {tail}")
+                }
+                None => rest.to_owned(),
+            };
+            // The hub's name is its ID.
+            rest.split_once(" - Remote: ")
+                .map_or(rest.clone(), |(h, _)| h.to_owned())
+        })
+        .collect()
+}
+
+/// What `bin` logs as a reload refuses a change of remote `linked` to
+/// `denied`, removes it, and adds it again.
+fn remote_steps(i: usize, bin: &Path, linked: &str, denied: &str) -> (Vec<String>, Vec<String>) {
+    let d = dir(&format!("remotes-{i}"));
+    let p = Proc::start(bin, &d, linked, &[]);
+    let created = |n: usize| {
+        move |l: &[String]| {
+            l.iter()
+                .filter(|l| l.contains("Leafnode connection created"))
+                .count()
+                >= n
+        }
+    };
+    lines_once(&p.log(), created(1));
+    p.write(denied);
+    p.hup();
+    p.write("");
+    p.hup();
+    lines_once(&p.log(), |l| {
+        l.iter().any(|l| l.contains("Leafnode connection closed"))
+    });
+    p.write(linked);
+    p.hup();
+    let lines = lines_once(&p.log(), created(2));
+    (reload_lines(&lines), leaf_lines(&lines))
+}
+
+#[test]
+fn remotes_to_nats_server_hubs_come_and_go_on_a_reload() {
+    let Some(go) = std::env::var_os("NAQ_GO").map(PathBuf::from) else {
+        eprintln!("skipped: NAQ_GO is not set");
+        return;
+    };
+    let hub_dir = dir("hub");
+    let hub_port = free_port();
+    let hub = Proc::start(
+        &go,
+        &hub_dir,
+        &format!("leafnodes {{ listen: 127.0.0.1:{hub_port} }}\n"),
+        &[],
+    );
+    let url = format!("nats-leaf://127.0.0.1:{hub_port}");
+    let linked = format!("leafnodes {{ remotes: [{{url: {url:?}}}] }}\n");
+    let denied = format!("leafnodes {{ remotes: [{{url: {url:?}, deny_imports: [x]}}] }}\n");
+    let seen: Vec<_> = binaries()
+        .iter()
+        .enumerate()
+        .map(|(i, bin)| remote_steps(i, bin, &linked, &denied))
+        .collect();
+    drop(hub);
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    let (reloads, leafs) = &seen[0];
+    let name = format!(r#"urls=["{url}"], account="$G""#);
+    assert_eq!(
+        reloads[1],
+        format!(
+            "[ERR] Failed to reload server configuration: config reload not supported for \
+             LeafNode: remote {name}: field \"DenyImports\": old=[], new=[x]"
+        )
+    );
+    assert!(reloads.contains(&format!("[INF] Reloaded: LeafNode Remote {name} removed")));
+    let created = "[INF] 127.0.0.1:P - lid:N - Leafnode connection created for account: $G ";
+    assert_eq!(
+        leafs,
+        &[
+            created.to_owned(),
+            reloads[1].clone(),
+            format!("[INF] Reloaded: LeafNode Remote {name} removed"),
+            "[INF] 127.0.0.1:P - lid:N - Leafnode connection closed: Client Closed".to_owned(),
+            created.to_owned(),
+        ]
+    );
+}
