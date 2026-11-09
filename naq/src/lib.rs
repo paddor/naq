@@ -44,6 +44,7 @@ pub mod fuzzing;
 mod imports;
 mod index;
 mod jwt;
+mod lame;
 mod lane;
 mod leaf;
 mod log;

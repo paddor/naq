@@ -1,0 +1,128 @@
+# An LDM request by the server's ID sends a client of protocol 1 the INFO
+# of lame duck mode, the server's own URL still in it, and the server
+# answers with its block alone. A client of protocol 0 gets none, and the
+# request an error, as does an ID no client has. A body that names no
+# client gets no answer.
+#! server_name: s1
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#!   A { users [{user: a, password: p}] }
+#! }
+#! system_account: SYS
+#~ id
+#~ time
+#~ seq
+#~ ver
+#~ version
+#~ go
+#~ xkey
+#~ client_id
+#- git_commit
+#- api_lvl
+s> CONNECT {"user":"sys","pass":"p","headers":true,"no_responders":true}
+s> SUB _R.> 1
+n> CONNECT {"user":"a","pass":"p","protocol":1}
+o> CONNECT {"user":"a","pass":"p"}
+n< 1
+< INFO
+< {
+<   "server_id": ~,
+<   "server_name": "s1",
+<   "version": ~,
+<   "proto": 1,
+<   "go": ~,
+<   "host": "127.0.0.1",
+<   "port": ~,
+<   "headers": true,
+<   "auth_required": true,
+<   "max_payload": 1048576,
+<   "client_id": ~,
+<   "client_ip": "127.0.0.1",
+<   "connect_info": true,
+<   "remote_account": "A",
+<   "xkey": ~
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.LDM _R.1 $LEN
+s> {"cid":$CID_n}
+s< 1
+< MSG _R.1 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   }
+< }
+n< 1
+< INFO
+< {
+<   "server_id": ~,
+<   "server_name": "s1",
+<   "version": ~,
+<   "proto": 1,
+<   "go": ~,
+<   "host": "127.0.0.1",
+<   "port": ~,
+<   "headers": true,
+<   "auth_required": true,
+<   "max_payload": 1048576,
+<   "client_id": ~,
+<   "client_ip": "127.0.0.1",
+<   "ldm": true,
+<   "xkey": ~
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.LDM _R.2 $LEN
+s> {"cid":$CID_o}
+s< 1
+< MSG _R.2 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 500,
+<     "description": "client does not support Lame Duck Mode or is not ready to receive the notification"
+<   }
+< }
+o< 0
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.LDM _R.3 $LEN
+s> {"cid":999999}
+s< 1
+< MSG _R.3 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 500,
+<     "description": "no such client id"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.LDM _R.4 $LEN
+s> {"cid":"x"}
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.LDM _R.5 $LEN
+s> {"cid":1}
+s< 1
+< HMSG _R.5 1
+< NATS/1.0 503
+< Nats-Subject: $SYS.REQ.SERVER.PING.LDM

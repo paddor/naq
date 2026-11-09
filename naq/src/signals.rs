@@ -1,5 +1,7 @@
 //! The signals a server handles, as `nats-server` handles them.
 
+use std::pin::Pin;
+
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::Server;
@@ -61,7 +63,9 @@ impl Signals {
     }
 
     /// Waits for a signal that stops `server`, acting on the others as
-    /// they come.
+    /// they come. `USR2` puts it in lame duck mode, which stops it once
+    /// its clients are gone; meanwhile `TERM` and `USR2` do nothing, and
+    /// `INT` stops it at once.
     pub(crate) fn wait(self, server: &Server) {
         let log = server.log();
         let Signals {
@@ -73,24 +77,52 @@ impl Signals {
             mut usr2,
         } = self;
         rt.block_on(async {
-            // `recv` is cancel-safe: a signal missed by one branch is kept.
+            let mut lame: Option<Pin<Box<dyn Future<Output = ()>>>> = None;
             loop {
-                let name = tokio::select! {
-                    _ = int.recv() => "interrupt",
-                    _ = term.recv() => "terminated",
-                    _ = usr2.recv() => "user defined signal 2",
-                    _ = usr1.recv() => "user defined signal 1",
-                    _ = hup.recv() => "hangup",
+                // `recv` is cancel-safe: a signal missed by one branch is
+                // kept. Lame duck mode goes on where it was.
+                let caught = tokio::select! {
+                    _ = int.recv() => Caught::Int,
+                    _ = term.recv() => Caught::Term,
+                    _ = usr2.recv() => Caught::Usr2,
+                    _ = usr1.recv() => Caught::Usr1,
+                    _ = hup.recv() => Caught::Hup,
+                    () = async { if let Some(l) = lame.as_mut() { l.await } }, if lame.is_some() => return,
                 };
-                log.info(format_args!("Trapped {name:?} signal"));
-                match name {
-                    "user defined signal 1" => server.reopen_log(),
-                    "hangup" => log.error(format_args!(
+                log.info(format_args!("Trapped {:?} signal", caught.name()));
+                match caught {
+                    Caught::Term | Caught::Usr2 if lame.is_some() => {}
+                    Caught::Int | Caught::Term => return,
+                    Caught::Usr2 => lame = Some(Box::pin(server.lame_duck())),
+                    Caught::Usr1 => server.reopen_log(),
+                    Caught::Hup => log.error(format_args!(
                         "Failed to reload server configuration: config reload not supported"
                     )),
-                    _ => return,
                 }
             }
         });
+    }
+}
+
+/// A signal caught.
+#[derive(Debug, Clone, Copy)]
+enum Caught {
+    Int,
+    Term,
+    Hup,
+    Usr1,
+    Usr2,
+}
+
+impl Caught {
+    /// Its name, as Go logs it.
+    const fn name(self) -> &'static str {
+        match self {
+            Caught::Int => "interrupt",
+            Caught::Term => "terminated",
+            Caught::Hup => "hangup",
+            Caught::Usr1 => "user defined signal 1",
+            Caught::Usr2 => "user defined signal 2",
+        }
     }
 }

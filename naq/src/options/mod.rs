@@ -128,6 +128,14 @@ pub struct Options {
     /// file of the program's name and process ID, removed as it stops
     /// (`ports_file_dir`).
     pub ports_file_dir: Option<std::path::PathBuf>,
+    /// How long lame duck mode takes, from its start to the last client
+    /// it closes (`lame_duck_duration`).
+    pub lame_duck_duration: Duration,
+    /// How long lame duck mode waits before it closes the first client
+    /// (`lame_duck_grace_period`), so that the clients of servers put in
+    /// lame duck mode together do not move to each other. Below
+    /// [`Options::lame_duck_duration`].
+    pub lame_duck_grace_period: Duration,
 }
 
 /// Where the JWTs of accounts come from (`resolver`).
@@ -573,6 +581,8 @@ impl Default for Options {
             config_file: None,
             pid_file: None,
             ports_file_dir: None,
+            lame_duck_duration: Duration::from_secs(120),
+            lame_duck_grace_period: Duration::from_secs(10),
         }
     }
 }

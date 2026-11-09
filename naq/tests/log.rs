@@ -31,8 +31,8 @@ fn free_port() -> u16 {
 
 /// A server running, naq or `nats-server`: held until dropped.
 struct Target {
-    _naq: Option<Server>,
-    _go: Option<Go>,
+    naq: Option<Server>,
+    go: Option<Go>,
 }
 
 struct Go(Child);
@@ -53,8 +53,8 @@ fn start(d: &Path, conf: &str, bin: Option<&Path>) -> Target {
         let mut o = Options::from_file(&path).unwrap();
         o.lanes = 2;
         return Target {
-            _naq: Some(Server::start(&o).unwrap()),
-            _go: None,
+            naq: Some(Server::start(&o).unwrap()),
+            go: None,
         };
     };
     let child = Command::new(bin)
@@ -69,8 +69,8 @@ fn start(d: &Path, conf: &str, bin: Option<&Path>) -> Target {
         l.iter().any(|l| l.ends_with("Server is ready"))
     });
     Target {
-        _naq: None,
-        _go: Some(Go(child)),
+        naq: None,
+        go: Some(Go(child)),
     }
 }
 
@@ -503,5 +503,75 @@ fn traced_headers_leave_out_payloads() {
     assert!(
         payloads[0].ends_with(r#"<<- MSG_PAYLOAD: ["NATS/1.0\r\nA: b"]"#),
         "{payloads:?}"
+    );
+}
+
+/// The lines from the start of lame duck mode in `lines`: those of the
+/// client as [`client_lines`] writes them, and the server's own at `INF`,
+/// but for the signals it caught.
+fn lame_lines(lines: &[String]) -> Vec<String> {
+    let from = lines
+        .iter()
+        .position(|l| l.contains("Entering lame duck mode"))
+        .unwrap();
+    lines[from..]
+        .iter()
+        .filter_map(|l| {
+            let rest = l.split_once("] ").map_or(l.as_str(), |(_, r)| r);
+            if rest.contains(" - cid:") {
+                return client_lines(std::slice::from_ref(l)).pop();
+            }
+            let own = rest.starts_with("[INF] ") && !rest.contains("Trapped");
+            own.then(|| rest.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn lame_duck_mode_is_logged_as_nats_server_logs_it() {
+    let go = std::env::var_os("NAQ_GO").map(PathBuf::from);
+    let mut seen: Vec<Vec<String>> = Vec::new();
+    for bin in [None, go.as_deref()] {
+        if seen.len() == 1 && bin.is_none() {
+            break;
+        }
+        let d = dir(&format!("lame-{}", seen.len()));
+        let port = free_port();
+        let log = d.join("server.log");
+        let text = format!(
+            "listen: 127.0.0.1:{port}\nlog_file: {:?}\nlogtime: false\ndebug: true\n\
+             lame_duck_duration: 30s\nlame_duck_grace_period: 1s\n",
+            log.display().to_string()
+        );
+        let mut target = start(&d, &text, bin);
+        let mut c = Client::new(port, r#"{"verbose":false,"protocol":1,"name":"app"}"#);
+        c.pong();
+        if let Some(s) = target.naq.take() {
+            std::thread::spawn(move || s.lame_duck_shutdown());
+        } else if let Some(g) = &target.go {
+            let ok = Command::new("kill")
+                .args(["-s", "USR2", &g.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        }
+        c.closed();
+        let lines = lines_once(&log, |l| l.iter().any(|l| l.ends_with("Server Exiting..")));
+        seen.push(lame_lines(&lines));
+        drop(target);
+    }
+    if let [naq, go] = &seen[..] {
+        assert_eq!(naq, go, "naq, then nats-server");
+    }
+    assert_eq!(
+        seen[0],
+        [
+            "[INF] Entering lame duck mode, stop accepting new clients",
+            "[INF] Closing existing clients",
+            r#"[DBG] 127.0.0.1:P - cid:1 - "app" - Client connection closed: Server Shutdown"#,
+            "[INF] Initiating Shutdown...",
+            "[INF] Server Exiting..",
+        ]
     );
 }

@@ -121,6 +121,8 @@ pub(crate) struct Mesh {
     leaf_wake: Rc<Notify>,
     /// The naq hubs dialed, in the order of their remotes.
     pub(crate) hubs: RefCell<Vec<spoke::Hub>>,
+    /// Woken as this server goes into lame duck mode.
+    lamed: Notify,
 }
 
 impl Mesh {
@@ -141,7 +143,14 @@ impl Mesh {
             leafs: RefCell::default(),
             leaf_wake: Rc::default(),
             hubs: RefCell::new(hubs),
+            lamed: Notify::new(),
         }
+    }
+
+    /// Tells the routes that this server is in lame duck mode: it names no
+    /// client URLs from now on, so that their clients leave it out.
+    pub(crate) fn lame(&self) {
+        self.lamed.notify_one();
     }
 
     /// Takes in the taps of imports `lane`, lane 0, holds from its start:

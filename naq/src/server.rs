@@ -50,6 +50,8 @@ pub(crate) struct Shared {
     pub(crate) log: crate::log::Log,
     /// It shuts down: no new connections.
     pub(crate) stopping: std::sync::atomic::AtomicBool,
+    /// Where it stands in lame duck mode.
+    pub(crate) lame: crate::lame::Lame,
     /// Message counts of the clients of each lane.
     pub(crate) counts: Box<[stats::Shared]>,
     /// Message counts of the links and routes of each lane.
@@ -187,16 +189,12 @@ impl Server {
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
         let keys = Keys::new();
         let started = std::time::SystemTime::now();
+        let node = node(&opts.server_name);
         let shared = Arc::new(Shared {
             id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
             opts: opts.clone(),
             addr: at.client,
-            callouts: crate::callout::Callouts::new(
-                opts,
-                &accounts,
-                auth.as_ref(),
-                node(&opts.server_name),
-            ),
+            callouts: crate::callout::Callouts::new(opts, &accounts, auth.as_ref(), node),
             server_id: keys.server.public_key(),
             keys,
             lanes: txs.into_boxed_slice(),
@@ -211,6 +209,7 @@ impl Server {
             auth,
             log,
             stopping: std::sync::atomic::AtomicBool::new(false),
+            lame: crate::lame::Lame::default(),
             counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
             peer_counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
             monitor: crate::monitor::State::new(opts, started, at.monitor),
@@ -221,7 +220,7 @@ impl Server {
             ws: door(opts, at.ws, setup.ws_tls),
             leaf_tls: setup.leaf_tls,
             system,
-            sys: crate::sys::State::new(system.map(|_| node(&opts.server_name))),
+            sys: crate::sys::State::new(system.map(|_| node)),
             connect_urls: std::sync::Mutex::default(),
             next_client: AtomicU64::new(1),
         });
@@ -250,9 +249,37 @@ impl Server {
         crate::stop::server(&self.shared);
     }
 
+    /// Puts the server in lame duck mode, as `nats-server` does, then shuts
+    /// it down as [`Server::shutdown`] does. It takes no more clients,
+    /// tells those it has and the other servers of its cluster that it
+    /// goes, and after [`Options::lame_duck_grace_period`] closes its
+    /// clients one by one, spread over the rest of
+    /// [`Options::lame_duck_duration`], so that they do not all reconnect
+    /// at once. Returns once it stopped.
+    ///
+    /// # Panics
+    ///
+    /// Called from within an async runtime, which it would block.
+    pub fn lame_duck_shutdown(self) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build();
+        // Without a runtime for its timers, it shuts down at once.
+        if let Ok(rt) = rt {
+            rt.block_on(self.lame_duck());
+        }
+        self.shutdown();
+    }
+
+    /// Lame duck mode, up to the shutdown that follows it.
+    pub(crate) fn lame_duck(&self) -> impl Future<Output = ()> + 'static {
+        crate::lame::run(self.shared.clone())
+    }
+
     /// Serves until one of `signals` stops it, and shuts it down, as
-    /// `nats-server` handles signals: `INT`, `TERM` and `USR2` stop it,
-    /// `USR1` opens the log file again, `HUP` is logged.
+    /// `nats-server` handles signals: `INT` and `TERM` stop it, `USR2`
+    /// puts it in lame duck mode first, `USR1` opens the log file again,
+    /// `HUP` is logged.
     ///
     /// # Panics
     ///
@@ -405,6 +432,7 @@ fn check(opts: &Options) -> Result<Setup, Error> {
     let imports = crate::imports::link(opts).map_err(Error::Options)?;
     crate::leaf::validate(opts).map_err(Error::Options)?;
     crate::mesh::validate(opts).map_err(Error::Options)?;
+    crate::lame::validate(opts).map_err(Error::Options)?;
     crate::monitor::validate(opts)?;
     if let Some(w) = &opts.websocket {
         crate::ws::validate(w).map_err(Error::Options)?;
@@ -461,9 +489,13 @@ fn run(
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     if let Some(w) = ports.ws {
-        let (l, s) = (lanes.clone(), shared.clone());
+        let (l, s, open) = (
+            lanes.clone(),
+            shared.clone(),
+            crate::lame::Door::open(shared),
+        );
         first
-            .spawn(move || accept(w, l, s, Door::Websocket))
+            .spawn(move || accept(w, l, s, Door::Websocket, open))
             .map_err(|e| Error::Lanes(io(e)))?;
     }
     // A naq hub is dialed with the cluster, over OMQ.
@@ -485,9 +517,13 @@ fn run(
     } else {
         crate::mesh::Bound::default()
     };
-    let (c, s) = (ports.client, shared.clone());
+    let (c, s, open) = (
+        ports.client,
+        shared.clone(),
+        crate::lame::Door::open(shared),
+    );
     first
-        .spawn(move || accept(c, lanes, s, Door::Client))
+        .spawn(move || accept(c, lanes, s, Door::Client, open))
         .map_err(|e| Error::Lanes(io(e)))?;
     Ok(mesh)
 }
@@ -641,11 +677,36 @@ enum Door {
     Websocket,
 }
 
-/// Accepts clients at `door` and hands them to the lanes in turn.
-async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Shared>, door: Door) {
+/// Accepts clients at `door` and hands them to the lanes in turn, until
+/// the server stops or goes into lame duck mode. `open` counts the loop
+/// open until the listener closed.
+async fn accept(
+    listener: Listener,
+    lanes: Box<[LaneHandle]>,
+    shared: Arc<Shared>,
+    door: Door,
+    open: crate::lame::Door,
+) {
+    accept_until(listener, &lanes, &shared, door).await;
+    drop(open);
+}
+
+/// Accepts clients at `door` and hands them to `lanes` in turn, until the
+/// server stops or goes into lame duck mode, then closes `listener`.
+async fn accept_until(
+    mut listener: Listener,
+    lanes: &[LaneHandle],
+    shared: &Arc<Shared>,
+    door: Door,
+) {
     let mut next = 0;
     loop {
-        let stream = match listener.accept().await {
+        // Cancel-safe: an accept dropped takes no connection.
+        let got = tokio::select! {
+            got = listener.accept() => got,
+            () = crate::lame::started(shared) => return,
+        };
+        let stream = match got {
             Ok(s) => s,
             Err(zzq_tokio::Error::Closed) => return,
             Err(_) => {
@@ -653,7 +714,7 @@ async fn accept(mut listener: Listener, lanes: Box<[LaneHandle]>, shared: Arc<Sh
                 continue;
             }
         };
-        if crate::stop::stopping(&shared) {
+        if crate::stop::stopping(shared) || crate::lame::on(shared) {
             return;
         }
         let lane = &lanes[next % lanes.len()];
@@ -685,7 +746,7 @@ pub(crate) fn responses() -> crate::imports::service::Responses {
 }
 
 /// Numbers below what they are asked for, made from fresh random state.
-fn random() -> impl FnMut(u64) -> u64 {
+pub(crate) fn random() -> impl FnMut(u64) -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let state = std::collections::hash_map::RandomState::new();
     let mut n = 0u64;

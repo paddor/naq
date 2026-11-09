@@ -67,6 +67,12 @@ pub(crate) struct Client {
     closed: Cell<bool>,
     /// Its account changed: the read loop checks it again.
     refresh: Cell<bool>,
+    /// It takes an `INFO` at any time: it speaks protocol 1 and got its
+    /// first `PONG`.
+    takes_info: Cell<bool>,
+    /// An `INFO` for the read loop to send it, if any: one that says the
+    /// server is in lame duck mode if `true`.
+    info: Cell<Option<bool>>,
     /// Why the server ended it, once it did.
     ended: Cell<Option<Close>>,
     /// Wakes the writer.
@@ -108,6 +114,8 @@ impl Client {
             seen: Seen::new(),
             closed: Cell::new(false),
             refresh: Cell::new(false),
+            takes_info: Cell::new(false),
+            info: Cell::new(None),
             ended: Cell::new(None),
             wake: Notify::new(),
             drained: Notify::new(),
@@ -132,6 +140,26 @@ impl Client {
     /// Whether its account changed since it last looked.
     pub(crate) const fn take_refresh(&self) -> bool {
         self.refresh.replace(false)
+    }
+
+    /// Has the read loop send it an `INFO` of the server and its cluster
+    /// as they are now, which says the server is in lame duck mode if
+    /// `ldm`, if it takes one at any time. Whether it does.
+    pub(crate) fn inform(&self, ldm: bool) -> bool {
+        if !self.takes_info.get() {
+            return false;
+        }
+        if ldm || self.info.get().is_none() {
+            self.info.set(Some(ldm));
+        }
+        self.stop.notify_one();
+        true
+    }
+
+    /// The `INFO` the read loop is to send, if any: whether it says the
+    /// server is in lame duck mode.
+    pub(crate) fn take_info(&self) -> Option<bool> {
+        self.info.take()
     }
 
     /// Why the server ended the connection, once it did.
@@ -476,7 +504,7 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
         ws,
         max_payload: lane.shared.opts.max_payload,
     };
-    handshake::info(&lane.shared, &to, None, &mut info);
+    handshake::info(&lane.shared, &to, handshake::Kind::First, &mut info);
     {
         let mut meta = client.meta.borrow_mut();
         meta.ip = ip;
@@ -609,6 +637,7 @@ impl Conn {
         }
         self.stage = Stage::Ready;
         if self.opts.protocol >= 1 {
+            self.client.takes_info.set(true);
             let shared = &self.lane.shared;
             let account = shared.accounts.name(self.client.account.get());
             let to = handshake::To {
@@ -618,13 +647,30 @@ impl Conn {
                 ws: self.via.ws,
                 max_payload: self.bounds.limits.max_payload,
             };
-            handshake::info(
-                shared,
-                &to,
-                Some(account),
-                &mut self.client.out.borrow_mut(),
-            );
+            let mut out = self.client.out.borrow_mut();
+            handshake::info(shared, &to, handshake::Kind::Bound(account), &mut out);
         }
+    }
+
+    /// Queues the `INFO` the client gets at any time, which says the server
+    /// is in lame duck mode if `ldm`.
+    #[cold]
+    fn inform(&self, ldm: bool) {
+        let to = handshake::To {
+            id: self.client.id,
+            ip: &self.ip,
+            nonce: None,
+            ws: self.via.ws,
+            max_payload: self.bounds.limits.max_payload,
+        };
+        let kind = handshake::Kind::Async { ldm };
+        handshake::info(
+            &self.lane.shared,
+            &to,
+            kind,
+            &mut self.client.out.borrow_mut(),
+        );
+        self.lane.mark(&self.client);
     }
 
     /// Queues `-ERR 'text'` for this client.

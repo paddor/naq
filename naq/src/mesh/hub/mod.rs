@@ -221,7 +221,10 @@ impl Hub {
         };
         match &c {
             Control::Hello(h) => {
-                if h.role == Role::Leaf && !self.dead.contains(&who) {
+                // In lame duck mode it links no more leafs, as
+                // `nats-server`.
+                let lame = crate::lame::on(&self.shared);
+                if h.role == Role::Leaf && !self.dead.contains(&who) && !lame {
                     self.hello(who, h);
                 }
                 return;

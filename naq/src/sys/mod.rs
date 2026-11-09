@@ -23,7 +23,7 @@ use serde_json::Value;
 
 pub(crate) use conns::changed as conns_changed;
 pub(crate) use events::{Of, closed, connected};
-pub(crate) use send::last_word;
+pub(crate) use send::{Word, last_word};
 pub(crate) use server::Z;
 
 use crate::imports::service::Tap;
@@ -78,8 +78,9 @@ pub(crate) enum Service {
     Server(Z),
     /// `$SYS.REQ.SERVER.PING`: `STATSZ` by its old subject.
     Ping,
-    /// `$SYS.REQ.SERVER.<id>.KICK`: a connection to close.
-    Kick,
+    /// `$SYS.REQ.SERVER.<id>.KICK` or `.LDM`: something to do to a
+    /// connection.
+    Conn(kick::Act),
     /// A request about an account, for what its last token names.
     Account(account::X),
     /// `$SYS.REQ.ACCOUNT.PING.STATZ`: the statistics of every account.
@@ -203,7 +204,7 @@ pub(crate) fn answer(
     match service {
         Service::Server(z) => server::take(lane, out, z, m),
         Service::Ping => server::take(lane, out, Z::Statsz, m),
-        Service::Kick => kick::take(lane, m),
+        Service::Conn(act) => kick::take(lane, act, m),
         Service::Account(x) => account::take(lane, Some(x), m),
         Service::AccountPing => account::take(lane, None, m),
         Service::UserInfo => account::user_info(lane, m, from),

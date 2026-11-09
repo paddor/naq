@@ -140,9 +140,12 @@ impl Drop for Close {
 }
 
 /// Answers each server that dials `router` and says `Hello` of cluster
-/// `cluster`: with `hello` and a snapshot of this server's interest, then
-/// its deltas and beats.
-pub(super) async fn answer(router: Socket, cluster: &str, hello: &Bytes, mesh: &Rc<Mesh>) {
+/// `cluster`: with the first of `hellos` and a snapshot of this server's
+/// interest, then its deltas and beats. Once this server is in lame duck
+/// mode, every server hears the second of `hellos`, and those that dial
+/// later too.
+pub(super) async fn answer(router: Socket, cluster: &str, hellos: &[Bytes; 2], mesh: &Rc<Mesh>) {
+    let mut hello = &hellos[0];
     let Ok(ids) = router.identity_routing() else {
         return;
     };
@@ -168,6 +171,12 @@ pub(super) async fn answer(router: Socket, cluster: &str, hello: &Bytes, mesh: &
                         }
                     }
                     _ => {}
+                }
+            }
+            () = mesh.lamed.notified() => {
+                hello = &hellos[1];
+                for o in others.0.borrow().iter() {
+                    o.push(Item::Msg(hello.clone()));
                 }
             }
             () = mesh.told.wake.notified() => {

@@ -1555,3 +1555,69 @@ fn directory_resolvers_need_an_operator_and_a_system_account() {
         }
     }
 }
+
+#[test]
+fn lame_duck_keys_set_its_duration_and_grace_period() {
+    let o: Options = "lame_duck_duration: \"1m\"\nlame_duck_grace_period: 5s\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.lame_duck_duration, Duration::from_mins(1));
+    assert_eq!(o.lame_duck_grace_period, Duration::from_secs(5));
+    let o: Options = "lame_duck_duration: 30\nlame_duck_grace_period: 0\n"
+        .parse()
+        .unwrap();
+    assert_eq!(o.lame_duck_duration, Duration::from_secs(30));
+    assert_eq!(
+        o.lame_duck_grace_period,
+        Duration::from_secs(10),
+        "0 is the default"
+    );
+}
+
+#[test]
+fn lame_duck_keys_that_cannot_work_are_an_error_as_in_nats_server() {
+    for (text, at, reason) in [
+        (
+            "lame_duck_duration: 10s\n",
+            "line 1",
+            "invalid lame_duck_duration of 10s, minimum is 30 seconds",
+        ),
+        (
+            "lame_duck_duration: \"-1m\"\n",
+            "line 1",
+            "invalid lame_duck_duration of -1m0s, minimum is 30 seconds",
+        ),
+        (
+            "lame_duck_grace_period: \"-1s\"\n",
+            "line 1",
+            "invalid lame_duck_grace_period, needs to be positive",
+        ),
+        (
+            "lame_duck_grace_period: -1\n",
+            "line 1",
+            "invalid lame_duck_grace_period, needs to be positive",
+        ),
+        (
+            "lame_duck_grace_period: \"1x\"\n",
+            "line 1",
+            "lame_duck_grace_period: bad duration \"1x\"",
+        ),
+        (
+            "lame_duck_duration: true\n",
+            "line 1",
+            "lame_duck_duration: expected a duration",
+        ),
+        (
+            "lame_duck_duration: 30s\nlame_duck_grace_period: 30s\n",
+            "config",
+            "lame duck grace period (30s) should be strictly lower than lame duck duration (30s)",
+        ),
+    ] {
+        match text.parse::<Options>() {
+            Err(Error::Config { at: a, reason: r }) => {
+                assert_eq!((a.as_str(), r.as_str()), (at, reason), "{text:?}");
+            }
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+}

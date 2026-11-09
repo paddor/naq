@@ -31,8 +31,9 @@ Notable changes to naq. The format follows
   once their lane delivered what was sent to it, and get a few seconds to
   write what is left.
 - `naq`: `Signals::catch` and `Server::wait_for_signals`, caught before
-  the server starts, as by `nats-server`: `INT`, `TERM` and `USR2` shut the
-  server down, `USR1` opens the log file again, `HUP` is logged.
+  the server starts, as by `nats-server`: `INT` and `TERM` shut the server
+  down, `USR2` puts it in lame duck mode first, `USR1` opens the log file
+  again, `HUP` is logged.
 - `naq`: `Options::pid_file` (`pid_file`, `-P`) and
   `Options::ports_file_dir` (`ports_file_dir`, `--ports_file_dir`): the
   process ID, and the URLs the server listens at, in a file removed as it
@@ -107,6 +108,20 @@ Notable changes to naq. The format follows
   subscribers of a subject, or of a queue group on it, in the account that
   asks, on every server with connections of the account. The servers ask
   each other on `$SYS.REQ.ACCOUNT.NSUBS`.
+- `naq`: lame duck mode, as `nats-server` has it:
+  `Server::lame_duck_shutdown`, `USR2` and `--signal ldm`, timed by
+  `Options::lame_duck_duration` and `Options::lame_duck_grace_period`
+  (`lame_duck_duration`, `lame_duck_grace_period`). The server takes no
+  more clients, says `LAMEDUCK` on `$SYS` as its last word, sends its
+  clients an `INFO` with `ldm`, and has the other servers of its cluster
+  leave it out of their clients' `connect_urls`. After the grace period
+  it closes its clients and links to hubs one by one, spread over the
+  rest of the duration, then shuts down. Links to hubs dial no more, and
+  a naq hub links no new leafs.
+- `naq`: `$SYS.REQ.SERVER.<id>.LDM`: the `INFO` of lame duck mode to one
+  client.
+- `naq`: clients that take an `INFO` at any time get one as the client
+  URLs of the cluster change, as from `nats-server`.
 
 ### Changed
 

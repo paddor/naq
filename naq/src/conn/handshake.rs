@@ -89,6 +89,7 @@ impl ClientOpts {
     }
 }
 
+/// An `INFO` to a client, its fields in the order of `nats-server`.
 #[derive(Debug, Serialize)]
 #[expect(clippy::struct_excessive_bools, reason = "the flags of INFO, as sent")]
 struct Info<'a> {
@@ -100,26 +101,29 @@ struct Info<'a> {
     host: &'a str,
     port: u16,
     headers: bool,
-    max_payload: usize,
-    client_id: u64,
-    client_ip: &'a str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     auth_required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nonce: Option<&'a str>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     tls_required: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     tls_verify: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     tls_available: bool,
+    max_payload: usize,
+    client_id: u64,
+    client_ip: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<&'a str>,
+    /// With a cluster: this server's client URL, unless it is in lame duck
+    /// mode, then the others'.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    connect_urls: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    ldm: bool,
     #[serde(rename = "connect_info", skip_serializing_if = "std::ops::Not::not")]
     bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_account: Option<&'a str>,
-    /// With a cluster: this server's client URL, then the others'.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    connect_urls: Vec<String>,
     /// The server's curve key, for sealed auth callouts.
     xkey: String,
 }
@@ -136,9 +140,21 @@ pub(super) struct To<'a> {
     pub(super) max_payload: usize,
 }
 
-/// Appends the `INFO` for client `to`. The one that follows the first
-/// `PONG` names the client's account, `bound`.
-pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut Vec<u8>) {
+/// Which `INFO` a client gets.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Kind<'a> {
+    /// The first, before its `CONNECT`.
+    First,
+    /// The one that follows its first `PONG`: it names the account the
+    /// client is bound to.
+    Bound(&'a str),
+    /// One at any time, as the cluster changed: it says the server is in
+    /// lame duck mode if `ldm`.
+    Async { ldm: bool },
+}
+
+/// Appends the `INFO` of `kind` for client `to`.
+pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u8>) {
     // A WebSocket client sees its own port, and TLS as that port has it.
     let ws = shared.ws.as_ref().filter(|_| to.ws);
     let (host, port, tls) = match ws {
@@ -149,6 +165,20 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
             shared.tls.is_some(),
         ),
     };
+    let bound = match kind {
+        Kind::Bound(account) => Some(account),
+        Kind::First | Kind::Async { .. } => None,
+    };
+    let auth_required = match (kind, shared.auth_for(to.ws)) {
+        // Before the CONNECT, a client need not authenticate if it may
+        // connect as the no_auth_user; over WebSocket, `nats-server` asks
+        // all the same.
+        (Kind::First, Some(a)) => to.ws || !a.open(),
+        (Kind::Bound(_), a) => a.is_some(),
+        // As the server's own INFO has it: for clients not over WebSocket.
+        (Kind::Async { .. }, _) => shared.auth.is_some(),
+        (Kind::First, None) => false,
+    };
     let info = Info {
         server_id: &shared.server_id,
         server_name: &shared.opts.server_name,
@@ -158,22 +188,18 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
         host,
         port,
         headers: true,
+        auth_required,
+        tls_required: tls,
+        tls_verify: shared.tls.as_ref().is_some_and(|t| t.verify),
+        tls_available: tls && ws.is_some(),
         max_payload: to.max_payload,
         client_id: to.id,
         client_ip: to.ip,
         nonce: to.nonce,
-        tls_required: tls,
-        tls_available: tls && ws.is_some(),
-        tls_verify: shared.tls.as_ref().is_some_and(|t| t.verify),
-        // Before the CONNECT, a client need not authenticate if it may
-        // connect as the no_auth_user; over WebSocket, `nats-server` asks
-        // all the same.
-        auth_required: shared
-            .auth_for(to.ws)
-            .is_some_and(|a| bound.is_some() || to.ws || !a.open()),
+        connect_urls: connect_urls(shared),
+        ldm: matches!(kind, Kind::Async { ldm: true }),
         bound: bound.is_some(),
         remote_account: bound,
-        connect_urls: connect_urls(shared),
         xkey: shared.keys.xkey.public_key(),
     };
     // Cannot fail: no maps, no fallible serializers.
@@ -181,13 +207,16 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, bound: Option<&str>, out: &mut 
     naq_proto::encode::info(out, &json);
 }
 
-/// The client URLs of the cluster, this server's first, as `nats-server`
-/// lists them; none without a cluster.
+/// The client URLs of the cluster, this server's first, unless it is in
+/// lame duck mode, as `nats-server` lists them; none without a cluster.
 fn connect_urls(shared: &Shared) -> Vec<String> {
     if shared.opts.cluster.is_none() {
         return Vec::new();
     }
-    let mut all = vec![shared.addr.to_string()];
+    let mut all = Vec::new();
+    if !crate::lame::on(shared) {
+        all.push(shared.addr.to_string());
+    }
     // A poisoned lock still holds the list.
     let others = shared
         .connect_urls

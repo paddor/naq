@@ -3,7 +3,7 @@
 //! and numbers each message as it leaves, as `nats-server`'s send loop
 //! does, so that every other server gets them in order.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
@@ -48,8 +48,27 @@ pub(crate) enum Event {
     /// A `CONNS` request about account `account`, answered to `reply` if
     /// the account has clients here.
     Answer { account: String, reply: Vec<u8> },
-    /// The server's last word, `SHUTDOWN`: `done` hears once it left.
-    Last(SyncSender<()>),
+    /// The server's last word: `done` hears once it left.
+    Last(Word, SyncSender<()>),
+}
+
+/// The server's last word on `$SYS`, after which it says nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Word {
+    /// It shuts down.
+    Shutdown,
+    /// It goes into lame duck mode.
+    LameDuck,
+}
+
+impl Word {
+    /// The last token of its subject.
+    const fn token(self) -> &'static str {
+        match self {
+            Word::Shutdown => "SHUTDOWN",
+            Word::LameDuck => "LAMEDUCK",
+        }
+    }
 }
 
 /// A message whose payload holds the block of the server that sends it,
@@ -85,6 +104,8 @@ pub(crate) struct Outbox {
     tx: Mailbox<Event>,
     /// The sender's end, until it takes it.
     rx: Mutex<Option<Receiver<Event>>>,
+    /// The last word was handed to the sender.
+    said: AtomicBool,
 }
 
 impl Outbox {
@@ -93,6 +114,7 @@ impl Outbox {
         Outbox {
             tx,
             rx: Mutex::new(Some(rx)),
+            said: AtomicBool::new(false),
         }
     }
 
@@ -122,15 +144,17 @@ pub(super) fn start(lane: &Lane) {
     }
 }
 
-/// Sends the server's last word, `SHUTDOWN`, and waits until it left, a
-/// second at most. The server sends nothing on `$SYS` after it.
-pub(crate) fn last_word(shared: &Shared) {
-    if shared.system.is_none() {
+/// Sends the server's last word, `word`, and waits until it left, a
+/// second at most. The server sends nothing on `$SYS` after it, nor a
+/// second last word.
+pub(crate) fn last_word(shared: &Shared, word: Word) {
+    // Relaxed: one caller goes on, the sender orders the rest.
+    if shared.system.is_none() || shared.sys.outbox.said.swap(true, Ordering::Relaxed) {
         return;
     }
     let (done, left) = std::sync::mpsc::sync_channel(1);
     // Past the limit: it must go.
-    shared.sys.outbox.tx.push(Event::Last(done));
+    shared.sys.outbox.tx.push(Event::Last(word, done));
     // A sender gone drops `done`: nothing to wait for.
     let _ = left.recv_timeout(LAST);
 }
@@ -180,8 +204,8 @@ async fn run(weak: Weak<Shared>, rx: Receiver<Event>) {
                             s.conns(a, Some(&reply), &mut clock.conns).await;
                         }
                     }
-                    Event::Last(done) => {
-                        s.farewell();
+                    Event::Last(word, done) => {
+                        s.farewell(word);
                         s.ship().await;
                         let _ = done.send(());
                         return;
@@ -406,15 +430,15 @@ impl<'l> Sender<'l> {
         self.send(sys, to.as_bytes(), &payload);
     }
 
-    /// Sends `SHUTDOWN`: the block of the server alone. Its answers stop.
-    fn farewell(&mut self) {
+    /// Sends `word`: the block of the server alone. Its answers stop.
+    fn farewell(&mut self, word: Word) {
         let shared = self.lane.shared.clone();
         let Some(sys) = shared.system else {
             return;
         };
         // Relaxed: answers that see it late are sent still, as in Go.
         shared.sys.quiet.store(true, Ordering::Relaxed);
-        let to = format!("$SYS.SERVER.{}.SHUTDOWN", shared.server_id);
+        let to = format!("$SYS.SERVER.{}.{}", shared.server_id, word.token());
         let payload = json::compact(&ServerInfo::of(&shared));
         self.send(sys, to.as_bytes(), &payload);
     }

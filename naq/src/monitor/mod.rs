@@ -428,6 +428,28 @@ where
     all
 }
 
+/// What `f` finds on lane `lane` of `shared`'s server; `None` if the lane
+/// stopped.
+pub(crate) async fn ask<T: Send + 'static>(
+    shared: &Shared,
+    lane: usize,
+    f: impl FnOnce(&Lane) -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = oneshot::channel();
+    on_lane(shared, lane, move |lane| {
+        let _ = tx.send(f(lane));
+    });
+    rx.await.ok()
+}
+
+/// Hands `f` to lane `lane` of `shared`'s server, to run there. A lane
+/// that stopped drops it.
+pub(crate) fn on_lane(shared: &Shared, lane: usize, f: impl FnOnce(&Lane) + Send + 'static) {
+    if let Some(tx) = shared.lanes.get(lane) {
+        tx.control(Control::Ask(Ask(Box::new(f))));
+    }
+}
+
 /// Work monitoring hands a lane: it runs there, and sends what it finds
 /// back.
 pub(crate) struct Ask(Box<dyn FnOnce(&Lane) + Send>);

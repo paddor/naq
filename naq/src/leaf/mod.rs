@@ -223,7 +223,8 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
         let Some(url) = urls.pop_front() else {
             return;
         };
-        if crate::stop::stopping(&lane.shared) {
+        // In lame duck mode it dials no more, as `nats-server`.
+        if crate::stop::stopping(&lane.shared) || crate::lame::on(&lane.shared) {
             return;
         }
         urls.push_back(url.clone());

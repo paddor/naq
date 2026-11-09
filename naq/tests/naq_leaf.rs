@@ -1287,3 +1287,34 @@ fn a_side_with_plain_and_queue_interest_gets_a_message_once_for_each() {
         }
     }
 }
+
+#[test]
+fn a_hub_in_lame_duck_mode_links_no_new_leafs() {
+    let h = Server::start(&Options {
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            account: None,
+            ..Leafnodes::default()
+        }),
+        lame_duck_duration: Duration::from_secs(3),
+        lame_duck_grace_period: Duration::from_millis(1500),
+        ..base("hub")
+    })
+    .unwrap();
+    let (port, at) = (h.leafnode_addr().unwrap().port(), h.addr());
+    // A client keeps it in lame duck mode for the grace period.
+    let held = client(&h, "");
+    let done = std::thread::spawn(move || h.lame_duck_shutdown());
+    let deadline = Instant::now() + WAIT;
+    while TcpStream::connect(at).is_ok() {
+        assert!(Instant::now() < deadline, "still takes clients");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let l = leaf("leaf", port);
+    std::thread::sleep(Duration::from_millis(500));
+    let z = get(&l, "/leafz");
+    assert_eq!(z["leafnodes"], 0, "{z}");
+    drop(held);
+    done.join().unwrap();
+}
