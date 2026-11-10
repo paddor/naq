@@ -264,6 +264,7 @@ impl Hub {
             looped |= ch.1 == lds && ch.3 > 0;
             interest(shared, slot, account, perms, ch);
         });
+        self.mesh.taking.heard(slot, l.heard.taken());
         if lost {
             l.other.push(Item::Msg(resync()));
         }
@@ -348,11 +349,14 @@ impl Hub {
                 perms: carries.perms.clone(),
             });
         }
-        let told = Rc::new(Told::new(
-            self.mesh.epoch,
-            self.shared.accounts.clone(),
-            self.mesh.leaf_wake.clone(),
-        ));
+        let told = Rc::new(
+            Told::new(
+                self.mesh.epoch,
+                self.shared.accounts.clone(),
+                self.mesh.leaf_wake.clone(),
+            )
+            .stamping(self.shared.marks.clone(), slot..slot + 1),
+        );
         {
             let routes = self.mesh.peers.borrow();
             let leaf = ForLeaf {

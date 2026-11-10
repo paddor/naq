@@ -86,6 +86,8 @@ pub(crate) struct Shared {
     pub(crate) connect_urls: std::sync::Mutex<Vec<String>>,
     /// What its reloads keep.
     pub(crate) reload: crate::reload::State,
+    /// The interest made and taken across the mesh, for batches to follow.
+    pub(crate) marks: Arc<crate::mesh::Marks>,
     next_client: AtomicU64,
 }
 
@@ -272,6 +274,7 @@ impl Server {
             sys: crate::sys::State::new(system.map(|_| node)),
             connect_urls: std::sync::Mutex::default(),
             reload: crate::reload::State::default(),
+            marks: Arc::default(),
             next_client: AtomicU64::new(1),
         });
         let mesh = run(&ctx, &shared, rxs, ports, setup.monitor_tls)?;

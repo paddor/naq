@@ -167,6 +167,9 @@ Notable changes to naq. The format follows
   (INFO, `/varz`, `$SYS` replies, leaf `CONNECT`): they gate features on
   it, such as `nats account info`, which asks `USER.INFO` from 2.10.0 on.
   naq's own version is in its banner and `naq --version`.
+- `naq-proto`: peer wire version 2. A `Batch` head carries the sender's
+  `epoch` and its last delta `seq` for the receiver, which `peer::stamp`
+  writes. naq servers of version 1 do not link with it.
 
 ### Fixed
 
@@ -188,6 +191,11 @@ Notable changes to naq. The format follows
 - `naq`: `INFO` names the cluster, as `nats-server`'s does.
 - `naq` binary: `--routes` takes effect before `--cluster` too, and
   `--cluster_name` alone makes no cluster, as in `nats-server`.
+- `naq`: interest reaches the other servers of a cluster, and naq hubs
+  and leafs, before the messages sent after it, as on a `nats-server`
+  route. A request sent right after the subscription to its inbox gets
+  the answers of the other servers: `nats server info <name>` and
+  `nats server request ...` of natscli got some or none.
 
 ## [0.1.0] - 2026-11-05
 

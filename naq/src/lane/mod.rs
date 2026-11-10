@@ -208,6 +208,9 @@ pub(crate) struct Lane {
     pub(crate) ending: Rc<Cell<usize>>,
     /// The clients a reload waits for, until each checked itself again.
     reloading: RefCell<Option<Reloading>>,
+    /// What this lane announced to lane 0, and knows of the interest of
+    /// other servers taken: its batches follow interest across the mesh.
+    pub(crate) marks: crate::mesh::OnLane,
 }
 
 /// Clients of a lane a reload waits for: `done` drops once all checked
@@ -355,6 +358,9 @@ impl Lane {
     /// Tells every other lane that this one gained or lost a subscription
     /// to `subject` of `account`, in `queue` if given.
     pub(crate) fn announce(&self, account: u32, subject: &[u8], queue: Option<&[u8]>, add: bool) {
+        if add && self.id != 0 {
+            self.marks.announced();
+        }
         for (i, tx) in self.shared.lanes.iter().enumerate() {
             if i != self.id {
                 tx.control.push(Control::Interest {
@@ -370,6 +376,7 @@ impl Lane {
 
     /// Waits until every other lane applied what this one announced.
     pub(crate) async fn fence(&self) {
+        let unmade = self.marks.unmade();
         let mut answers = Vec::with_capacity(self.lanes());
         for (i, tx) in self.shared.lanes.iter().enumerate() {
             if i != self.id {
@@ -382,6 +389,22 @@ impl Lane {
             // An error means the lane stopped: nothing left to wait for.
             let _ = a.await;
         }
+        if let Some(upto) = unmade {
+            self.marks.fenced(upto);
+        }
+    }
+
+    /// Waits until lane 0 made deltas of all this lane announced, if it
+    /// may not have yet: the batches for other servers come after them.
+    pub(crate) async fn fence_lane_0(&self) {
+        let Some(upto) = self.marks.unmade() else {
+            return;
+        };
+        let (done, answer) = oneshot::channel();
+        self.shared.lanes[0].control.push(Control::Fence(done));
+        // An error means lane 0 stopped: nothing left to wait for.
+        let _ = answer.await;
+        self.marks.fenced(upto);
     }
 
     /// Puts the naq hub or leaf `linked` in slot `slot`; a leaf gets its
@@ -528,6 +551,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         account_ids: RefCell::default(),
         ending: Rc::default(),
         reloading: RefCell::default(),
+        marks: crate::mesh::OnLane::default(),
     });
     crate::imports::service::install(&lane);
     if let Some(c) = &lane.shared.callouts {
@@ -549,6 +573,21 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         }
     });
     tokio::task::spawn_local(data::run(lane, data));
+}
+
+/// Waits until every lane of `shared`'s server applied the controls handed
+/// to it before.
+pub(crate) async fn fence_all(shared: &Shared) {
+    let mut answers = Vec::with_capacity(shared.lanes.len());
+    for tx in &*shared.lanes {
+        let (done, answer) = oneshot::channel();
+        tx.control.push(Control::Fence(done));
+        answers.push(answer);
+    }
+    for a in answers {
+        // An error means the lane stopped: nothing left to wait for.
+        let _ = a.await;
+    }
 }
 
 /// The state of lane `index` of server `id`, on that lane's thread.

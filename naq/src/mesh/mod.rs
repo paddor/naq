@@ -12,6 +12,7 @@ mod control;
 mod data;
 mod hub;
 mod interest;
+mod marks;
 mod spoke;
 mod tell;
 mod told;
@@ -19,6 +20,8 @@ mod view;
 
 pub(crate) use data::{DataLink, gone, hub, leaf, push};
 pub(crate) use interest::Heard;
+use marks::Taking;
+pub(crate) use marks::{Marks, OnLane, follow};
 use told::Told;
 
 use std::cell::RefCell;
@@ -123,6 +126,8 @@ pub(crate) struct Mesh {
     pub(crate) hubs: RefCell<Vec<spoke::Hub>>,
     /// Woken as this server goes into lame duck mode.
     lamed: Notify,
+    /// What the others told, applied here, to be marked taken on every lane.
+    pub(crate) taking: Rc<Taking>,
 }
 
 impl Mesh {
@@ -142,11 +147,16 @@ impl Mesh {
             epoch,
             accounts: shared.accounts.clone(),
             peers: RefCell::default(),
-            told: Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default())),
+            told: Rc::new(
+                Told::new(epoch, shared.accounts.clone(), Rc::default())
+                    // Slots are below 64: they fit.
+                    .stamping(shared.marks.clone(), 0..first as u16),
+            ),
             leafs: RefCell::default(),
             leaf_wake: Rc::default(),
             hubs: RefCell::new(hubs),
             lamed: Notify::new(),
+            taking: Rc::default(),
         }
     }
 
@@ -356,8 +366,10 @@ pub(crate) async fn run(
     let epoch = u64::from_le_bytes(epoch);
     // In place before the server serves clients: none of their interest
     // goes untold.
+    shared.marks.start(epoch);
     let mesh = Rc::new(Mesh::new(&shared, epoch));
     *lane.mesh.borrow_mut() = Some(mesh.clone());
+    tokio::task::spawn_local(marks::mark(shared.clone(), mesh.taking.clone()));
     mesh.tell_taps(&lane);
     let ctx = omq_tokio::Context::current();
     let mut bound = Bound::default();

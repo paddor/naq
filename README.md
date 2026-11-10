@@ -35,6 +35,9 @@ replies.
 - The server and account requests on `$SYS`, answered by every server of
   a cluster as `nats-server` answers them, and the imports every account
   has of them; the events of servers, connections and accounts there.
+- The tools of `nats-server` work with it: `nats server`, `nats account`
+  and `nats events` of natscli, and prometheus-nats-exporter. It tells
+  clients and tools it is `nats-server` 2.15.2, the version it matches.
 
 A configuration key it does not serve is an error, not ignored.
 
@@ -43,8 +46,8 @@ A configuration key it does not serve is an error, not ignored.
 - JetStream. A naq leaf reaches the JetStream of its `nats-server` hub.
 - Routes to `nats-server`, gateways, and `nats-server` leaf nodes on a naq
   hub.
-- Prometheus metrics. A config reload takes no changes to the cluster,
-  nor to the remotes to naq hubs.
+- A config reload takes no changes to the cluster, nor to the remotes to
+  naq hubs.
 
 ## Usage
 

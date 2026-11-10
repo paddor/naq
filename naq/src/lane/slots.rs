@@ -172,6 +172,12 @@ impl Slots {
         Some(at as u16)
     }
 
+    /// How many routes there are: they have the first slots.
+    pub(crate) const fn routes(&self) -> u16 {
+        // At most 64: it fits.
+        self.routes.count_ones() as u16
+    }
+
     /// Whether slot `s` is a route's.
     #[inline]
     pub(crate) const fn is_route(&self, s: u16) -> bool {

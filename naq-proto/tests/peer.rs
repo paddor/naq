@@ -110,8 +110,12 @@ fn broken_control_messages_are_errors() {
     .encode(&mut tag);
     *tag.last_mut().unwrap() = 4;
     assert_eq!(peer::decode(&tag), Err(Error::Flags(4)));
-    assert_eq!(peer::decode(&[1, 2]), Err(Error::Version(2)));
-    assert_eq!(peer::decode(&[1, 1, 3]), Err(Error::Flags(3)));
+    assert_eq!(
+        peer::decode(&[1, 1]),
+        Err(Error::Version(1)),
+        "the last version"
+    );
+    assert_eq!(peer::decode(&[1, peer::VERSION, 3]), Err(Error::Flags(3)));
     let mut connect = Vec::new();
     Control::Connect(CONNECT).encode(&mut connect);
     *connect.last_mut().unwrap() = 2;
@@ -161,6 +165,10 @@ fn a_batch_gives_its_publishes_back_in_order() {
         }
         let b = Batch::parse(&out).unwrap();
         assert_eq!((b.origin, b.account), (origin, &b"acct"[..]));
+        assert_eq!((b.epoch, b.seq), (0, 0), "not stamped yet");
+        peer::stamp(&mut out, 7, u64::MAX);
+        let b = Batch::parse(&out).unwrap();
+        assert_eq!((b.epoch, b.seq), (7, u64::MAX));
         let got: Vec<_> = b.records().map(Result::unwrap).collect();
         assert_eq!(got, records());
     }
@@ -187,7 +195,16 @@ fn a_broken_batch_ends_in_an_error() {
         assert_eq!(Batch::parse(&out[..cut]), Err(Error::Short), "{cut}");
     }
     assert_eq!(Batch::parse(&[1]), Err(Error::Kind(1)));
-    assert_eq!(Batch::parse(&[16, 1]), Err(Error::Flags(1)));
+    let mut flagged = vec![16];
+    flagged.extend_from_slice(&[0; 16]);
+    flagged.push(1);
+    assert_eq!(Batch::parse(&flagged), Err(Error::Flags(1)));
+    let mut short = vec![16, 1];
+    peer::stamp(&mut short, 1, 1);
+    assert_eq!(short, [16, 1], "too short to stamp");
+    let mut control = vec![1; 20];
+    peer::stamp(&mut control, 0, 0);
+    assert_eq!(control, [1; 20], "no batch");
     let mut broken = out[..head].to_vec();
     broken.extend_from_slice(&[0, 9, 0]);
     let all: Vec<_> = Batch::parse(&broken).unwrap().records().collect();

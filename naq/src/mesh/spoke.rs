@@ -64,7 +64,10 @@ impl Hub {
         let name = r.account.as_deref().unwrap_or("$G");
         // Known to exist: the options were checked.
         let account = shared.accounts.id(name).unwrap_or(0);
-        let told = Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default()));
+        let told = Rc::new(
+            Told::new(epoch, shared.accounts.clone(), Rc::default())
+                .stamping(shared.marks.clone(), slot..slot + 1),
+        );
         told.pin(account, shared.accounts.lds(account));
         // Its snapshot carries it.
         told.take();
@@ -316,6 +319,7 @@ impl Link<'_> {
             looped |= ch.1 == lds && ch.3 > 0;
             interest(shared, slot, account, perms, ch);
         });
+        self.mesh.taking.heard(slot, hub.heard.taken());
         if looped {
             // Our own subject came back: the links loop.
             self.end.set(Some(LOOP_DELAY));

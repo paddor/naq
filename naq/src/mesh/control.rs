@@ -140,6 +140,8 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                     continue;
                 }
                 let lost = mesh.peers.borrow_mut()[i].heard.take(&c, &mut apply);
+                // Routes are few: their count fits.
+                mesh.taking.heard(i as u16, mesh.peers.borrow()[i].heard.taken());
                 if lost {
                     let mut out = Vec::new();
                     Control::Resync.encode(&mut out);

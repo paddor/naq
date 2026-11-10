@@ -206,6 +206,24 @@ fn names(answers: &[serde_json::Value], at: &str) -> Vec<String> {
 }
 
 #[test]
+fn every_server_answers_a_request_whose_inbox_came_in_the_same_write() {
+    let servers = cluster(3);
+    let mut c = Sys::new(servers[0].addr());
+    c.ask_all("$SYS.REQ.SERVER.PING.IDZ", 3);
+    // As natscli asks: the interest of the inbox reaches the others before
+    // the request does, as on one nats-server route.
+    for round in 0..20 {
+        let inbox = format!("_I.{round}");
+        c.send(&format!(
+            "SUB {inbox} {}\r\nPUB $SYS.REQ.SERVER.PING.IDZ {inbox} 0\r\n\r\n",
+            round + 10
+        ));
+        let all = c.messages(3, WAIT, |s| s == inbox);
+        assert_eq!(names(&all, "/name"), ["n0", "n1", "n2"], "round {round}");
+    }
+}
+
+#[test]
 fn every_server_of_a_cluster_answers_a_ping() {
     let servers = cluster(3);
     let mut c = Sys::new(servers[0].addr());
