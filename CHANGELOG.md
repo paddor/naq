@@ -5,6 +5,8 @@ Notable changes to naq. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### Added
 
 - `naq`: a log, as `nats-server` writes it: `[pid] time [LVL] text`, the
