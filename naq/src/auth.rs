@@ -37,6 +37,47 @@ pub(crate) struct Auth {
     pub(crate) timeout: Duration,
 }
 
+/// What clients authenticate with: all of them, and WebSocket clients
+/// where they have their own. A reload makes them anew.
+#[derive(Debug, Default)]
+pub(crate) struct Logins {
+    /// For every client, if anything.
+    pub(crate) auth: Option<Auth>,
+    /// For WebSocket clients, where it is not `auth`.
+    ws: Option<Auth>,
+}
+
+impl Logins {
+    /// Those `opts` ask for, of users in `accounts`, the server's by id,
+    /// in operator mode under `trust`.
+    pub(crate) fn new(
+        opts: &Options,
+        accounts: &[String],
+        trust: Option<&Arc<crate::jwt::trust::Trust>>,
+    ) -> Logins {
+        let auth = match trust {
+            Some(t) => Some(Auth {
+                trust: Some(t.clone()),
+                ..Auth::empty(opts.auth_timeout)
+            }),
+            None => Auth::new(opts, accounts),
+        };
+        Logins {
+            ws: Auth::websocket(opts, auth.as_ref()),
+            auth,
+        }
+    }
+
+    /// What clients authenticate with, over WebSocket if `ws`, if
+    /// anything.
+    pub(crate) const fn of(&self, ws: bool) -> Option<&Auth> {
+        match &self.ws {
+            Some(a) if ws => Some(a),
+            _ => self.auth.as_ref(),
+        }
+    }
+}
+
 /// A user of a list: what it gets, and how it may log in.
 #[derive(Debug, Clone)]
 struct Listed {
@@ -171,6 +212,11 @@ pub(crate) struct Pending {
 }
 
 impl Pending {
+    /// The hash the password is compared with.
+    pub(crate) fn hash(&self) -> &str {
+        &self.hash
+    }
+
     /// Whether the password matches the hash.
     pub(crate) fn holds(&self) -> bool {
         bcrypt::verify(&self.password, &self.hash).unwrap_or(false)
@@ -490,6 +536,21 @@ impl Auth {
     /// The operator mode users log in under, if any.
     pub(crate) fn trust(&self) -> Option<&crate::jwt::trust::Trust> {
         self.trust.as_deref()
+    }
+
+    /// The operator mode users log in under, shared, if any.
+    pub(crate) const fn trust_arc(&self) -> Option<&Arc<crate::jwt::trust::Trust>> {
+        self.trust.as_ref()
+    }
+
+    /// The account of the user or NKey credentials `c` name, before any
+    /// secret is checked, if it is one of the list.
+    pub(crate) fn account_of(&self, c: &Creds) -> Option<u32> {
+        if let Some(key) = &c.nkey {
+            return self.nkeys.get(key).map(|l| l.grant.account);
+        }
+        let user = c.user.as_deref()?;
+        self.users.get(user).map(|(_, l)| l.grant.account)
     }
 
     /// Whom credentials `c` name, before any secret is checked, as

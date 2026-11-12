@@ -112,7 +112,7 @@ fn pub_args(p: &Pub<'_>) -> String {
 /// `max_traced`; nothing if empty.
 fn trace_payload(log: &Log, prefix: &str, dir: &str, p: &Pub<'_>) {
     let mut msg = Vec::new();
-    if log.trace_headers {
+    if log.trace_headers() {
         // As `nats-server` cuts them: without the line ends that end them.
         let Some(h) = p.headers else {
             return;
@@ -125,7 +125,7 @@ fn trace_payload(log: &Log, prefix: &str, dir: &str, p: &Pub<'_>) {
     if msg.is_empty() {
         return;
     }
-    let max = log.max_traced;
+    let max = log.max_traced();
     if max > 0 && msg.len() > max {
         let q = quote(&msg[..max]);
         log.trace(format_args!(

@@ -6,7 +6,8 @@
 //! connection, then a snapshot of the sender's interest and deltas to it,
 //! numbered so that a receiver notices a loss, and beats that tell how far
 //! the numbering got. Data messages are [`Batch`]es: publishes of one
-//! account. Integers are little-endian; each string has its length first.
+//! account, stamped with the last delta the sender made for the receiver,
+//! which the receiver takes first. Integers are little-endian; each string has its length first.
 //! No allocation: encoders write into the caller's buffer, decoders return
 //! slices of the input.
 //!
@@ -25,8 +26,9 @@
 //!     queue: Some(b"workers"),
 //! }
 //! .encode(&mut out);
+//! peer::stamp(&mut out, 7, 3);
 //! let b = Batch::parse(&out)?;
-//! assert_eq!(b.account, b"$G");
+//! assert_eq!((b.account, b.epoch, b.seq), (&b"$G"[..], 7, 3));
 //! let r = b.records().next().unwrap()?;
 //! assert_eq!((r.subject, r.queue), (&b"orders"[..], Some(&b"workers"[..])));
 //! # Ok::<(), peer::Error>(())
@@ -35,7 +37,7 @@
 use bytes::BufMut;
 
 /// The version of the peer wire this codec speaks, sent in [`Hello`].
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 const HELLO: u8 = 1;
 const SNAPSHOT_START: u8 = 2;
@@ -366,6 +368,13 @@ pub fn decode(msg: &[u8]) -> Result<Control<'_>, Error> {
 /// Publishes of one account, as a data message holds them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Batch<'a> {
+    /// The sender's epoch, as its [`Hello`] says.
+    pub epoch: u64,
+    /// The last delta the sender made for the receiver as it sent the
+    /// batch: the receiver takes the interest up to it before the
+    /// publishes, as one `nats-server` route carries both in order. 0 for
+    /// none.
+    pub seq: u64,
     /// The leaf node cluster its publishes come from, if a leaf of the
     /// sender sent them: empty for a leaf of none.
     pub origin: Option<&'a [u8]>,
@@ -391,9 +400,12 @@ pub struct Record<'a> {
 }
 
 /// Appends the head of a batch of `account`, from leaf cluster `origin`
-/// if one; [`Record::encode`] appends its publishes.
+/// if one; [`Record::encode`] appends its publishes, and [`stamp`] its
+/// epoch and delta, which are 0 until then.
 pub fn batch(out: &mut impl BufMut, origin: Option<&[u8]>, account: &[u8]) {
     out.put_u8(BATCH);
+    out.put_u64_le(0);
+    out.put_u64_le(0);
     match origin {
         Some(o) => {
             out.put_u8(ORIGIN);
@@ -402,6 +414,24 @@ pub fn batch(out: &mut impl BufMut, origin: Option<&[u8]>, account: &[u8]) {
         None => out.put_u8(0),
     }
     short(out, account);
+}
+
+/// Bytes of a batch head before its stamp.
+const STAMP_AT: usize = 1;
+/// Bytes of a stamp: the epoch, then the delta.
+const STAMP_LEN: usize = 16;
+
+/// Stamps the batch that `batch` holds, from its head on, with the
+/// sender's `epoch` and its last delta `seq` for the receiver. Anything
+/// else is left as it is.
+pub fn stamp(batch: &mut [u8], epoch: u64, seq: u64) {
+    if batch.first() != Some(&BATCH) {
+        return;
+    }
+    if let Some(at) = batch.get_mut(STAMP_AT..STAMP_AT + STAMP_LEN) {
+        at[..8].copy_from_slice(&epoch.to_le_bytes());
+        at[8..].copy_from_slice(&seq.to_le_bytes());
+    }
 }
 
 impl Record<'_> {
@@ -437,6 +467,7 @@ impl<'a> Batch<'a> {
             BATCH => {}
             k => return Err(Error::Kind(k)),
         }
+        let (epoch, seq) = (r.u64()?, r.u64()?);
         let origin = match r.u8()? {
             0 => None,
             ORIGIN => Some(r.short()?),
@@ -444,6 +475,8 @@ impl<'a> Batch<'a> {
         };
         let account = r.short()?;
         Ok(Batch {
+            epoch,
+            seq,
             origin,
             account,
             records: r.0,

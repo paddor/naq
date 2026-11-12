@@ -417,3 +417,42 @@ fn connz_shows_the_tls_of_a_client_and_its_certificate_with_auth() {
     assert_eq!(c["tls_version"], "1.3", "{z}");
     assert!(c.get("tls_peer_certs").is_none(), "{z}");
 }
+
+/// Whether a client of `cfg` completes a handshake with `at` and reads.
+fn handshakes(cfg: Arc<ClientConfig>, at: std::net::SocketAddr, ask: &[u8]) -> bool {
+    let t = TcpStream::connect(at).unwrap();
+    t.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut tls = wrap(cfg, t);
+    if tls.write_all(ask).is_err() {
+        return false;
+    }
+    let mut b = [0u8; 1];
+    matches!(tls.read(&mut b), Ok(1))
+}
+
+#[test]
+fn a_reload_serves_new_certificate_files_to_new_clients_and_monitoring() {
+    let (old, new) = (Pki::new("rotate-old"), Pki::new("rotate-new"));
+    let opts = Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 1,
+        tls: Some(old.tls(false, true)),
+        https_port: Some(0),
+        ..Options::default()
+    };
+    let s = Server::start(&opts).unwrap();
+    s.reload_with(move || Ok(opts.clone()));
+    let get = b"GET /varz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    let (nats, https) = (s.addr(), s.monitor_addr().unwrap());
+    assert!(handshakes(old.client(false), nats, b"PING\r\n"));
+    assert!(handshakes(old.client(false), https, get));
+    for f in ["server.pem", "server-key.pem"] {
+        std::fs::copy(new.path(f), old.path(f)).unwrap();
+    }
+    s.reload().unwrap();
+    for (at, ask) in [(nats, &b"PING\r\n"[..]), (https, &get[..])] {
+        assert!(!handshakes(old.client(false), at, ask), "{at}: the old CA");
+        assert!(handshakes(new.client(false), at, ask), "{at}: the new CA");
+    }
+}

@@ -756,7 +756,7 @@ fn details(lane: &Lane, c: &Client) -> ClientInfo {
 
 /// Adds the server's name and cluster to `ci`.
 fn server_details(lane: &Lane, ci: &mut ClientInfo) {
-    let opts = &lane.shared.opts;
+    let opts = &lane.shared.opts();
     ci.server.clone_from(&opts.server_name);
     if let Some(c) = &opts.cluster {
         ci.cluster.clone_from(&c.name);

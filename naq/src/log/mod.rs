@@ -7,7 +7,7 @@ mod syslog;
 
 use std::fmt;
 use std::io::{IsTerminal as _, Write as _};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,18 +47,23 @@ impl Level {
     }
 }
 
-/// Where the lines of a server go, and which.
+/// Where the lines of a server go, and which. A reload changes them.
 #[derive(Debug)]
 pub(crate) struct Log {
-    sink: Option<Mutex<Sink>>,
-    // Relaxed: a line more or less as they change is fine.
+    sink: Mutex<Option<Sink>>,
+    // Relaxed, all of them: a line more or less as they change is fine.
+    /// There is a sink: lines are written.
+    on: AtomicBool,
     debug: AtomicBool,
     trace: AtomicBool,
-    format: Format,
+    /// Lines start with the time.
+    time: AtomicBool,
+    /// Labels are colored.
+    color: AtomicBool,
     /// Traced payloads are cut at this many bytes; 0 for whole.
-    pub(crate) max_traced: usize,
+    max_traced: AtomicUsize,
     /// Only the headers of traced messages.
-    pub(crate) trace_headers: bool,
+    trace_headers: AtomicBool,
 }
 
 /// How a line starts.
@@ -83,11 +88,27 @@ impl Log {
     ///
     /// The log file cannot be opened, or the syslog not reached.
     pub(crate) fn new(l: &Logging) -> std::io::Result<Log> {
-        let format = Format {
-            pid: std::process::id(),
-            time: l.time,
-            color: matches!(l.to, Some(LogTo::Stderr)) && std::io::stderr().is_terminal(),
+        let log = Log {
+            sink: Mutex::new(None),
+            on: AtomicBool::new(false),
+            debug: AtomicBool::new(false),
+            trace: AtomicBool::new(false),
+            time: AtomicBool::new(false),
+            color: AtomicBool::new(false),
+            max_traced: AtomicUsize::new(0),
+            trace_headers: AtomicBool::new(false),
         };
+        log.set(l)?;
+        Ok(log)
+    }
+
+    /// Logs as `l` asks from now on, as after a reload: the sink is opened
+    /// anew. If it cannot be, nothing changes.
+    ///
+    /// # Errors
+    ///
+    /// The log file cannot be opened, or the syslog not reached.
+    pub(crate) fn set(&self, l: &Logging) -> std::io::Result<()> {
         let sink = match &l.to {
             None => None,
             Some(LogTo::Stderr) => Some(Sink::Stderr),
@@ -96,18 +117,44 @@ impl Log {
             Some(LogTo::RemoteSyslog(url)) => Some(Sink::Syslog(syslog::Syslog::remote(url)?)),
         };
         let on = sink.is_some();
-        let log = Log {
-            sink: sink.map(Mutex::new),
-            debug: AtomicBool::new(on && l.debug),
-            trace: AtomicBool::new(on && l.trace != Trace::Off),
-            format,
-            max_traced: l.max_traced,
-            trace_headers: l.trace == Trace::Headers,
-        };
-        if let Some(note) = log.lock().and_then(|mut s| s.take_note()) {
-            log.info(format_args!("{note}"));
+        let color = matches!(l.to, Some(LogTo::Stderr)) && std::io::stderr().is_terminal();
+        let mut held = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
+        *held = sink;
+        let note = held.as_mut().and_then(Sink::take_note);
+        // Relaxed: see the fields.
+        self.on.store(on, Ordering::Relaxed);
+        self.debug.store(on && l.debug, Ordering::Relaxed);
+        self.trace
+            .store(on && l.trace != Trace::Off, Ordering::Relaxed);
+        self.time.store(l.time, Ordering::Relaxed);
+        self.color.store(color, Ordering::Relaxed);
+        self.max_traced.store(l.max_traced, Ordering::Relaxed);
+        self.trace_headers
+            .store(l.trace == Trace::Headers, Ordering::Relaxed);
+        drop(held);
+        if let Some(note) = note {
+            self.info(format_args!("{note}"));
         }
-        Ok(log)
+        Ok(())
+    }
+
+    /// Traced payloads are cut at this many bytes; 0 for whole.
+    pub(crate) fn max_traced(&self) -> usize {
+        self.max_traced.load(Ordering::Relaxed)
+    }
+
+    /// Only the headers of traced messages are written.
+    pub(crate) fn trace_headers(&self) -> bool {
+        self.trace_headers.load(Ordering::Relaxed)
+    }
+
+    /// How lines start now.
+    fn format(&self) -> Format {
+        Format {
+            pid: std::process::id(),
+            time: self.time.load(Ordering::Relaxed),
+            color: self.color.load(Ordering::Relaxed),
+        }
     }
 
     /// Whether debug lines are written.
@@ -149,7 +196,7 @@ impl Log {
         let Some(mut sink) = self.lock() else {
             return;
         };
-        let Sink::File(f) = &mut *sink else {
+        let Some(Sink::File(f)) = sink.as_mut() else {
             drop(sink);
             self.info(format_args!("File log re-open ignored, not a file logger"));
             return;
@@ -166,23 +213,29 @@ impl Log {
         }
     }
 
-    fn lock(&self) -> Option<MutexGuard<'_, Sink>> {
-        let sink = self.sink.as_ref()?;
-        Some(sink.lock().unwrap_or_else(PoisonError::into_inner))
+    /// The sink, if there is one.
+    fn lock(&self) -> Option<MutexGuard<'_, Option<Sink>>> {
+        // Relaxed: see the fields.
+        if !self.on.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.sink.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     fn write(&self, level: Level, args: fmt::Arguments<'_>) {
         let Some(mut sink) = self.lock() else {
             return;
         };
-        match &mut *sink {
-            Sink::Stderr => {
-                let line = self.format.line(level, args, "\n");
+        let format = self.format();
+        match sink.as_mut() {
+            None => {}
+            Some(Sink::Stderr) => {
+                let line = format.line(level, args, "\n");
                 // A log that cannot be written has nowhere to say so.
                 let _ = std::io::stderr().write_all(line.as_bytes());
             }
-            Sink::File(f) => f.write(self.format, &self.format.line(level, args, "\n")),
-            Sink::Syslog(s) => s.send(level, &fmt::format(args)),
+            Some(Sink::File(f)) => f.write(format, &format.line(level, args, "\n")),
+            Some(Sink::Syslog(s)) => s.send(level, &fmt::format(args)),
         }
     }
 }

@@ -12,7 +12,8 @@
 //! - `a< n`: client `a` sends what it has with a `PING` and waits until it
 //!   got `n` messages, or for a moment if `n` is 0, and every message it
 //!   got shows: its control line without the sizes, its headers, and its
-//!   payload, as an answer body is shown, decoded if compressed.
+//!   payload, as an answer body is shown, decoded if compressed. An
+//!   `INFO` after the first shows as a message whose line is `INFO`.
 //!   `$SERVER_ID` in a client's line, and in what it got, is the ID of
 //!   the server, `$CID_a`
 //!   that of client `a`; a size `$LEN` at the end of a `PUB` is that of
@@ -126,15 +127,18 @@ fn naq_answers_as_nats_server_does() {
         }
         let opts: naq::Options = script.conf.parse().unwrap();
         let secure = opts.https_port.is_some();
-        let server = naq::Server::start(&naq::Options {
+        let opts = naq::Options {
             host: "127.0.0.1".into(),
             port: 0,
             lanes: 2,
             http_port: (!secure).then_some(0),
             https_port: secure.then_some(0),
             ..opts
-        })
-        .unwrap();
+        };
+        let server = naq::Server::start(&opts).unwrap();
+        // A reload finds the configuration as it was, as nats-server
+        // finds its file.
+        server.reload_with(move || Ok(opts.clone()));
         let got = script.replay(server.addr(), server.monitor_addr().unwrap());
         if got != want {
             failed += &mismatch(&path, "naq", &want, &got);
@@ -640,6 +644,14 @@ impl Client {
         let line = line.trim_end_matches("\r\n");
         if line == "PONG" {
             return Frame::Pong;
+        }
+        if let Some(json) = line.strip_prefix("INFO ") {
+            // An `INFO` after the first is a message of its own.
+            return Frame::Msg(Got {
+                line: "INFO".into(),
+                headers: Vec::new(),
+                payload: json.as_bytes().to_vec(),
+            });
         }
         let mut words: Vec<&str> = line.split(' ').collect();
         let size = |w: Option<&str>| w.unwrap().parse::<usize>().unwrap();

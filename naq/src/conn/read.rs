@@ -51,7 +51,7 @@ pub(super) enum Step {
 
 impl Conn {
     pub(super) async fn read_loop<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Close {
-        let stall_mark = self.lane.shared.opts.max_pending / 4 * 3;
+        let stall_mark = self.lane.shared.max_pending / 4 * 3;
         let mut buf = self.lane.reads.take(READ_CHUNK);
         let timer = tokio::time::sleep_until(self.ping.next);
         tokio::pin!(timer);
@@ -91,14 +91,9 @@ impl Conn {
             // passes its wake on, and the timer keeps its deadline.
             tokio::select! {
                 biased;
-                () = self.client.stop.notified() => {
-                    if !self.client.take_refresh() || self.client.is_closed() {
-                        return Close::Kicked;
-                    }
-                    if let Err(close) = self.refresh() {
-                        return close;
-                    }
-                }
+                () = self.client.stop.notified() => if let Some(close) = self.woken().await {
+                    return close;
+                },
                 () = &mut timer => {
                     if let Some(close) = self.timer_fired() {
                         return close;
@@ -110,6 +105,21 @@ impl Conn {
                 },
             }
         }
+    }
+
+    /// Acts on a wake by the server: a close, an `INFO` to send, or a
+    /// change of its account.
+    async fn woken(&mut self) -> Option<Close> {
+        if self.client.is_closed() {
+            return Some(Close::Kicked);
+        }
+        if let Some(ldm) = self.client.take_info() {
+            self.inform(ldm);
+        }
+        if self.client.take_refresh() {
+            return self.refresh().await.err();
+        }
+        None
     }
 
     /// Notes that the client was active, if the read just parsed held
@@ -288,7 +298,7 @@ impl Conn {
     /// The ping timer fired: maybe a `PING`, maybe the end.
     #[inline(never)]
     fn ping_tick(&mut self) -> Option<Close> {
-        let opts = &self.lane.shared.opts;
+        let opts = &self.lane.shared.opts();
         match self
             .ping
             .tick(Instant::now(), self.ping.interval, opts.max_pings_out)

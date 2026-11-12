@@ -98,7 +98,8 @@ impl Me {
     /// The hub `Hello` of `shared`'s server, naming where leafs dial it and
     /// the servers of `mesh` that are up, with `nonce` for a leaf to sign.
     fn hello(&self, shared: &Shared, mesh: &Mesh, nonce: &str) -> Bytes {
-        let cluster = shared.opts.cluster.as_ref().map_or("", |c| &c.name);
+        let opts = shared.opts();
+        let cluster = opts.cluster.as_ref().map_or("", |c| &c.name);
         let mut urls = self.url.clone();
         for u in mesh
             .peers
@@ -116,7 +117,7 @@ impl Me {
             account: shared.accounts.name(self.account).as_bytes(),
             epoch: self.epoch,
             server_id: shared.server_id.as_bytes(),
-            name: shared.opts.server_name.as_bytes(),
+            name: shared.opts().server_name.as_bytes(),
             cluster: cluster.as_bytes(),
             data: self.data.as_bytes(),
             client_urls: b"",
@@ -221,7 +222,10 @@ impl Hub {
         };
         match &c {
             Control::Hello(h) => {
-                if h.role == Role::Leaf && !self.dead.contains(&who) {
+                // In lame duck mode it links no more leafs, as
+                // `nats-server`.
+                let lame = crate::lame::on(&self.shared);
+                if h.role == Role::Leaf && !self.dead.contains(&who) && !lame {
                     self.hello(who, h);
                 }
                 return;
@@ -260,6 +264,7 @@ impl Hub {
             looped |= ch.1 == lds && ch.3 > 0;
             interest(shared, slot, account, perms, ch);
         });
+        self.mesh.taking.heard(slot, l.heard.taken());
         if lost {
             l.other.push(Item::Msg(resync()));
         }
@@ -344,11 +349,14 @@ impl Hub {
                 perms: carries.perms.clone(),
             });
         }
-        let told = Rc::new(Told::new(
-            self.mesh.epoch,
-            self.shared.accounts.clone(),
-            self.mesh.leaf_wake.clone(),
-        ));
+        let told = Rc::new(
+            Told::new(
+                self.mesh.epoch,
+                self.shared.accounts.clone(),
+                self.mesh.leaf_wake.clone(),
+            )
+            .stamping(self.shared.marks.clone(), slot..slot + 1),
+        );
         {
             let routes = self.mesh.peers.borrow();
             let leaf = ForLeaf {

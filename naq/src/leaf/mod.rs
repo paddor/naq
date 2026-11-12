@@ -2,12 +2,14 @@
 //! own, dialing again whenever it ends.
 
 mod creds;
+mod hubs;
 mod link;
 mod side;
 mod tls;
 pub(crate) mod url;
 
 pub(crate) use creds::prove;
+pub(crate) use hubs::{HubRemote, HubRemotes, same};
 pub(crate) use link::{LOOP_DELAY, err_delay, loop_error};
 pub(crate) use side::{Facts, LinkSide, perms};
 pub(crate) use tls::Connector;
@@ -188,6 +190,23 @@ fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
     Ok(())
 }
 
+/// The remotes of `opts` to `nats-server` hubs, with their TLS, its files
+/// read.
+///
+/// # Errors
+///
+/// [`crate::Error::Tls`] for a file of a remote's `tls` that cannot be
+/// read.
+pub(crate) fn to_hubs(
+    opts: &crate::Options,
+) -> Result<Vec<(crate::Remote, Connector)>, crate::Error> {
+    opts.remotes
+        .iter()
+        .filter(|r| !is_naq(r))
+        .map(|r| Ok((r.clone(), Connector::new(r)?)))
+        .collect()
+}
+
 /// Whether remote `r` dials a naq hub, over OMQ. Of a valid remote.
 pub(crate) fn is_naq(r: &crate::Remote) -> bool {
     r.urls
@@ -196,13 +215,14 @@ pub(crate) fn is_naq(r: &crate::Remote) -> bool {
         .is_some_and(|u| u.naq)
 }
 
-/// Serves remote `index` on lane `lane`: dials its hub, serves the link,
-/// and dials again once it ends, as `nats-server` does.
-pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
-    let Some(lane) = lane::get(shared.id, lane) else {
+/// Serves remote `hub` on its lane: dials its hub, serves the link, and
+/// dials again once it ends, as `nats-server` does, until a reload removes
+/// it.
+pub(crate) async fn run(shared: Arc<Shared>, hub: Arc<HubRemote>) {
+    let Some(lane) = lane::get(shared.id, hub.lane) else {
         return;
     };
-    let remote = &shared.opts.remotes[index];
+    let remote = &hub.remote;
     // Valid: the options were checked.
     let all: Vec<HubUrl> = remote
         .urls
@@ -216,14 +236,15 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
             urls.swap(i, j);
         }
     }
-    let interval = shared.opts.leaf_reconnect;
+    let interval = shared.opts().leaf_reconnect;
     let told = RefCell::new(None);
     let mut attempts = 0u64;
     loop {
         let Some(url) = urls.pop_front() else {
             return;
         };
-        if crate::stop::stopping(&lane.shared) {
+        // In lame duck mode it dials no more, as `nats-server`.
+        if crate::stop::stopping(&lane.shared) || crate::lame::on(&lane.shared) || hub.is_gone() {
             return;
         }
         urls.push_back(url.clone());
@@ -232,7 +253,7 @@ pub(crate) async fn run(shared: Arc<Shared>, lane: usize, index: usize) {
         log.debug(format_args!(
             "Trying to connect as leafnode to remote server on {at:?}"
         ));
-        let wait = match link::session(&lane, index, &url, &all, &told).await {
+        let wait = match link::session(&lane, &hub, &url, &all, &told).await {
             Ended::Unreached(why) => {
                 attempts += 1;
                 log.error(format_args!(

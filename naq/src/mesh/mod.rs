@@ -12,6 +12,7 @@ mod control;
 mod data;
 mod hub;
 mod interest;
+mod marks;
 mod spoke;
 mod tell;
 mod told;
@@ -19,6 +20,8 @@ mod view;
 
 pub(crate) use data::{DataLink, gone, hub, leaf, push};
 pub(crate) use interest::Heard;
+use marks::Taking;
+pub(crate) use marks::{Marks, OnLane, follow};
 use told::Told;
 
 use std::cell::RefCell;
@@ -121,14 +124,21 @@ pub(crate) struct Mesh {
     leaf_wake: Rc<Notify>,
     /// The naq hubs dialed, in the order of their remotes.
     pub(crate) hubs: RefCell<Vec<spoke::Hub>>,
+    /// Woken as this server goes into lame duck mode.
+    lamed: Notify,
+    /// What the others told, applied here, to be marked taken on every lane.
+    pub(crate) taking: Rc<Taking>,
 }
 
 impl Mesh {
     /// The mesh of `shared`'s server, of start `epoch`.
     fn new(shared: &Shared, epoch: u64) -> Mesh {
-        let first = routes(&shared.opts);
-        let hubs = (0..shared.opts.remotes.len())
-            .filter(|&r| crate::leaf::is_naq(&shared.opts.remotes[r]))
+        let first = routes(&shared.opts());
+        let opts = shared.opts();
+        let hubs = opts
+            .remotes
+            .iter()
+            .filter(|r| crate::leaf::is_naq(r))
             .enumerate()
             // Slots are below 64: they fit.
             .map(|(k, r)| spoke::Hub::new(shared, r, (first + k) as u16, epoch))
@@ -137,11 +147,23 @@ impl Mesh {
             epoch,
             accounts: shared.accounts.clone(),
             peers: RefCell::default(),
-            told: Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default())),
+            told: Rc::new(
+                Told::new(epoch, shared.accounts.clone(), Rc::default())
+                    // Slots are below 64: they fit.
+                    .stamping(shared.marks.clone(), 0..first as u16),
+            ),
             leafs: RefCell::default(),
             leaf_wake: Rc::default(),
             hubs: RefCell::new(hubs),
+            lamed: Notify::new(),
+            taking: Rc::default(),
         }
+    }
+
+    /// Tells the routes that this server is in lame duck mode: it names no
+    /// client URLs from now on, so that their clients leave it out.
+    pub(crate) fn lame(&self) {
+        self.lamed.notify_one();
     }
 
     /// Takes in the taps of imports `lane`, lane 0, holds from its start:
@@ -275,8 +297,8 @@ pub(crate) fn hubs(opts: &ServerOptions) -> usize {
 
 /// The account every naq leaf binds on `shared`'s server.
 fn leafnodes_account(shared: &Shared) -> u32 {
-    let name = shared
-        .opts
+    let opts = shared.opts();
+    let name = opts
         .leafnodes
         .as_ref()
         .and_then(|l| l.account.as_deref())
@@ -344,12 +366,14 @@ pub(crate) async fn run(
     let epoch = u64::from_le_bytes(epoch);
     // In place before the server serves clients: none of their interest
     // goes untold.
+    shared.marks.start(epoch);
     let mesh = Rc::new(Mesh::new(&shared, epoch));
     *lane.mesh.borrow_mut() = Some(mesh.clone());
+    tokio::task::spawn_local(marks::mark(shared.clone(), mesh.taking.clone()));
     mesh.tell_taps(&lane);
     let ctx = omq_tokio::Context::current();
     let mut bound = Bound::default();
-    let cluster = match &shared.opts.cluster {
+    let cluster = match &shared.opts().cluster {
         Some(c) => match router(&ctx, &c.host, c.port).await {
             Ok((r, _, at)) => {
                 bound.cluster = Some(at);
@@ -362,7 +386,7 @@ pub(crate) async fn run(
         },
         None => None,
     };
-    let leafs = match &shared.opts.leafnodes {
+    let leafs = match &shared.opts().leafnodes {
         Some(l) => match router(&ctx, &l.host, l.port).await {
             Ok((r, events, at)) => {
                 bound.leafnodes = Some(at);

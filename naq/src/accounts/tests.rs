@@ -20,18 +20,12 @@ fn accounts_keep_their_ids_by_name() {
 }
 
 #[test]
-fn accounts_are_added_only_where_there_is_room() {
+fn accounts_are_added_in_chunks_up_to_the_most() {
     let fixed = Accounts::of(&["$G"]);
-    assert_eq!(fixed.room(), 1);
+    assert_eq!(fixed.room(), chunks(MOST));
     assert!(!fixed.growing());
-    let added: Vec<Option<u32>> = (1..=CHUNK)
-        .map(|n| fixed.add(&format!("A{n}"), prefix))
-        .collect();
-    assert_eq!(added[0], Some(1));
-    assert_eq!(added[CHUNK - 2], Some(255));
-    assert_eq!(added[CHUNK - 1], None, "the one chunk is full");
     let growing = Accounts::new(&["$G".to_owned()], [], true, prefix);
-    assert!(growing.room() > 1 && growing.growing());
+    assert!(growing.growing());
     for n in 1..=CHUNK {
         growing.add(&format!("A{n}"), prefix);
     }

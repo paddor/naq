@@ -40,6 +40,9 @@ impl Lane {
         queue: Option<&[u8]>,
         peer: Peer,
     ) {
+        if peer.weight > 0 && self.id != 0 {
+            self.marks.announced();
+        }
         for (i, tx) in self.shared.lanes.iter().enumerate() {
             if i != self.id {
                 tx.control(Control::Peer {

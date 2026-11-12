@@ -1,0 +1,79 @@
+# A reload by the server's ID reloads the configuration file it runs and
+# answers with its block alone, also for an empty body; one with a body
+# its filters leave out, or without a reply, does nothing. A body that
+# does not unmarshal gets Go's error, with status 400.
+#! server_name: s1
+#! accounts {
+#!   SYS { users [{user: sys, password: p}] }
+#! }
+#! system_account: SYS
+#~ id
+#~ time
+#~ seq
+#~ ver
+s> CONNECT {"user":"sys","pass":"p","headers":true,"no_responders":true}
+s> SUB _R.> 1
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.RELOAD _R.1 0
+s>
+s< 1
+< MSG _R.1 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.RELOAD _R.2 $LEN
+s> {"server_name":"s1"}
+s< 1
+< MSG _R.2 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.RELOAD _R.3 $LEN
+s> {"server_name":"zz"}
+s< 0
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.RELOAD _R.4 $LEN
+s> {"server_name":5}
+s< 1
+< MSG _R.4 1
+< {
+<   "server": {
+<     "name": "s1",
+<     "host": "127.0.0.1",
+<     "id": ~,
+<     "ver": ~,
+<     "jetstream": false,
+<     "flags": 0,
+<     "seq": ~,
+<     "time": ~
+<   },
+<   "error": {
+<     "code": 400,
+<     "description": "json: cannot unmarshal number into Go struct field EventFilterOptions.server_name of type string"
+<   }
+< }
+s> PUB $SYS.REQ.SERVER.$SERVER_ID.RELOAD 0
+s>
+s< 0
+s> PUB $SYS.REQ.SERVER.PING.RELOAD _R.5 0
+s>
+s< 1
+< HMSG _R.5 1
+< NATS/1.0 503
+< Nats-Subject: $SYS.REQ.SERVER.PING.RELOAD

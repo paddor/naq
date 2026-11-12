@@ -122,6 +122,14 @@ struct TlsFlags {
     verify: bool,
 }
 
+/// The cluster flags that need a cluster, which another flag or the
+/// configuration file makes, before or after them.
+#[derive(Debug, Default)]
+struct ClusterFlags {
+    name: Option<String>,
+    routes: Option<Vec<String>>,
+}
+
 /// What `args` ask for.
 pub(crate) fn parse(args: &[String]) -> Result<Run, Bad> {
     let mut o = match config(args).map_err(Bad::Usage)? {
@@ -129,6 +137,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Run, Bad> {
         None => naq::Options::default(),
     };
     let mut tls = TlsFlags::default();
+    let mut cluster = ClusterFlags::default();
     let mut check = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -152,7 +161,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Run, Bad> {
                         .map(String::as_str)
                         .ok_or_else(|| Bad::Usage(format!("{arg} needs a value")))?,
                 };
-                if let Some(run) = value(&mut o, &mut tls, name, val, arg)? {
+                if let Some(run) = value(&mut o, (&mut tls, &mut cluster), name, val, arg)? {
                     return Ok(run);
                 }
             }
@@ -167,6 +176,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Run, Bad> {
         return Ok(Run::Check(path.into()));
     }
     apply_tls(&mut o, tls).map_err(Bad::Config)?;
+    apply_cluster(&mut o, cluster).map_err(Bad::Config)?;
     Ok(Run::Serve(Box::new(o)))
 }
 
@@ -246,10 +256,11 @@ fn switch(
     Ok(None)
 }
 
-/// Applies flag `name` with value `val`, as `arg` gave it.
+/// Applies flag `name` with value `val`, as `arg` gave it; the TLS and
+/// some cluster flags only once all are read.
 fn value(
     o: &mut Options,
-    tls: &mut TlsFlags,
+    (tls, cluster): (&mut TlsFlags, &mut ClusterFlags),
     name: &str,
     val: &str,
     arg: &str,
@@ -285,8 +296,8 @@ fn value(
         "tlskey" => tls.key = Some(val.into()),
         "tlscacert" => tls.ca = Some(val.into()),
         "cluster" | "cluster_listen" => cluster_listen(o, val).map_err(Bad::Config)?,
-        "cluster_name" => cluster_of(o).name = val.into(),
-        "routes" => routes(o, val).map_err(Bad::Config)?,
+        "cluster_name" => cluster.name = Some(val.into()),
+        "routes" => cluster.routes = Some(routes(val)),
         n if UNSERVED.contains(&n) => {
             return Err(Bad::Usage(format!("{arg} is not served by naq")));
         }
@@ -327,17 +338,31 @@ fn cluster_listen(o: &mut Options, url: &str) -> Result<(), String> {
 }
 
 /// `--routes a,b`: the routes of the cluster; empty for none.
-fn routes(o: &mut Options, urls: &str) -> Result<(), String> {
-    let routes: Vec<String> = urls
-        .split(',')
+fn routes(urls: &str) -> Vec<String> {
+    urls.split(',')
         .map(str::trim)
         .filter(|u| !u.is_empty())
         .map(str::to_owned)
-        .collect();
-    match &mut o.cluster {
-        Some(c) => c.routes = routes,
-        None if routes.is_empty() => {}
-        None => return Err("solicited routes require cluster capabilities, e.g. --cluster".into()),
+        .collect()
+}
+
+/// Names the cluster of `o` and sets its routes as the flags `f` say, if
+/// it has one. Routes without a cluster are an error, as for
+/// `nats-server`; a name is left unused.
+fn apply_cluster(o: &mut Options, f: ClusterFlags) -> Result<(), String> {
+    let Some(c) = o.cluster.as_mut() else {
+        return match f.routes {
+            Some(r) if !r.is_empty() => {
+                Err("solicited routes require cluster capabilities, e.g. --cluster".into())
+            }
+            _ => Ok(()),
+        };
+    };
+    if let Some(name) = f.name {
+        c.name = name;
+    }
+    if let Some(routes) = f.routes {
+        c.routes = routes;
     }
     Ok(())
 }
@@ -469,6 +494,23 @@ mod tests {
                 .is_none()
         );
         assert!(serve(&["--routes", ""]).cluster.is_none());
+        assert!(serve(&["--cluster_name", "c"]).cluster.is_none());
+        // In any order, as async-nats gives them.
+        let c = serve(&[
+            "--routes",
+            "nats://127.0.0.1:2",
+            "--cluster",
+            "nats://127.0.0.1:1",
+            "--cluster_name",
+            "c",
+        ])
+        .cluster
+        .unwrap();
+        assert_eq!((c.name.as_str(), c.port, c.routes.len()), ("c", 1, 1));
+        assert!(matches!(
+            bad(&["--routes", "nats://127.0.0.1:2"]),
+            Bad::Config(e) if e == "solicited routes require cluster capabilities, e.g. --cluster"
+        ));
         assert!(matches!(
             bad(&["--cluster", "nats://nohost"]),
             Bad::Config(_)

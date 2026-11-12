@@ -18,7 +18,7 @@ mod varz;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use sha2::Digest as _;
@@ -90,6 +90,35 @@ impl Counted {
     }
 }
 
+/// A configuration as loaded.
+#[derive(Debug, Clone)]
+pub(crate) struct Loaded {
+    /// `sha256:` and the hex SHA-256 of the configuration file; empty
+    /// without one.
+    pub(crate) digest: String,
+    /// When.
+    pub(crate) at: SystemTime,
+}
+
+/// The digest of the configuration file of `opts`, as `Loaded` keeps it.
+fn digest(opts: &Options) -> String {
+    opts.config_file
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| format!("sha256:{}", hex(&sha2::Sha256::digest(b))))
+        .unwrap_or_default()
+}
+
+/// The TLS of the HTTPS port, if it has one.
+#[derive(Default)]
+struct HttpsTls(std::sync::RwLock<Option<tokio_rustls::TlsAcceptor>>);
+
+impl std::fmt::Debug for HttpsTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpsTls").finish_non_exhaustive()
+    }
+}
+
 /// What monitoring keeps for a server.
 #[derive(Debug)]
 pub(crate) struct State {
@@ -101,11 +130,10 @@ pub(crate) struct State {
     http: Option<SocketAddr>,
     /// Where monitoring is served over HTTPS, if it is.
     https: Option<SocketAddr>,
-    /// `sha256:` and the hex SHA-256 of the configuration file; empty
-    /// without one.
-    pub(crate) digest: String,
-    /// When the configuration was loaded.
-    pub(crate) loaded: SystemTime,
+    /// The TLS of the HTTPS port: a reload swaps it.
+    tls: HttpsTls,
+    /// The configuration, as last loaded.
+    loaded: Mutex<Loaded>,
     /// The ports the cluster and naq leafs were bound at, once they are.
     pub(crate) mesh: OnceLock<crate::mesh::Bound>,
     /// The process's CPU time at the last sample.
@@ -126,18 +154,60 @@ impl State {
             base: base_path(&opts.http_base_path),
             http: at.filter(|_| !secure),
             https: at.filter(|_| secure),
-            digest: opts
-                .config_file
-                .as_ref()
-                .and_then(|p| std::fs::read(p).ok())
-                .map(|b| format!("sha256:{}", hex(&sha2::Sha256::digest(b))))
-                .unwrap_or_default(),
-            loaded: now,
+            tls: HttpsTls::default(),
+            loaded: Mutex::new(Loaded {
+                digest: digest(opts),
+                at: now,
+            }),
             mesh: OnceLock::new(),
             cpu: Mutex::new(None),
             closed: conns::Closed::new(opts.max_closed_clients),
             gone: accstatz::Gone::default(),
         }
+    }
+
+    /// The configuration, as last loaded.
+    pub(crate) fn loaded(&self) -> Loaded {
+        self.loaded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Notes that `opts` were loaded now, as a reload took them. Returns
+    /// how the reload logs their digest: `(sha256:...)`, or nothing
+    /// without a configuration file.
+    pub(crate) fn reloaded(&self, opts: &Options) -> String {
+        let digest = digest(opts);
+        let shown = if digest.is_empty() {
+            String::new()
+        } else {
+            format!("({digest})")
+        };
+        *self.loaded.lock().unwrap_or_else(PoisonError::into_inner) = Loaded {
+            digest,
+            at: SystemTime::now(),
+        };
+        shown
+    }
+
+    /// The TLS of the HTTPS port, if it has one.
+    fn tls(&self) -> Option<tokio_rustls::TlsAcceptor> {
+        self.tls
+            .0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Takes `tls` for the HTTPS port from now on.
+    pub(crate) fn set_tls(&self, tls: Option<tokio_rustls::TlsAcceptor>) {
+        *self.tls.0.write().unwrap_or_else(PoisonError::into_inner) = tls;
+    }
+
+    /// Where monitoring is served, over HTTP or HTTPS, if it is.
+    pub(crate) fn addr(&self) -> Option<SocketAddr> {
+        self.http.or(self.https)
     }
 
     fn count(&self, e: Counted) {
@@ -259,11 +329,7 @@ pub(crate) fn acceptor(opts: &Options) -> Result<Option<tokio_rustls::TlsAccepto
 
 /// Serves monitoring on `listener`, over TLS if `tls` is set, until it
 /// closes or the server stops.
-pub(crate) async fn serve(
-    mut listener: Listener,
-    shared: Arc<Shared>,
-    tls: Option<tokio_rustls::TlsAcceptor>,
-) {
+pub(crate) async fn serve(mut listener: Listener, shared: Arc<Shared>) {
     loop {
         let stream = match listener.accept().await {
             Ok(s) => s,
@@ -277,7 +343,7 @@ pub(crate) async fn serve(
             return;
         }
         let Stream::Tcp(s) = stream else { continue };
-        let (shared, tls) = (shared.clone(), tls.clone());
+        let (shared, tls) = (shared.clone(), shared.monitor.tls());
         tokio::task::spawn_local(async move {
             if s.set_nonblocking(true).is_err() {
                 return;
@@ -428,6 +494,28 @@ where
     all
 }
 
+/// What `f` finds on lane `lane` of `shared`'s server; `None` if the lane
+/// stopped.
+pub(crate) async fn ask<T: Send + 'static>(
+    shared: &Shared,
+    lane: usize,
+    f: impl FnOnce(&Lane) -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = oneshot::channel();
+    on_lane(shared, lane, move |lane| {
+        let _ = tx.send(f(lane));
+    });
+    rx.await.ok()
+}
+
+/// Hands `f` to lane `lane` of `shared`'s server, to run there. A lane
+/// that stopped drops it.
+pub(crate) fn on_lane(shared: &Shared, lane: usize, f: impl FnOnce(&Lane) + Send + 'static) {
+    if let Some(tx) = shared.lanes.get(lane) {
+        tx.control(Control::Ask(Ask(Box::new(f))));
+    }
+}
+
 /// Work monitoring hands a lane: it runs there, and sends what it finds
 /// back.
 pub(crate) struct Ask(Box<dyn FnOnce(&Lane) + Send>);
@@ -482,13 +570,7 @@ fn text(b: &[u8]) -> String {
 /// A round trip as `nats-server` shows it: to the microsecond between
 /// one and a thousand of them, else to the nanosecond.
 fn rtt(d: Duration) -> String {
-    let micros = Duration::from_micros(1)..Duration::from_millis(1);
-    let d = if micros.contains(&d) && d != micros.start {
-        Duration::from_micros(d.as_micros() as u64)
-    } else {
-        d
-    };
-    crate::times::go_duration(d)
+    crate::times::go_duration(crate::times::go_rtt(d))
 }
 
 /// Now, as a time to show.

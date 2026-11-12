@@ -471,3 +471,66 @@ fn a_signal_sent_once_the_pid_file_is_there_is_caught() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn usr2_puts_the_server_in_lame_duck_mode_which_only_int_cuts_short() {
+    let dir = std::env::temp_dir().join(format!("naq-bin-ldm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("naq.conf");
+    std::fs::write(
+        &conf,
+        "lame_duck_duration: 2m\nlame_duck_grace_period: 1m\n",
+    )
+    .unwrap();
+    let mut child = Proc(
+        Command::new(NAQ)
+            .args(["-a", "127.0.0.1", "-p", "0", "--lanes", "1"])
+            .args(["-c".as_ref(), conf.as_os_str()])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let pid = child.0.id();
+    let mut r = BufReader::new(child.0.stderr.take().unwrap());
+    let (addr, _) = listening(&mut r);
+    until(&mut r, "Server is ready");
+    let mut c = TcpStream::connect(&addr).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    c.write_all(b"CONNECT {\"protocol\":1}\r\nPING\r\n")
+        .unwrap();
+    let mut c = BufReader::new(c);
+    let mut line = String::new();
+    while line != "PONG\r\n" {
+        line.clear();
+        c.read_line(&mut line).unwrap();
+    }
+    kill("USR2", pid);
+    until(
+        &mut r,
+        "Entering lame duck mode, stop accepting new clients",
+    );
+    loop {
+        line.clear();
+        c.read_line(&mut line).unwrap();
+        if line.contains("\"ldm\":true") {
+            break;
+        }
+    }
+    // In lame duck mode, TERM and USR2 do nothing; INT stops it at once.
+    kill("TERM", pid);
+    until(&mut r, "Trapped \"terminated\" signal");
+    kill("USR2", pid);
+    let since = until(&mut r, "Trapped \"user defined signal 2\" signal");
+    assert!(
+        !since.iter().any(|l| l.contains("Initiating Shutdown...")),
+        "{since:#?}"
+    );
+    kill("INT", pid);
+    let rest = until(&mut r, "Server Exiting..");
+    assert!(
+        rest.iter().any(|l| l.contains("Initiating Shutdown...")),
+        "{rest:#?}"
+    );
+    assert_eq!(child.0.wait().unwrap().code(), Some(0));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

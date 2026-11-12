@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use naq_proto::peer::{Control, Interest};
 use rustc_hash::FxHashMap;
 use tokio::sync::Notify;
 
+use super::Marks;
 use crate::accounts::Accounts;
 
 /// Deltas waiting to be sent, at most. Past it, a delta is dropped: the
@@ -38,6 +40,9 @@ pub(crate) struct Told {
     pinned: RefCell<Option<(u32, Box<[u8]>)>>,
     /// Woken when the outbox gets a delta; shared with other tellers.
     pub(super) wake: Rc<Notify>,
+    /// Where the lanes find each delta made, to stamp their batches for
+    /// the servers in these slots.
+    stamps: Option<(Arc<Marks>, Range<u16>)>,
 }
 
 impl Told {
@@ -52,6 +57,16 @@ impl Told {
             outbox: RefCell::default(),
             pinned: RefCell::default(),
             wake,
+            stamps: None,
+        }
+    }
+
+    /// The teller, whose deltas the lanes stamp their batches for the
+    /// servers in `slots` with, through `marks`.
+    pub(super) fn stamping(self, marks: Arc<Marks>, slots: Range<u16>) -> Told {
+        Told {
+            stamps: Some((marks, slots)),
+            ..self
         }
     }
 
@@ -117,6 +132,9 @@ impl Told {
     fn delta(&self, interest: Interest<'_>) {
         let seq = self.seq.get() + 1;
         self.seq.set(seq);
+        if let Some((marks, slots)) = &self.stamps {
+            marks.made(slots.clone(), seq);
+        }
         let mut out = Vec::new();
         Control::Delta {
             epoch: self.epoch,

@@ -497,6 +497,7 @@ fn clients_hear_where_the_clients_of_the_others_connect() {
         (Some(2), Some(2))
     );
     assert_eq!(varz["cluster"]["name"], "c");
+    assert_eq!(info["cluster"], "c", "INFO names the cluster");
 }
 
 #[test]
@@ -1050,4 +1051,8 @@ fn a_route_shows_in_routez_with_the_fields_of_nats_server() {
         (subsz["num_subscriptions"].as_u64(), subsz["total"].as_u64()),
         (Some(2), Some(2))
     );
+    // /varz counts them as /subsz does.
+    for s in &servers {
+        assert_eq!(get(s, "/varz")["subscriptions"], 2);
+    }
 }

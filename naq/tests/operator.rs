@@ -1011,7 +1011,58 @@ fn a_jwt_user_asks_who_it_is_as_of_nats_server() {
         );
         seen.push(answer["data"].clone());
     }
+    // nats-server lists permissions in the order of its sublist, which
+    // varies: compared unordered.
+    for d in &mut seen {
+        for kind in ["publish", "subscribe"] {
+            for rule in ["allow", "deny"] {
+                let at = format!("/permissions/{kind}/{rule}");
+                if let Some(Value::Array(list)) = d.pointer_mut(&at) {
+                    list.sort_by_key(ToString::to_string);
+                }
+            }
+        }
+    }
     if let [naq, go] = &seen[..] {
         assert_eq!(naq, go);
     }
+}
+
+#[test]
+fn a_reload_in_operator_mode_keeps_the_trust_and_its_users() {
+    let w = World::new();
+    let mut opts: Options = w.conf().parse().unwrap();
+    opts.host = "127.0.0.1".into();
+    opts.port = 0;
+    opts.lanes = 2;
+    let t = Target::Naq(Server::start(&opts).unwrap());
+    let u = KeyPair::new_user();
+    let jwt = user(&w.a, &u, &json!({}), &json!({}));
+    let mut client = Client::login(&t, Some(&u), &jwt, "");
+    logged_in(&mut client, "naq", &w.a.public_key(), 1 << 20);
+    let Target::Naq(server) = &t else {
+        unreachable!()
+    };
+    let mut timed = opts.clone();
+    timed.auth_timeout = Duration::from_secs(3);
+    server.reload_with(move || Ok(timed.clone()));
+    server.reload().unwrap();
+    client.send("PING\r\n");
+    assert_eq!(client.line(), "PONG", "the JWT user stays");
+    let fresh = KeyPair::new_user();
+    let jwt = user(&w.a, &fresh, &json!({}), &json!({}));
+    logged_in(
+        &mut Client::login(&t, Some(&fresh), &jwt, ""),
+        "naq",
+        &w.a.public_key(),
+        1 << 20,
+    );
+    let mut other = opts.clone();
+    other.server_name = "zed".into();
+    server.reload_with(move || Ok(other.clone()));
+    let e = server.reload().unwrap_err().to_string();
+    assert!(
+        e.starts_with("config reload not supported for ServerName"),
+        "{e}"
+    );
 }

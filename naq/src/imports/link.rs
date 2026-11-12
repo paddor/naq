@@ -10,11 +10,16 @@ use crate::{ExportKind, ImportKind, Options, ResponseType, ServiceExport};
 /// The imports of every account, by account id: `$G` first, then those of
 /// the options in their order.
 pub(crate) fn link(opts: &Options) -> Result<Box<[Imports]>, String> {
-    let all_names = crate::auth::accounts(opts);
+    link_in(opts, &crate::auth::accounts(opts))
+}
+
+/// The imports of the accounts `all_names`, the server's by id, as `opts`
+/// define them.
+pub(crate) fn link_in(opts: &Options, all_names: &[String]) -> Result<Box<[Imports]>, String> {
     let names: Vec<&str> = all_names.iter().map(String::as_str).collect();
     let all = names.iter().map(|_| Imports::default()).collect();
-    let mut defs = defs::of(opts, &all_names);
-    let system = crate::auth::system(opts, &all_names);
+    let mut defs = defs::of(opts, all_names);
+    let system = crate::auth::system(opts, all_names);
     if let Some(s) = system {
         super::system::add(&mut defs, s as usize);
     }

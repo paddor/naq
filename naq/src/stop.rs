@@ -26,7 +26,7 @@ const TICK: Duration = Duration::from_millis(5);
 ///
 /// Called from within an async runtime.
 pub(crate) fn server(shared: &Shared) {
-    crate::sys::last_word(shared);
+    crate::sys::last_word(shared, crate::sys::Word::Shutdown);
     shared.log.info(format_args!("Initiating Shutdown..."));
     // Release: a loop that sees it also sees the log line above.
     shared.stopping.store(true, Ordering::Release);

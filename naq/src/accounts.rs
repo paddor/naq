@@ -1,6 +1,6 @@
 //! The accounts of a server, by id: those of its options first, then those
-//! a resolver adds while the server runs. Ids are never reused, and an
-//! account, once added, stays where it is: readers hold no lock.
+//! a resolver or a reload adds while the server runs. Ids are never reused,
+//! and an account, once added, stays where it is: readers hold no lock.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -18,7 +18,7 @@ pub(crate) const GLOBAL: u32 = 0;
 /// Accounts in one chunk: ids share a chunk by all but their low 8 bits.
 pub(crate) const CHUNK: usize = 256;
 
-/// Accounts a server may have at most, once they can be added.
+/// Accounts a server may have at most.
 const MOST: usize = 1 << 20;
 
 /// The id of account `id` within its chunk, and the chunk's place.
@@ -30,12 +30,6 @@ pub(crate) const fn place(id: u32) -> (usize, usize) {
 /// Chunks for `n` accounts.
 pub(crate) const fn chunks(n: usize) -> usize {
     n.div_ceil(CHUNK)
-}
-
-/// Chunks for the accounts a server may have: `n`, or the most, if more
-/// can be added.
-pub(crate) const fn room(n: usize, growing: bool) -> usize {
-    if growing { chunks(MOST) } else { chunks(n) }
 }
 
 /// One chunk of accounts: `CHUNK` of them.
@@ -50,7 +44,7 @@ pub(crate) struct Accounts {
     ids: RwLock<FxHashMap<Box<str>, u32>>,
     /// Accounts added so far.
     len: AtomicU32,
-    /// More may be added than those it started with.
+    /// A resolver adds accounts as clients and other servers name them.
     growing: bool,
 }
 
@@ -143,8 +137,9 @@ impl Account {
 }
 
 impl Accounts {
-    /// Accounts `names`, by id, with `imports` each, and room for more if
-    /// `growing`. Each gets a reply prefix from `random`.
+    /// Accounts `names`, by id, with `imports` each, and room for the most
+    /// a server may have; more come from a resolver if `growing`. Each
+    /// gets a reply prefix from `random`.
     pub(crate) fn new(
         names: &[String],
         imports: impl IntoIterator<Item = Imports>,
@@ -152,9 +147,7 @@ impl Accounts {
         mut random: impl FnMut() -> Responses,
     ) -> Accounts {
         let all = Accounts {
-            chunks: (0..room(names.len(), growing))
-                .map(|_| OnceLock::new())
-                .collect(),
+            chunks: (0..chunks(MOST)).map(|_| OnceLock::new()).collect(),
             ids: RwLock::default(),
             len: AtomicU32::new(0),
             growing,

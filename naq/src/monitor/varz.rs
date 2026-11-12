@@ -8,6 +8,7 @@ use serde::Serialize;
 use super::http::Response;
 use super::json::Ordered;
 use super::{ask_all, pretty};
+use crate::Options;
 use crate::lane::Lane;
 use crate::server::Shared;
 use crate::stats::Totals;
@@ -73,7 +74,7 @@ struct Varz<'a> {
     counts: Counts,
     http_req_stats: BTreeMap<&'static str, u64>,
     config_load_time: String,
-    config_digest: &'a str,
+    config_digest: String,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     tags: &'a [String],
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -127,7 +128,7 @@ pub(super) struct Counts {
     pub(super) slow_consumers: u64,
     pub(super) stale_connections: u64,
     pub(super) stalled_clients: u64,
-    pub(super) subscriptions: usize,
+    pub(super) subscriptions: u64,
 }
 
 /// `cluster` of `/varz`.
@@ -256,20 +257,15 @@ struct DiskIo {
 /// What a lane counts for `/varz`.
 #[derive(Debug, Default)]
 pub(super) struct OnLane {
-    subscriptions: usize,
+    subscriptions: u64,
     leafs: usize,
     routes: usize,
 }
 
-/// The counts of `lane`: the subscriptions of its clients, its links to
-/// Go hubs, and on lane 0, the naq links and routes that are up.
+/// The counts of `lane`: its subscriptions, as `/subsz` counts them, its
+/// links to Go hubs, and on lane 0, the naq links and routes that are up.
 pub(super) fn on_lane(lane: &Lane) -> OnLane {
-    let subscriptions = lane
-        .clients
-        .borrow()
-        .values()
-        .map(|c| c.subs.borrow().len())
-        .sum();
+    let subscriptions = super::subsz::on_lane(lane);
     let mut leafs = lane.links.borrow().len();
     let mut routes = 0;
     if let Some(mesh) = lane.mesh.borrow().as_ref() {
@@ -291,25 +287,26 @@ pub(super) fn on_lane(lane: &Lane) -> OnLane {
 /// `/varz`.
 pub(super) async fn answer(shared: &Shared) -> Response {
     let lanes = ask_all(shared, on_lane).await;
-    pretty(&varz(shared, &lanes))
+    pretty(&varz(shared, &shared.opts(), &lanes))
 }
 
-fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
-    let o = &s.opts;
+fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[OnLane]) -> Varz<'a> {
     let now = SystemTime::now();
     let (mem, cpu) = usage(&s.monitor.cpu);
-    let tls = s.tls.as_ref();
+    let loaded = s.monitor.loaded();
+    let tls = s.tls.get();
+    let tls = tls.as_deref();
     Varz {
         server_id: &s.server_id,
         server_name: Some(o.server_name.as_str())
             .filter(|n| !n.is_empty())
             .unwrap_or(&s.server_id),
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::server::NATS_VERSION,
         proto: 1,
         go: "",
         host: &o.host,
         port: s.addr.port(),
-        auth_required: s.auth.is_some(),
+        auth_required: s.logins().auth.is_some(),
         tls_required: tls.is_some(),
         tls_verify: tls.is_some_and(|t| t.verify),
         connect_urls: connect_urls(s),
@@ -324,11 +321,11 @@ fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
         max_control_line: o.max_control_line,
         max_payload: o.max_payload,
         max_pending: o.max_pending,
-        cluster: cluster(s),
+        cluster: cluster(s, o),
         gateway: Empty {},
-        leaf: leaf(s),
+        leaf: leaf(s, o),
         mqtt: Empty {},
-        websocket: websocket(s),
+        websocket: websocket(s, o),
         jetstream: Empty {},
         tls_timeout: o.tls.as_ref().map_or(2.0, |t| t.timeout.as_secs_f64()),
         write_deadline: nanos(o.write_deadline),
@@ -341,8 +338,8 @@ fn varz<'a>(s: &'a Shared, lanes: &[OnLane]) -> Varz<'a> {
         cpu,
         counts: counts(s, lanes),
         http_req_stats: s.monitor.stats(),
-        config_load_time: rfc3339_nano(s.monitor.loaded),
-        config_digest: &s.monitor.digest,
+        config_load_time: rfc3339_nano(loaded.at),
+        config_digest: loaded.digest,
         tags: &o.server_tags,
         metadata: &o.server_metadata,
         operators: Operators::of(&o.operators),
@@ -385,7 +382,7 @@ pub(super) fn counts(s: &Shared, lanes: &[OnLane]) -> Counts {
         slow_consumers: e.slow_clients.get() + e.slow_leafs.get(),
         stale_connections: e.stale_clients.get(),
         stalled_clients: e.stalls.get(),
-        subscriptions: lanes.iter().map(|l| l.subscriptions).sum(),
+        subscriptions: lanes.iter().map(|l| l.subscriptions).sum::<u64>() + super::subsz::extras(s),
     }
 }
 
@@ -405,8 +402,8 @@ fn connect_urls(s: &Shared) -> Vec<String> {
         .collect()
 }
 
-fn cluster(s: &Shared) -> Cluster<'_> {
-    let Some(c) = &s.opts.cluster else {
+fn cluster<'a>(s: &Shared, o: &'a Options) -> Cluster<'a> {
+    let Some(c) = &o.cluster else {
         return Cluster::default();
     };
     Cluster {
@@ -424,8 +421,7 @@ fn cluster(s: &Shared) -> Cluster<'_> {
     }
 }
 
-fn leaf(s: &Shared) -> Leaf<'_> {
-    let o = &s.opts;
+fn leaf<'a>(s: &Shared, o: &'a Options) -> Leaf<'a> {
     let mut l = Leaf::default();
     if let Some(n) = &o.leafnodes {
         l.host = &n.host;
@@ -454,8 +450,8 @@ fn leaf(s: &Shared) -> Leaf<'_> {
     l
 }
 
-fn websocket(s: &Shared) -> Websocket<'_> {
-    let (Some(w), Some(door)) = (&s.opts.websocket, &s.ws) else {
+fn websocket<'a>(s: &'a Shared, o: &'a Options) -> Websocket<'a> {
+    let (Some(w), Some(door)) = (&o.websocket, &s.ws) else {
         return Websocket::default();
     };
     let default = crate::Websocket::default().handshake_timeout;
@@ -469,11 +465,7 @@ fn websocket(s: &Shared) -> Websocket<'_> {
         same_origin: w.same_origin,
         allowed_origins: &w.allowed_origins,
         compression: w.compression,
-        tls_cert_not_after: door
-            .tls
-            .as_ref()
-            .and_then(|t| t.not_after)
-            .map(rfc3339_nano),
+        tls_cert_not_after: door.tls.get().and_then(|t| t.not_after).map(rfc3339_nano),
     }
 }
 

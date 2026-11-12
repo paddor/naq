@@ -31,8 +31,9 @@ Notable changes to naq. The format follows
   once their lane delivered what was sent to it, and get a few seconds to
   write what is left.
 - `naq`: `Signals::catch` and `Server::wait_for_signals`, caught before
-  the server starts, as by `nats-server`: `INT`, `TERM` and `USR2` shut the
-  server down, `USR1` opens the log file again, `HUP` is logged.
+  the server starts, as by `nats-server`: `INT` and `TERM` shut the server
+  down, `USR2` puts it in lame duck mode first, `USR1` opens the log file
+  again, `HUP` reloads the configuration.
 - `naq`: `Options::pid_file` (`pid_file`, `-P`) and
   `Options::ports_file_dir` (`ports_file_dir`, `--ports_file_dir`): the
   process ID, and the URLs the server listens at, in a file removed as it
@@ -107,6 +108,49 @@ Notable changes to naq. The format follows
   subscribers of a subject, or of a queue group on it, in the account that
   asks, on every server with connections of the account. The servers ask
   each other on `$SYS.REQ.ACCOUNT.NSUBS`.
+- `naq`: lame duck mode, as `nats-server` has it:
+  `Server::lame_duck_shutdown`, `USR2` and `--signal ldm`, timed by
+  `Options::lame_duck_duration` and `Options::lame_duck_grace_period`
+  (`lame_duck_duration`, `lame_duck_grace_period`). The server takes no
+  more clients, says `LAMEDUCK` on `$SYS` as its last word, sends its
+  clients an `INFO` with `ldm`, and has the other servers of its cluster
+  leave it out of their clients' `connect_urls`. After the grace period
+  it closes its clients and links to hubs one by one, spread over the
+  rest of the duration, then shuts down. Links to hubs dial no more, and
+  a naq hub links no new leafs.
+- `naq`: `$SYS.REQ.SERVER.<id>.LDM`: the `INFO` of lame duck mode to one
+  client.
+- `naq`: clients that take an `INFO` at any time get one as the client
+  URLs of the cluster change, as from `nats-server`.
+- `naq`: config reload, as in `nats-server`: `Server::reload`, `HUP`,
+  `--signal reload` and `$SYS.REQ.SERVER.<id>.RELOAD`. The options are
+  read again and taken whole, or refused at the first change the server
+  cannot take, with Go's texts (`Error::Reload`); each change is logged
+  as Go logs it, and `/varz` shows the new options and
+  `config_load_time`. Reloaded: the log's levels, format and sink,
+  `max_traced_msg_len`, `max_payload` and `max_control_line` (live
+  clients at once), `ping_interval` and `ping_max` (live clients from
+  their next `PING`), `write_deadline`, `server_tags` and
+  `server_metadata` (with a `STATSZ`), the pid file and the ports file.
+  `Server::reload_with` reads the options another way; the `naq` binary
+  reads its flags again over the file.
+- `naq`: a reload takes users, NKeys, the single user, the token,
+  permissions, the login timeout, accounts it adds and their connection
+  limits, and the removal of the `no_auth_user` with its user. Every
+  client is checked again, as by `nats-server`: one whose user went or
+  moved to another account is closed as `Client Closed`, one whose
+  password no longer holds gets `Authorization Violation`, and the
+  subscriptions its permissions no longer allow end with an `-ERR` and a
+  log line. Every server has room for accounts added while it runs.
+- `naq`: a reload takes the TLS of clients for those that come next, as
+  `nats-server` does: its certificates when their files change,
+  `timeout`, `handshake_first` and its fallback, TLS turned on or off.
+  WebSocket clients and the HTTPS monitoring port take new certificates
+  too.
+- `naq`: a reload adds and removes leaf node remotes to `nats-server`
+  hubs, as `nats-server` does: the links of those removed close as
+  `Client Closed` and dial no more, those added dial at once, and those
+  kept take their new TLS at their next dial.
 
 ### Changed
 
@@ -118,6 +162,14 @@ Notable changes to naq. The format follows
 - `naq`: in operator mode, the system account is the one named, by
   `system_account` or the operator JWT; without one there is none, as in
   `nats-server`.
+- `naq`: the server tells clients, tools, `nats-server` hubs and auth
+  callouts it is version `2.15.2`, the `nats-server` version it matches
+  (INFO, `/varz`, `$SYS` replies, leaf `CONNECT`): they gate features on
+  it, such as `nats account info`, which asks `USER.INFO` from 2.10.0 on.
+  naq's own version is in its banner and `naq --version`.
+- `naq-proto`: peer wire version 2. A `Batch` head carries the sender's
+  `epoch` and its last delta `seq` for the receiver, which `peer::stamp`
+  writes. naq servers of version 1 do not link with it.
 
 ### Fixed
 
@@ -131,6 +183,19 @@ Notable changes to naq. The format follows
 - `naq`: plain subscriptions get a message from another server of the
   cluster, or from a naq hub or leaf, once, not twice, where a queue group
   of theirs matches it too and gets its pick there.
+- `naq`: `/varz` and `STATSZ` count the subscriptions `/subsz` counts,
+  those of other servers and links and the imports of `$SYS` too, as
+  `nats-server` does; they counted those of clients alone.
+- `naq`: the round trip in `$SYS` connection events drops its
+  nanoseconds below a millisecond, as in `nats-server`.
+- `naq`: `INFO` names the cluster, as `nats-server`'s does.
+- `naq` binary: `--routes` takes effect before `--cluster` too, and
+  `--cluster_name` alone makes no cluster, as in `nats-server`.
+- `naq`: interest reaches the other servers of a cluster, and naq hubs
+  and leafs, before the messages sent after it, as on a `nats-server`
+  route. A request sent right after the subscription to its inbox gets
+  the answers of the other servers: `nats server info <name>` and
+  `nats server request ...` of natscli got some or none.
 
 ## [0.1.0] - 2026-11-05
 

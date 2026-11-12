@@ -187,8 +187,17 @@ async fn receive_hub(lane: Rc<Lane>, dealer: Socket, s: u16) {
 /// Routes batch `chunk` from `from` on `lane`, and hands on what is for
 /// its other lanes.
 async fn take(lane: &Lane, out: &mut Outs, chunk: Bytes, from: From) {
-    let mark = lane.shared.opts.max_pending / 4 * 3;
-    let stalled = route(lane, out, &chunk, from);
+    let mark = lane.shared.max_pending / 4 * 3;
+    let Ok(b) = peer::Batch::parse(&chunk) else {
+        return;
+    };
+    // The interest it follows first, as one route carries both in order.
+    let slots = match from {
+        From::Route => 0..lane.slots.routes(),
+        From::Hub(s) | From::Leaf(s) => s..s + 1,
+    };
+    super::follow(lane, slots, b.epoch, b.seq).await;
+    let stalled = route(lane, out, &chunk, &b, from);
     lane.flush();
     lane.expire();
     let source = match from {
@@ -206,12 +215,17 @@ async fn take(lane: &Lane, out: &mut Outs, chunk: Bytes, from: From) {
     }
 }
 
-/// Routes the records of the batch in `chunk`, from `from`. Returns a
+/// Routes the records of batch `b` in `chunk`, from `from`. Returns a
 /// subscriber past the stall mark, if one.
-fn route(lane: &Lane, out: &mut Outs, chunk: &[u8], from: From) -> Option<Rc<Client>> {
-    let b = peer::Batch::parse(chunk).ok()?;
+fn route(
+    lane: &Lane,
+    out: &mut Outs,
+    chunk: &[u8],
+    b: &peer::Batch<'_>,
+    from: From,
+) -> Option<Rc<Client>> {
     let slots = &lane.slots;
-    let skips = begin(lane, out, &b, from)?;
+    let skips = begin(lane, out, b, from)?;
     let index = lane.index(out.account).borrow();
     // The naq hub or leaf it came from, and that one if its link may hold
     // some back.

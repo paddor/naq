@@ -247,13 +247,15 @@ impl ServerBatch {
         }
     }
 
-    /// The batch so far, if any. Its buffer goes back to `spent`, to be
-    /// filled again once the batch is sent and dropped.
-    fn take(&mut self, spent: &SpentReads) -> Option<Bytes> {
+    /// The batch so far, if any, stamped with start `epoch` and delta
+    /// `seq`. Its buffer goes back to `spent`, to be filled again once the
+    /// batch is sent and dropped.
+    fn take(&mut self, spent: &SpentReads, epoch: u64, seq: u64) -> Option<Bytes> {
         if self.buf.is_empty() {
             return None;
         }
         let mut buf = std::mem::take(&mut self.buf);
+        peer::stamp(&mut buf, epoch, seq);
         self.room = buf.len() + buf.len() / 4;
         (self.msgs, self.bytes) = (0, 0);
         let batch = buf.split().freeze();
@@ -314,7 +316,7 @@ impl Out {
 
 /// Delivers what other lanes forward, to this lane's subscribers.
 pub(super) async fn run(lane: Rc<Lane>, rx: Receiver<Batch>) {
-    let mark = lane.shared.opts.max_pending / 4 * 3;
+    let mark = lane.shared.max_pending / 4 * 3;
     let mut batches = Vec::new();
     while rx.recv_all(&mut batches).await {
         let mut stalled = None;
@@ -414,9 +416,15 @@ impl Lane {
     /// goes back to the lane's spent batches, to be filled again once the
     /// batch is sent.
     pub(crate) async fn ship_servers(&self, out: &mut Outs) {
+        if out.servers.iter().all(|b| b.buf.is_empty()) {
+            return;
+        }
+        self.fence_lane_0().await;
         for (s, b) in out.servers.iter_mut().enumerate() {
             let (msgs, bytes) = (b.msgs, b.bytes);
-            let Some(batch) = b.take(&self.batches) else {
+            // Slots are below 64: they fit.
+            let (epoch, seq) = self.shared.marks.stamp(s as u16);
+            let Some(batch) = b.take(&self.batches, epoch, seq) else {
                 continue;
             };
             // Slots are below 64: they fit.
@@ -524,10 +532,10 @@ mod tests {
     fn a_batch_for_a_server_fills_its_buffer_again_once_sent() {
         let spent = SpentReads::default();
         let mut b = ServerBatch::default();
-        assert!(b.take(&spent).is_none());
+        assert!(b.take(&spent, 0, 0).is_none());
         b.open(&spent);
         b.buf.resize(20_000, 1);
-        let first = b.take(&spent).unwrap();
+        let first = b.take(&spent, 0, 0).unwrap();
         let at = first.as_ptr();
         assert_eq!((first.len(), b.room, b.buf.capacity()), (20_000, 25_000, 0));
         // In flight, its buffer is not filled again.
@@ -535,11 +543,15 @@ mod tests {
         assert_ne!(b.buf.as_ptr(), at);
         assert!(b.buf.capacity() >= 25_000);
         b.buf.extend_from_slice(&[2; 100]);
-        let second = b.take(&spent).unwrap();
+        let second = b.take(&spent, 0, 0).unwrap();
         assert_eq!((&second[..], b.room), (&[2; 100][..], 125));
         drop(first);
         b.open(&spent);
         assert_eq!(b.buf.as_ptr(), at, "sent and dropped, it is filled again");
         assert!(b.buf.capacity() >= SERVER_ROOM);
+        peer::batch(&mut b.buf, None, b"$G");
+        let stamped = b.take(&spent, 7, 9).unwrap();
+        let head = peer::Batch::parse(&stamped).unwrap();
+        assert_eq!((head.epoch, head.seq), (7, 9), "stamped as it goes");
     }
 }

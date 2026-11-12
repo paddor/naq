@@ -112,20 +112,29 @@ impl Conn {
 
     /// Logs why the connection ends.
     #[cold]
+    /// Whom the client logged in as, as `nats-server` names it.
+    pub(super) fn auth_user(&self) -> String {
+        let meta = self.client.meta.borrow();
+        let user = meta.user.as_deref().unwrap_or_default();
+        match meta.how {
+            Some(How::User) => format!("User {user:?}"),
+            Some(How::Nkey) => format!("Nkey {user:?}"),
+            Some(How::Jwt) => format!("JWT User {user:?}"),
+            Some(How::Token) => "Token \"[REDACTED]\"".to_owned(),
+            None => "User \"N/A\"".to_owned(),
+        }
+    }
+
     pub(super) fn log_why(&self, close: Close) {
-        let o = &self.lane.shared.opts;
+        let o = &self.lane.shared.opts();
         match close {
             Close::Auth => {
-                let meta = self.client.meta.borrow();
-                let user = meta.user.as_deref().unwrap_or_default();
-                let who = match meta.how {
-                    Some(How::User) => format!(" - User {user:?}"),
-                    Some(How::Nkey) => format!(" - Nkey {user:?}"),
-                    Some(How::Jwt) => format!(" - JWT User {user:?}"),
-                    Some(How::Token) => " - Token \"[REDACTED]\"".to_owned(),
-                    None => String::new(),
+                let named = self.client.meta.borrow().how.is_some();
+                let who = if named {
+                    format!(" - {}", self.auth_user())
+                } else {
+                    String::new()
                 };
-                drop(meta);
                 self.log_error(format_args!("authentication error{who}"));
             }
             Close::AuthTimeout => self.log_debug(format_args!("Authentication Timeout")),

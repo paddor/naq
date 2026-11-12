@@ -8,7 +8,7 @@ use super::connz::SubDetail;
 use super::http::Response;
 use super::query::{Query, Refused};
 use super::{Counted, ask_all, now, pretty, text};
-use crate::index::{Entry, Group, Interest};
+use crate::index::{Entry, Group, Index, Interest};
 use crate::lane::Lane;
 use crate::server::Shared;
 
@@ -56,24 +56,41 @@ pub(super) fn found(lane: &Lane, accounts: &[u32], list: bool, test: &[u8]) -> F
         let (inserts, removes) = index.changes();
         f.inserts += inserts;
         f.removes += removes;
+        f.subs += held(lane, &index);
+        if !list {
+            continue;
+        }
         index.each(|filter, i| {
-            let listed = list && (test.is_empty() || subject::matches(filter, test));
+            if !test.is_empty() && !subject::matches(filter, test) {
+                return;
+            }
             for (queue, g) in groups(i) {
-                let others = if lane.id == 0 {
-                    g.servers.len() + g.peers.len()
-                } else {
-                    0
-                };
-                // Lengths fit.
-                f.subs += (g.local.len() + others) as u64;
-                if listed {
-                    f.list
-                        .extend(g.local.iter().map(|e| listed_of(lane, filter, queue, e)));
-                }
+                f.list
+                    .extend(g.local.iter().map(|e| listed_of(lane, filter, queue, e)));
             }
         });
     }
     f
+}
+
+/// The subscriptions `index` of `lane` holds: its clients', and on lane 0
+/// those of other servers and links, which every lane has.
+const fn held(lane: &Lane, index: &Index) -> u64 {
+    let (own, others) = index.held();
+    own + if lane.id == 0 { others } else { 0 }
+}
+
+/// The subscriptions of every account on `lane`, as `/subsz` counts them.
+pub(super) fn on_lane(lane: &Lane) -> u64 {
+    (0..lane.shared.accounts.len())
+        .map(|a| held(lane, &lane.index(a).borrow()))
+        .sum()
+}
+
+/// The subscriptions of every account that `nats-server` has and naq's
+/// index does not.
+pub(super) fn extras(shared: &Shared) -> u64 {
+    (0..shared.accounts.len()).map(|a| extra(shared, a)).sum()
 }
 
 /// Subscription `e` of `lane` to `filter`, in `queue` if given, as listed.

@@ -25,6 +25,8 @@ pub(super) struct Me {
     cluster: String,
     /// Its `Hello`, encoded.
     hello: Bytes,
+    /// Its `Hello` in lame duck mode, encoded: it names no client URLs.
+    lame: Bytes,
 }
 
 impl Me {
@@ -41,24 +43,28 @@ impl Me {
         let data = data.join(" ");
         let urls = shared.addr.to_string();
         let leaf_urls = leafnodes.map(|a| a.to_string()).unwrap_or_default();
-        let mut hello = Vec::new();
-        Control::Hello(Hello {
-            role: Role::Route,
-            account: b"",
-            epoch,
-            server_id: shared.server_id.as_bytes(),
-            name: shared.opts.server_name.as_bytes(),
-            cluster: c.name.as_bytes(),
-            data: data.as_bytes(),
-            client_urls: urls.as_bytes(),
-            leaf_urls: leaf_urls.as_bytes(),
-            nonce: b"",
-        })
-        .encode(&mut hello);
+        let hello = |client_urls: &[u8]| {
+            let mut hello = Vec::new();
+            Control::Hello(Hello {
+                role: Role::Route,
+                account: b"",
+                epoch,
+                server_id: shared.server_id.as_bytes(),
+                name: shared.opts().server_name.as_bytes(),
+                cluster: c.name.as_bytes(),
+                data: data.as_bytes(),
+                client_urls,
+                leaf_urls: leaf_urls.as_bytes(),
+                nonce: b"",
+            })
+            .encode(&mut hello);
+            Bytes::from(hello)
+        };
         Me {
             id: Bytes::copy_from_slice(shared.server_id.as_bytes()),
             cluster: c.name.clone(),
-            hello: hello.into(),
+            hello: hello(urls.as_bytes()),
+            lame: hello(b""),
         }
     }
 }
@@ -88,7 +94,8 @@ pub(super) async fn serve(
     for i in 0..c.routes.len() {
         tokio::task::spawn_local(dial(shared.clone(), mesh.clone(), me.clone(), i));
     }
-    super::tell::answer(router, &me.cluster, &me.hello, mesh).await;
+    let hellos = [me.hello.clone(), me.lame.clone()];
+    super::tell::answer(router, &me.cluster, &hellos, mesh).await;
 }
 
 /// Dials route `i` of `mesh` and keeps track of the server there: says
@@ -133,6 +140,8 @@ async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, me: Rc<Me>, i: usize) {
                     continue;
                 }
                 let lost = mesh.peers.borrow_mut()[i].heard.take(&c, &mut apply);
+                // Routes are few: their count fits.
+                mesh.taking.heard(i as u16, mesh.peers.borrow()[i].heard.taken());
                 if lost {
                     let mut out = Vec::new();
                     Control::Resync.encode(&mut out);
@@ -244,7 +253,9 @@ fn met(shared: &Shared, mesh: &Mesh, i: usize, h: &Hello<'_>, me: &Me) -> bool {
 }
 
 /// Notes where the clients of the servers that are up connect, for the
-/// `INFO` of this server's clients.
+/// `INFO` of this server's clients. If that changed, the clients that
+/// take an `INFO` at any time get one, as from `nats-server`: those not
+/// over WebSocket, whose URLs the servers do not tell each other.
 fn connect_urls(shared: &Shared, mesh: &Mesh) {
     let urls: Vec<String> = mesh
         .peers
@@ -253,11 +264,26 @@ fn connect_urls(shared: &Shared, mesh: &Mesh) {
         .filter(|p| p.up.is_some())
         .flat_map(|p| p.client_urls.iter().cloned())
         .collect();
-    // A poisoned lock still holds the list.
-    *shared
-        .connect_urls
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = urls;
+    {
+        // A poisoned lock still holds the list.
+        let mut known = shared
+            .connect_urls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *known == urls {
+            return;
+        }
+        *known = urls;
+    }
+    for lane in 0..shared.lanes.len() {
+        crate::monitor::on_lane(shared, lane, |lane| {
+            for c in lane.clients.borrow().values() {
+                if !c.meta.borrow().websocket {
+                    c.inform(false);
+                }
+            }
+        });
+    }
 }
 
 /// Client URL `url`, `host:port`, of a server dialed at `host`: on that

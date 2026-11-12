@@ -89,6 +89,10 @@ fn from_text(text: &str, file: Option<&Path>) -> Result<Options, Error> {
         at: whole(),
         reason,
     })?;
+    crate::lame::validate(&opts).map_err(|reason| Error::Config {
+        at: whole(),
+        reason,
+    })?;
     Ok(opts)
 }
 
@@ -149,6 +153,7 @@ fn apply(o: &mut Options, map: &Map) -> Result<(), Bad> {
                 o.no_auth_user = Some(string(item).ok_or_else(|| bad("expected a string"))?);
             }
             "pid_file" | "pidfile" | "ports_file_dir" => files(o, &key, item)?,
+            "lame_duck_duration" | "lame_duck_grace_period" => lame_duck(o, &key, item)?,
             _ => return Err(bad("not supported")),
         }
     }
@@ -268,6 +273,31 @@ fn files(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
         o.ports_file_dir = Some(path.into());
     } else {
         o.pid_file = Some(path.into());
+    }
+    Ok(())
+}
+
+/// `lame_duck_duration` and `lame_duck_grace_period`, checked as
+/// `nats-server` checks them. A grace period of 0 is the default.
+fn lame_duck(o: &mut Options, key: &str, item: &Item) -> Result<(), Bad> {
+    let (negative, d) = signed_duration(item).map_err(|e| (item.line, format!("{key}: {e}")))?;
+    if key == "lame_duck_duration" {
+        if negative || d < Duration::from_secs(30) {
+            let sign = if negative { "-" } else { "" };
+            let d = crate::times::go_duration(d);
+            return Err((
+                item.line,
+                format!("invalid lame_duck_duration of {sign}{d}, minimum is 30 seconds"),
+            ));
+        }
+        o.lame_duck_duration = d;
+    } else if negative && !d.is_zero() {
+        return Err((
+            item.line,
+            "invalid lame_duck_grace_period, needs to be positive".into(),
+        ));
+    } else if !d.is_zero() {
+        o.lame_duck_grace_period = d;
     }
     Ok(())
 }
@@ -392,6 +422,23 @@ pub(super) fn duration(item: &Item) -> Result<Duration, String> {
             .map(Duration::from_secs)
             .map_err(|_| "expected a duration".into()),
         Value::Str(s) => go_duration(s).ok_or_else(|| format!("bad duration {s:?}")),
+        _ => Err("expected a duration".into()),
+    }
+}
+
+/// A duration as [`duration`] reads it, which may be negative: whether it
+/// is, and its size.
+fn signed_duration(item: &Item) -> Result<(bool, Duration), String> {
+    match &item.value {
+        Value::Int(n) => Ok((*n < 0, Duration::from_secs(n.unsigned_abs()))),
+        Value::Str(s) => {
+            let (negative, rest) = s
+                .strip_prefix('-')
+                .map_or((false, s.as_str()), |r| (true, r));
+            go_duration(rest)
+                .map(|d| (negative, d))
+                .ok_or_else(|| format!("bad duration {s:?}"))
+        }
         _ => Err("expected a duration".into()),
     }
 }

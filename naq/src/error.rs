@@ -45,6 +45,10 @@ pub enum Error {
     /// The log file cannot be opened, or the syslog not reached.
     #[error("cannot log")]
     Log(#[source] io::Error),
+    /// A reload holds a change the running server cannot take, or cannot
+    /// read the options again: `nats-server`'s words.
+    #[error("{0}")]
+    Reload(String),
     /// A configuration does not parse, or holds what naq cannot use.
     #[error("{at}: {reason}")]
     Config {
@@ -53,6 +57,17 @@ pub enum Error {
         /// What is wrong.
         reason: String,
     },
+}
+
+/// `e` and its sources, on one line.
+pub(crate) fn chain(e: &dyn std::error::Error) -> String {
+    let mut msg = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        msg = format!("{msg}: {s}");
+        src = s.source();
+    }
+    msg
 }
 
 /// An engine error as an I/O error, so engine types stay private.

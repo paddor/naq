@@ -42,6 +42,11 @@ impl Heard {
         }
     }
 
+    /// Its start and the last delta applied, once its snapshot is in.
+    pub(super) fn taken(&self) -> Option<(u64, u64)> {
+        self.seq.map(|s| (self.epoch, s))
+    }
+
     /// Takes control message `c` of the other server, and calls `apply`
     /// with each change of its interest. Returns whether this lost track of
     /// it and must ask for a snapshot.

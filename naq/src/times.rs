@@ -96,6 +96,18 @@ pub(crate) fn uptime(up: Duration) -> String {
     out
 }
 
+/// Round trip `d` as `nats-server` reports it: to the microsecond between
+/// one and a thousand of them, else as it is.
+pub(crate) fn go_rtt(d: Duration) -> Duration {
+    let micros = Duration::from_micros(1)..Duration::from_millis(1);
+    if micros.contains(&d) && d != micros.start {
+        // Below a millisecond: fits.
+        Duration::from_micros(d.as_micros() as u64)
+    } else {
+        d
+    }
+}
+
 /// `d` as Go's `Duration.String` writes it: `0s`, `850ns`, `1.5us` with
 /// a micro sign for the `u`, `14.083277ms`, `2m3.5s`, `1h0m0s`.
 pub(crate) fn go_duration(d: Duration) -> String {
@@ -140,6 +152,15 @@ fn fraction(n: u128, per: u128, unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_trips_below_a_millisecond_drop_their_nanoseconds() {
+        let ns = Duration::from_nanos;
+        assert_eq!(go_rtt(ns(547_774)), ns(547_000));
+        assert_eq!(go_rtt(ns(1_271_087)), ns(1_271_087));
+        assert_eq!(go_rtt(ns(1_000)), ns(1_000));
+        assert_eq!(go_rtt(ns(999)), ns(999));
+    }
 
     #[test]
     fn times_are_written_as_go_writes_them() {

@@ -206,6 +206,20 @@ pub(crate) struct Lane {
     account_ids: RefCell<FxHashMap<Box<[u8]>, u32>>,
     /// Connections that closed and are still writing what was left.
     pub(crate) ending: Rc<Cell<usize>>,
+    /// The clients a reload waits for, until each checked itself again.
+    reloading: RefCell<Option<Reloading>>,
+    /// What this lane announced to lane 0, and knows of the interest of
+    /// other servers taken: its batches follow interest across the mesh.
+    pub(crate) marks: crate::mesh::OnLane,
+}
+
+/// Clients of a lane a reload waits for: `done` drops once all checked
+/// themselves again, or went.
+#[derive(Debug)]
+struct Reloading {
+    left: rustc_hash::FxHashSet<u64>,
+    // Held, not used: its receiver hears once it drops.
+    _done: std::sync::mpsc::Sender<()>,
 }
 
 /// A connection counted as ending on its lane, until dropped.
@@ -219,6 +233,30 @@ impl Drop for Ending {
 }
 
 impl Lane {
+    /// Has every client check itself again, as after a reload: `done`
+    /// drops once all did, or went. One reload at a time: a reload before
+    /// stopped waiting.
+    pub(crate) fn reload(&self, done: std::sync::mpsc::Sender<()>) {
+        let clients = self.clients.borrow();
+        for c in clients.values() {
+            c.refresh();
+        }
+        let left: rustc_hash::FxHashSet<u64> = clients.keys().copied().collect();
+        *self.reloading.borrow_mut() =
+            (!left.is_empty()).then_some(Reloading { left, _done: done });
+    }
+
+    /// Notes that client `id` checked itself again, or went.
+    pub(crate) fn refreshed(&self, id: u64) {
+        let mut r = self.reloading.borrow_mut();
+        if let Some(w) = r.as_mut()
+            && w.left.remove(&id)
+            && w.left.is_empty()
+        {
+            *r = None;
+        }
+    }
+
     /// Counts a connection as ending until the guard drops: a shutdown
     /// waits for it.
     pub(crate) fn ending(&self) -> Ending {
@@ -320,6 +358,9 @@ impl Lane {
     /// Tells every other lane that this one gained or lost a subscription
     /// to `subject` of `account`, in `queue` if given.
     pub(crate) fn announce(&self, account: u32, subject: &[u8], queue: Option<&[u8]>, add: bool) {
+        if add && self.id != 0 {
+            self.marks.announced();
+        }
         for (i, tx) in self.shared.lanes.iter().enumerate() {
             if i != self.id {
                 tx.control.push(Control::Interest {
@@ -335,6 +376,7 @@ impl Lane {
 
     /// Waits until every other lane applied what this one announced.
     pub(crate) async fn fence(&self) {
+        let unmade = self.marks.unmade();
         let mut answers = Vec::with_capacity(self.lanes());
         for (i, tx) in self.shared.lanes.iter().enumerate() {
             if i != self.id {
@@ -347,6 +389,22 @@ impl Lane {
             // An error means the lane stopped: nothing left to wait for.
             let _ = a.await;
         }
+        if let Some(upto) = unmade {
+            self.marks.fenced(upto);
+        }
+    }
+
+    /// Waits until lane 0 made deltas of all this lane announced, if it
+    /// may not have yet: the batches for other servers come after them.
+    pub(crate) async fn fence_lane_0(&self) {
+        let Some(upto) = self.marks.unmade() else {
+            return;
+        };
+        let (done, answer) = oneshot::channel();
+        self.shared.lanes[0].control.push(Control::Fence(done));
+        // An error means lane 0 stopped: nothing left to wait for.
+        let _ = answer.await;
+        self.marks.fenced(upto);
     }
 
     /// Puts the naq hub or leaf `linked` in slot `slot`; a leaf gets its
@@ -465,7 +523,7 @@ fn indexes() -> Indexes {
 pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
     let key = (shared.id, id);
     let servers = routes(&shared);
-    let hubs = crate::mesh::hubs(&shared.opts);
+    let hubs = crate::mesh::hubs(&shared.opts());
     let lane = Rc::new(Lane {
         id,
         first: Box::new(std::array::from_fn(|_| RefCell::default())),
@@ -492,6 +550,8 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         imported: Cell::new(false),
         account_ids: RefCell::default(),
         ending: Rc::default(),
+        reloading: RefCell::default(),
+        marks: crate::mesh::OnLane::default(),
     });
     crate::imports::service::install(&lane);
     if let Some(c) = &lane.shared.callouts {
@@ -515,6 +575,21 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
     tokio::task::spawn_local(data::run(lane, data));
 }
 
+/// Waits until every lane of `shared`'s server applied the controls handed
+/// to it before.
+pub(crate) async fn fence_all(shared: &Shared) {
+    let mut answers = Vec::with_capacity(shared.lanes.len());
+    for tx in &*shared.lanes {
+        let (done, answer) = oneshot::channel();
+        tx.control.push(Control::Fence(done));
+        answers.push(answer);
+    }
+    for a in answers {
+        // An error means the lane stopped: nothing left to wait for.
+        let _ = a.await;
+    }
+}
+
 /// The state of lane `index` of server `id`, on that lane's thread.
 pub(crate) fn get(id: u64, index: usize) -> Option<Rc<Lane>> {
     LANES.with(|l| l.borrow().get(&(id, index)).cloned())
@@ -530,5 +605,5 @@ fn seed() -> u64 {
 
 /// Routes of `shared`'s cluster.
 fn routes(shared: &Shared) -> usize {
-    shared.opts.cluster.as_ref().map_or(0, |c| c.routes.len())
+    shared.opts().cluster.as_ref().map_or(0, |c| c.routes.len())
 }

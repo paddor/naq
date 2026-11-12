@@ -29,15 +29,15 @@ pub(crate) struct ServerInfo<'a> {
 }
 
 impl<'a> ServerInfo<'a> {
-    /// `shared`'s server, sending a message now: the next in its count.
-    pub(crate) fn of(shared: &'a Shared) -> ServerInfo<'a> {
-        let o = &shared.opts;
+    /// `shared`'s server, with options `o`, sending a message now: the
+    /// next in its count.
+    pub(crate) fn of(shared: &'a Shared, o: &'a crate::Options) -> ServerInfo<'a> {
         ServerInfo {
-            name: name(shared),
+            name: name(shared, o),
             host: &o.host,
             id: &shared.server_id,
             cluster: o.cluster.as_ref().map_or("", |c| c.name.as_str()),
-            ver: env!("CARGO_PKG_VERSION"),
+            ver: crate::server::NATS_VERSION,
             tags: &o.server_tags,
             metadata: &o.server_metadata,
             jetstream: false,
@@ -49,10 +49,10 @@ impl<'a> ServerInfo<'a> {
     }
 }
 
-/// The name of `shared`'s server, as `nats-server` names itself: its ID
-/// when it has no name.
-pub(crate) fn name(shared: &Shared) -> &str {
-    let n = &shared.opts.server_name;
+/// The name of `shared`'s server with options `o`, as `nats-server` names
+/// itself: its ID when it has no name.
+pub(crate) fn name<'a>(shared: &'a Shared, o: &'a crate::Options) -> &'a str {
+    let n = &o.server_name;
     if n.is_empty() { &shared.server_id } else { n }
 }
 
@@ -74,7 +74,7 @@ impl ApiError {
 /// the server, `data` if there is any, then `error` if there is one.
 pub(crate) fn envelope(shared: &Shared, data: Option<&[u8]>, error: Option<&ApiError>) -> Vec<u8> {
     let mut b = b"{\"server\":".to_vec();
-    b.extend(json::compact(&ServerInfo::of(shared)));
+    b.extend(json::compact(&ServerInfo::of(shared, &shared.opts())));
     if let Some(d) = data {
         b.extend_from_slice(b",\"data\":");
         b.extend_from_slice(d);

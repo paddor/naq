@@ -1287,3 +1287,70 @@ fn a_side_with_plain_and_queue_interest_gets_a_message_once_for_each() {
         }
     }
 }
+
+#[test]
+fn a_hub_in_lame_duck_mode_links_no_new_leafs() {
+    let h = Server::start(&Options {
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            account: None,
+            ..Leafnodes::default()
+        }),
+        lame_duck_duration: Duration::from_secs(3),
+        lame_duck_grace_period: Duration::from_millis(1500),
+        ..base("hub")
+    })
+    .unwrap();
+    let (port, at) = (h.leafnode_addr().unwrap().port(), h.addr());
+    // A client keeps it in lame duck mode for the grace period.
+    let held = client(&h, "");
+    let done = std::thread::spawn(move || h.lame_duck_shutdown());
+    let deadline = Instant::now() + WAIT;
+    while TcpStream::connect(at).is_ok() {
+        assert!(Instant::now() < deadline, "still takes clients");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let l = leaf("leaf", port);
+    std::thread::sleep(Duration::from_millis(500));
+    let z = get(&l, "/leafz");
+    assert_eq!(z["leafnodes"], 0, "{z}");
+    drop(held);
+    done.join().unwrap();
+}
+
+#[test]
+fn a_hub_answers_a_request_whose_inbox_came_in_the_same_write() {
+    // The hub's system account answers at once, through the import of
+    // its services every account has; the leaf has none.
+    let h = Server::start(&Options {
+        no_system_account: false,
+        leafnodes: Some(Leafnodes {
+            host: "127.0.0.1".into(),
+            port: 0,
+            account: None,
+            ..Leafnodes::default()
+        }),
+        ..base("hub")
+    })
+    .unwrap();
+    let l = leaf("leaf", h.leafnode_addr().unwrap().port());
+    leafz(&h, |z| z["leafnodes"] == 1);
+    hears(&l, "$SYS.REQ.ACCOUNT.PING.STATZ");
+    let mut c = client(&l, "");
+    // The interest of the inbox reaches the hub before the request does.
+    for round in 1..=20 {
+        send(
+            &mut c,
+            &format!(
+                "SUB _I.{round} {round}\r\nPUB $SYS.REQ.ACCOUNT.PING.STATZ _I.{round} 0\r\n\r\n"
+            ),
+        );
+        let msg = line(&mut c);
+        assert!(
+            msg.starts_with(&format!("MSG _I.{round} {round} ")),
+            "round {round}: {msg}"
+        );
+        line(&mut c);
+    }
+}

@@ -61,7 +61,7 @@ pub(crate) fn decide(
     };
     let text = String::from_utf8(text).map_err(|_| "not a JWT".to_owned())?;
     let r = decode::<claims::AuthResponse>(&text).map_err(|e| e.to_string())?;
-    let trust = shared.auth.as_ref().and_then(crate::auth::Auth::trust);
+    let trust = shared.trust();
     holds(&r, ask, &shared.server_id, sealed, trust)?;
     let user = decode::<claims::User>(&r.nats.jwt).map_err(|e| e.to_string())?;
     if user.out_of_time(now()) {

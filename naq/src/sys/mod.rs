@@ -9,6 +9,7 @@ mod encode;
 mod events;
 mod kick;
 mod later;
+mod reload;
 mod remote;
 mod reply;
 mod send;
@@ -23,7 +24,7 @@ use serde_json::Value;
 
 pub(crate) use conns::changed as conns_changed;
 pub(crate) use events::{Of, closed, connected};
-pub(crate) use send::last_word;
+pub(crate) use send::{Word, last_word, statsz};
 pub(crate) use server::Z;
 
 use crate::imports::service::Tap;
@@ -78,8 +79,11 @@ pub(crate) enum Service {
     Server(Z),
     /// `$SYS.REQ.SERVER.PING`: `STATSZ` by its old subject.
     Ping,
-    /// `$SYS.REQ.SERVER.<id>.KICK`: a connection to close.
-    Kick,
+    /// `$SYS.REQ.SERVER.<id>.KICK` or `.LDM`: something to do to a
+    /// connection.
+    Conn(kick::Act),
+    /// `$SYS.REQ.SERVER.<id>.RELOAD`: a reload of the configuration.
+    Reload,
     /// A request about an account, for what its last token names.
     Account(account::X),
     /// `$SYS.REQ.ACCOUNT.PING.STATZ`: the statistics of every account.
@@ -163,6 +167,7 @@ pub(crate) fn install(lane: &Lane) {
     conns::install(&mut index, &shared.server_id);
     subscribers::install(&mut index, &shared.sys.tallies);
     kick::install(&mut index, &shared.server_id);
+    reload::install(&mut index, &shared.server_id);
     account::install(&mut index);
     if trust(shared).is_none() {
         return;
@@ -187,7 +192,7 @@ pub(crate) fn install(lane: &Lane) {
 
 /// The trust of `shared`'s server, in operator mode.
 fn trust(shared: &Shared) -> Option<&crate::jwt::trust::Trust> {
-    shared.auth.as_ref().and_then(crate::auth::Auth::trust)
+    shared.trust()
 }
 
 /// Answers request `m` for `service`, which came in the system account on
@@ -203,7 +208,8 @@ pub(crate) fn answer(
     match service {
         Service::Server(z) => server::take(lane, out, z, m),
         Service::Ping => server::take(lane, out, Z::Statsz, m),
-        Service::Kick => kick::take(lane, m),
+        Service::Conn(act) => kick::take(lane, act, m),
+        Service::Reload => reload::take(lane, m),
         Service::Account(x) => account::take(lane, Some(x), m),
         Service::AccountPing => account::take(lane, None, m),
         Service::UserInfo => account::user_info(lane, m, from),
@@ -240,7 +246,7 @@ fn respond(lane: &Lane, out: &mut Outs, reply: &[u8], answer: &Value) {
     let Some(sys) = shared.system else {
         return;
     };
-    let info = crate::monitor::json::compact(&reply::ServerInfo::of(shared));
+    let info = crate::monitor::json::compact(&reply::ServerInfo::of(shared, &shared.opts()));
     let mut payload = [&b"{\"server\":"[..], &info].concat();
     for key in ["data", "error"] {
         if let Some(v) = answer.get(key) {

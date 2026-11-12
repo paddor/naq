@@ -23,7 +23,7 @@ use crate::{Export, ExportKind, ResponseType, Sampling};
 
 /// The account of a JWT of `name`, if the server trusts one.
 fn jwt_of(shared: &Shared, name: &str) -> Option<Arc<JwtAccount>> {
-    shared.auth.as_ref()?.trust()?.claims_of(name)
+    shared.trust()?.claims_of(name)
 }
 
 /// Whether account `name` is in use as `nats-server` has accounts: one of
@@ -231,7 +231,7 @@ struct Accountz<'a> {
 /// server adds to it.
 fn def_of(shared: &Shared, id: u32, acc: &str, jwt: Option<&Arc<JwtAccount>>) -> Def {
     let def = jwt.map_or_else(
-        || defs::of(&shared.opts, &[acc.to_owned()]).pop(),
+        || defs::of(&shared.opts(), &[acc.to_owned()]).pop(),
         |j| Some(defs::of_jwt(acc, &j.claims.nats)),
     );
     let mut def = def.unwrap_or_default();

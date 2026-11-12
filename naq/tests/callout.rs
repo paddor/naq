@@ -206,7 +206,9 @@ impl Service {
         let mut c = Client::login_over(t, connect, tls);
         assert_eq!(c.outcome(), account, "the service logs in");
         c.send("SUB $SYS.REQ.USER.AUTH 1\r\nPING\r\n");
-        assert_eq!(c.line(), "PONG");
+        // An INFO may come first, as the cluster forms.
+        let pong = std::iter::repeat_with(|| c.line()).find(|l| !l.starts_with("INFO "));
+        assert_eq!(pong.as_deref(), Some("PONG"));
         std::thread::spawn(move || {
             while let Some((reply, headers, payload)) = next_msg(&mut c) {
                 let answer = self.answer(&headers, &payload);

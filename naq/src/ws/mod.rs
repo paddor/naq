@@ -27,7 +27,8 @@ use crate::{Websocket, tls};
 #[derive(Debug)]
 pub(crate) struct Door {
     pub(crate) opts: Websocket,
-    pub(crate) tls: Option<tls::Acceptor>,
+    /// Its TLS, if any: a reload may swap it, not take it away.
+    pub(crate) tls: tls::Current,
     /// Where it listens, as bound.
     pub(crate) addr: SocketAddr,
 }
@@ -95,7 +96,7 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
         facts: None,
         deadline,
     };
-    match &door.tls {
+    match door.tls.get() {
         None => {
             let (r, w) = tcp.into_split();
             open(lane, r, w, arrival).await;
@@ -172,7 +173,7 @@ where
     let (mut hello, info) = conn::greet(&lane, ip, port, true);
     hello.client.out.borrow_mut().extend_from_slice(&info);
     let link = stream::Link::new(hello.client.clone());
-    let reader = stream::Reader::new(r, link.clone(), &u, shared.opts.max_payload);
+    let reader = stream::Reader::new(r, link.clone(), &u, shared.opts().max_payload);
     let writer = stream::Writer::new(w, link, &u);
     hello.via.cookies = Some(Box::new(u.cookies));
     hello.via.cert = arrival.cert;
@@ -217,7 +218,7 @@ pub(super) fn closing(why: Option<Close>) -> (u16, &'static str) {
         return (frame::GOING_AWAY, "Server Shutdown");
     };
     let status = match why {
-        Close::Lost => frame::NORMAL,
+        Close::Lost | Close::Dropped => frame::NORMAL,
         Close::Parse(ParseError::MaxPayload(_)) => frame::TOO_BIG,
         Close::Parse(ParseError::ControlLine)
         | Close::SlowPending

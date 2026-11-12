@@ -72,7 +72,7 @@ impl Dir {
 /// the server has it in use: its clients on every lane check themselves
 /// again.
 pub(crate) fn stored(lane: &Lane, key: &str, jwt: &str) {
-    let trust = lane.shared.auth.as_ref().and_then(crate::auth::Auth::trust);
+    let trust = lane.shared.trust();
     if let Some(Status::Updated(id)) = trust.map(|t| t.stored(key, jwt)) {
         lane.shared
             .accounts
@@ -91,7 +91,7 @@ pub(crate) fn stored(lane: &Lane, key: &str, jwt: &str) {
 pub(crate) async fn fetch(lane: &Lane, key: &str) -> Option<u32> {
     let shared = &lane.shared;
     let dir = shared.resolver.as_ref()?;
-    let trust = shared.auth.as_ref()?.trust()?;
+    let trust = shared.trust()?;
     let mut added = Vec::new();
     let mut want = vec![key.to_owned()];
     let mut tried = 0;
@@ -156,7 +156,7 @@ async fn ask(lane: &Lane, key: &str) -> Option<String> {
 /// their taps on `lane`; the other lanes are told to.
 fn link(lane: &Lane, added: &[u32]) {
     let shared = &lane.shared;
-    let Some(trust) = shared.auth.as_ref().and_then(crate::auth::Auth::trust) else {
+    let Some(trust) = shared.trust() else {
         return;
     };
     let defs = (0..shared.accounts.len())

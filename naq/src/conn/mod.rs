@@ -5,6 +5,7 @@ mod log;
 mod login;
 mod ping;
 mod read;
+mod reload;
 mod trace;
 mod write;
 
@@ -67,6 +68,12 @@ pub(crate) struct Client {
     closed: Cell<bool>,
     /// Its account changed: the read loop checks it again.
     refresh: Cell<bool>,
+    /// It takes an `INFO` at any time: it speaks protocol 1 and got its
+    /// first `PONG`.
+    takes_info: Cell<bool>,
+    /// An `INFO` for the read loop to send it, if any: one that says the
+    /// server is in lame duck mode if `true`.
+    info: Cell<Option<bool>>,
     /// Why the server ended it, once it did.
     ended: Cell<Option<Close>>,
     /// Wakes the writer.
@@ -108,6 +115,8 @@ impl Client {
             seen: Seen::new(),
             closed: Cell::new(false),
             refresh: Cell::new(false),
+            takes_info: Cell::new(false),
+            info: Cell::new(None),
             ended: Cell::new(None),
             wake: Notify::new(),
             drained: Notify::new(),
@@ -132,6 +141,26 @@ impl Client {
     /// Whether its account changed since it last looked.
     pub(crate) const fn take_refresh(&self) -> bool {
         self.refresh.replace(false)
+    }
+
+    /// Has the read loop send it an `INFO` of the server and its cluster
+    /// as they are now, which says the server is in lame duck mode if
+    /// `ldm`, if it takes one at any time. Whether it does.
+    pub(crate) fn inform(&self, ldm: bool) -> bool {
+        if !self.takes_info.get() {
+            return false;
+        }
+        if ldm || self.info.get().is_none() {
+            self.info.set(Some(ldm));
+        }
+        self.stop.notify_one();
+        true
+    }
+
+    /// The `INFO` the read loop is to send, if any: whether it says the
+    /// server is in lame duck mode.
+    pub(crate) fn take_info(&self) -> Option<bool> {
+        self.info.take()
     }
 
     /// Why the server ended the connection, once it did.
@@ -291,6 +320,10 @@ enum Stage {
 pub(crate) enum Close {
     /// The client closed it, or reading failed.
     Lost,
+    /// A reload took away its user, moved that to another account, or
+    /// removed the remote of its link: closed without a word, as by the
+    /// client.
+    Dropped,
     /// The server closed it.
     Kicked,
     /// It let more output wait than `max_pending`: a slow consumer.
@@ -334,7 +367,7 @@ impl Close {
     /// Why it ended, in the words of `nats-server`.
     pub(crate) fn reason(self) -> &'static str {
         match self {
-            Close::Lost => "Client Closed",
+            Close::Lost | Close::Dropped => "Client Closed",
             Close::Kicked => "Kicked",
             Close::SlowPending => "Slow Consumer (Pending Bytes)",
             Close::SlowWrite(_) => "Slow Consumer (Write Deadline)",
@@ -420,6 +453,12 @@ struct Bounds {
     limits: naq_proto::client::Limits,
     /// Most subscriptions it may have; -1 for no limit.
     subs: i64,
+    /// The largest payload its login allows, below the server's; -1 for
+    /// none.
+    payload: i64,
+    /// What it logged in with, to check again on a reload: not for users
+    /// of JWTs or auth callouts.
+    login: Option<Box<Proven>>,
     /// When it is closed, and why: its JWT expires.
     deadline: Option<(tokio::time::Instant, Close)>,
     /// The account whose connection count holds it.
@@ -432,6 +471,14 @@ struct Bounds {
     refused: Option<u32>,
 }
 
+/// What a client logged in with: its credentials, and the bcrypt hash its
+/// password held against, if it did.
+#[derive(Debug)]
+struct Proven {
+    creds: crate::auth::Creds,
+    hash: Option<String>,
+}
+
 /// Runs a client connection that reached lane `index`.
 pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
     let Some(lane) = lane::get(shared.id, index) else {
@@ -439,8 +486,8 @@ pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
     };
     let (ip, port) = peer(&stream);
     let (hello, info) = greet(&lane, ip, port, false);
-    if lane.shared.tls.is_some() {
-        return crate::tls::serve(lane, hello, info, stream).await;
+    if let Some(acc) = lane.shared.tls.get() {
+        return crate::tls::serve(lane, &acc, hello, info, stream).await;
     }
     hello.client.out.borrow_mut().extend_from_slice(&info);
     let shared = lane.shared.clone();
@@ -465,7 +512,8 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
     let client = Rc::new(Client::new(lane.shared.next_client()));
     let nonce = lane
         .shared
-        .auth_for(ws)
+        .logins()
+        .of(ws)
         .filter(|a| a.wants_nonce())
         .map(|_| crate::auth::nonce().into_boxed_str());
     let mut info = Vec::new();
@@ -474,9 +522,9 @@ pub(crate) fn greet(lane: &Lane, ip: String, port: u16, ws: bool) -> (Hello, Vec
         ip: &ip,
         nonce: nonce.as_deref(),
         ws,
-        max_payload: lane.shared.opts.max_payload,
+        max_payload: lane.shared.opts().max_payload,
     };
-    handshake::info(&lane.shared, &to, None, &mut info);
+    handshake::info(&lane.shared, &to, handshake::Kind::First, &mut info);
     {
         let mut meta = client.meta.borrow_mut();
         meta.ip = ip;
@@ -527,16 +575,16 @@ where
 {
     let Hello { client, nonce, via } = hello;
     lane.clients.borrow_mut().insert(client.id, client.clone());
-    let opts = &lane.shared.opts;
+    let opts = &lane.shared.opts();
     let shared = lane.shared.clone();
     let slow = move || shared.events.slow_clients.note();
-    let deadline = lane.shared.opts.write_deadline;
+    let deadline = lane.shared.opts().write_deadline;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, deadline, slow));
     client.wake_writer();
     let now = tokio::time::Instant::now();
     let ws_ping = via.ws.then(|| lane.shared.ws.as_ref()?.opts.ping_interval);
     let ping = ping::Pinger::new(now, ws_ping.flatten().unwrap_or(opts.ping_interval));
-    let auth_by = lane.shared.auth_for(via.ws).map(|a| now + a.timeout);
+    let auth_by = lane.shared.logins().of(via.ws).map(|a| now + a.timeout);
     let out = Outs::new(&lane);
     let ip = client.meta.borrow().ip.clone();
     let limits = naq_proto::client::Limits {
@@ -565,6 +613,8 @@ where
         bounds: Bounds {
             limits,
             subs: -1,
+            payload: -1,
+            login: None,
             deadline: None,
             counted: None,
             kept: None,
@@ -609,6 +659,7 @@ impl Conn {
         }
         self.stage = Stage::Ready;
         if self.opts.protocol >= 1 {
+            self.client.takes_info.set(true);
             let shared = &self.lane.shared;
             let account = shared.accounts.name(self.client.account.get());
             let to = handshake::To {
@@ -618,13 +669,30 @@ impl Conn {
                 ws: self.via.ws,
                 max_payload: self.bounds.limits.max_payload,
             };
-            handshake::info(
-                shared,
-                &to,
-                Some(account),
-                &mut self.client.out.borrow_mut(),
-            );
+            let mut out = self.client.out.borrow_mut();
+            handshake::info(shared, &to, handshake::Kind::Bound(account), &mut out);
         }
+    }
+
+    /// Queues the `INFO` the client gets at any time, which says the server
+    /// is in lame duck mode if `ldm`.
+    #[cold]
+    fn inform(&self, ldm: bool) {
+        let to = handshake::To {
+            id: self.client.id,
+            ip: &self.ip,
+            nonce: None,
+            ws: self.via.ws,
+            max_payload: self.bounds.limits.max_payload,
+        };
+        let kind = handshake::Kind::Async { ldm };
+        handshake::info(
+            &self.lane.shared,
+            &to,
+            kind,
+            &mut self.client.out.borrow_mut(),
+        );
+        self.lane.mark(&self.client);
     }
 
     /// Queues `-ERR 'text'` for this client.
@@ -654,6 +722,7 @@ impl Conn {
             self.client.unsubscribe(&self.lane, &sid);
         }
         self.lane.clients.borrow_mut().remove(&self.client.id);
+        self.lane.refreshed(self.client.id);
         if let Some(a) = self.bounds.counted.take() {
             self.lane.shared.uncount(a, self.client.id);
         }
@@ -690,6 +759,7 @@ const fn farewell(close: Close) -> Option<&'static str> {
         Close::AccountExpired => Some("Account Authentication Expired"),
         Close::Parse(ParseError::Args(_) | ParseError::Size(_) | ParseError::HeaderSize)
         | Close::Lost
+        | Close::Dropped
         | Close::Kicked
         | Close::SlowPending
         | Close::SlowWrite(_)

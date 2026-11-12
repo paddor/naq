@@ -2422,3 +2422,69 @@ fn the_system_account_hears_of_links_as_they_come_and_go() {
     assert_eq!(down["client"]["id"], up["client"]["id"]);
     assert_eq!(down["reason"], "Client Closed");
 }
+
+#[test]
+fn a_leaf_in_lame_duck_mode_dials_no_more() {
+    let hub = Hub::new();
+    let leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        leaf_reconnect: Duration::from_millis(50),
+        remotes: vec![Remote {
+            urls: vec![format!("127.0.0.1:{}", hub.port())],
+            ..Remote::default()
+        }],
+        no_system_account: true,
+        lame_duck_duration: Duration::from_secs(3),
+        lame_duck_grace_period: Duration::from_secs(1),
+        ..Options::default()
+    })
+    .unwrap();
+    let p = linked(&hub);
+    // A client keeps it in lame duck mode for the grace period.
+    let mut c = client(&leaf, "");
+    let done = std::thread::spawn(move || leaf.lame_duck_shutdown());
+    // Once the client may not connect, it is in lame duck mode.
+    let deadline = Instant::now() + WAIT;
+    while TcpStream::connect(c.w.peer_addr().unwrap()).is_ok() {
+        assert!(Instant::now() < deadline, "still takes clients");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(p);
+    assert!(!dials_soon(&hub), "dialed again in lame duck mode");
+    assert!(c.closed());
+    done.join().unwrap();
+}
+
+#[test]
+fn a_leaf_in_lame_duck_mode_closes_its_link_after_the_grace_period() {
+    let hub = Hub::new();
+    let grace = Duration::from_millis(300);
+    let leaf = Server::start(&Options {
+        host: "127.0.0.1".into(),
+        port: 0,
+        lanes: 2,
+        remotes: vec![Remote {
+            urls: vec![format!("127.0.0.1:{}", hub.port())],
+            ..Remote::default()
+        }],
+        no_system_account: true,
+        lame_duck_duration: Duration::from_secs(3),
+        lame_duck_grace_period: grace,
+        ..Options::default()
+    })
+    .unwrap();
+    let mut p = linked(&hub);
+    let started = Instant::now();
+    let done = std::thread::spawn(move || leaf.lame_duck_shutdown());
+    loop {
+        let mut l = String::new();
+        if p.r.read_line(&mut l).unwrap() == 0 {
+            break;
+        }
+        assert!(!l.starts_with("-ERR"), "{l}");
+    }
+    assert!(started.elapsed() >= grace, "{:?}", started.elapsed());
+    done.join().unwrap();
+}

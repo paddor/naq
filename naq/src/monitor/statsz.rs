@@ -20,7 +20,7 @@ pub(crate) struct ServerStats {
     connections: u64,
     total_connections: u64,
     active_accounts: usize,
-    subscriptions: usize,
+    subscriptions: u64,
     sent: MsgBytes,
     sent_to_clients: MsgBytes,
     received: MsgBytes,

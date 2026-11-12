@@ -31,8 +31,8 @@ const GREET: Duration = Duration::from_secs(3);
 #[derive(Debug)]
 pub(crate) struct Hub {
     pub(crate) slot: u16,
-    /// Its remote, by index.
-    remote: usize,
+    /// Its remote.
+    remote: Rc<crate::Remote>,
     /// The local account the link binds.
     pub(crate) account: u32,
     pub(crate) host: String,
@@ -54,23 +54,26 @@ pub(crate) struct Hub {
 }
 
 impl Hub {
-    /// The hub of remote `remote` of `shared`'s server, a naq one, in slot
+    /// The hub of remote `remote`, a naq one, of `shared`'s server, in slot
     /// `slot`, told by a teller of start `epoch`.
-    pub(super) fn new(shared: &Shared, remote: usize, slot: u16, epoch: u64) -> Hub {
-        let r = &shared.opts.remotes[remote];
+    pub(super) fn new(shared: &Shared, remote: &crate::Remote, slot: u16, epoch: u64) -> Hub {
+        let r = remote;
         // Valid: the options were checked.
         let url = r.urls.first().and_then(|u| HubUrl::parse(u).ok());
         let (host, port) = url.map(|u| (u.host, u.port)).unwrap_or_default();
         let name = r.account.as_deref().unwrap_or("$G");
         // Known to exist: the options were checked.
         let account = shared.accounts.id(name).unwrap_or(0);
-        let told = Rc::new(Told::new(epoch, shared.accounts.clone(), Rc::default()));
+        let told = Rc::new(
+            Told::new(epoch, shared.accounts.clone(), Rc::default())
+                .stamping(shared.marks.clone(), slot..slot + 1),
+        );
         told.pin(account, shared.accounts.lds(account));
         // Its snapshot carries it.
         told.take();
         Hub {
             slot,
-            remote,
+            remote: Rc::new(remote.clone()),
             // Accounts are few: their count fits.
             account,
             host,
@@ -94,8 +97,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
     let Some(lane) = crate::lane::get(shared.id, 0) else {
         return;
     };
-    let remote = mesh.hubs.borrow()[at].remote;
-    let r = &shared.opts.remotes[remote];
+    let r = mesh.hubs.borrow()[at].remote.clone();
     // Valid: the options were checked.
     let configured: Vec<HubUrl> = r
         .urls
@@ -109,7 +111,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
             urls.swap(i, j);
         }
     }
-    let interval = shared.opts.leaf_reconnect;
+    let interval = shared.opts().leaf_reconnect;
     let mut n = 0u64;
     loop {
         let Some(url) = urls.pop_front() else {
@@ -117,7 +119,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
         };
         urls.push_back(url.clone());
         n += 1;
-        let id = format!("{}/{remote}/{n}", shared.server_id);
+        let id = format!("{}/{at}/{n}", shared.server_id);
         let (found, delay) = connect(&shared, &mesh, at, &url, id).await;
         let wait = match found {
             Some(found) => {
@@ -268,14 +270,15 @@ impl Link<'_> {
     fn hello(&self) -> Bytes {
         let shared = self.shared;
         let account = self.mesh.hubs.borrow()[self.at].account;
-        let cluster = shared.opts.cluster.as_ref().map_or("", |c| &c.name);
+        let opts = shared.opts();
+        let cluster = opts.cluster.as_ref().map_or("", |c| &c.name);
         let mut out = Vec::new();
         Control::Hello(Hello {
             role: Role::Leaf,
             account: shared.accounts.name(account).as_bytes(),
             epoch: self.mesh.epoch,
             server_id: shared.server_id.as_bytes(),
-            name: shared.opts.server_name.as_bytes(),
+            name: shared.opts().server_name.as_bytes(),
             cluster: cluster.as_bytes(),
             data: b"",
             client_urls: b"",
@@ -316,6 +319,7 @@ impl Link<'_> {
             looped |= ch.1 == lds && ch.3 > 0;
             interest(shared, slot, account, perms, ch);
         });
+        self.mesh.taking.heard(slot, hub.heard.taken());
         if looped {
             // Our own subject came back: the links loop.
             self.end.set(Some(LOOP_DELAY));
@@ -355,9 +359,8 @@ impl Link<'_> {
     ///
     /// A seed that cannot sign.
     fn login(&self, nonce: &[u8]) -> Result<Bytes, String> {
-        let remote = self.mesh.hubs.borrow()[self.at].remote;
-        let r = &self.shared.opts.remotes[remote];
-        let proof = crate::leaf::prove(r, &String::from_utf8_lossy(nonce))?;
+        let r = self.mesh.hubs.borrow()[self.at].remote.clone();
+        let proof = crate::leaf::prove(&r, &String::from_utf8_lossy(nonce))?;
         let (user, pass, token) = match (&self.url.user, &self.url.pass) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str(), ""),
             (Some(t), None) => ("", "", t.as_str()),

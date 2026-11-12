@@ -273,16 +273,17 @@ pub(crate) fn call(shared: &Shared, plan: &Plan, about: &request::About<'_>) -> 
         .xkey
         .as_deref()
         .and_then(|k| nkeys::XKey::from_public_key(k).ok());
+    let opts = shared.opts();
     let from = request::From {
         server: &shared.keys.server,
-        name: &shared.opts.server_name,
-        host: &shared.opts.host,
-        cluster: shared.opts.cluster.as_ref().map_or("", |c| c.name.as_str()),
+        name: &opts.server_name,
+        host: &opts.host,
+        cluster: opts.cluster.as_ref().map_or("", |c| c.name.as_str()),
         issuer,
         user_nkey: &user,
         xkey: sealed.as_ref().map(|_| server_xkey.as_str()),
         iat: now(std::time::Duration::ZERO),
-        exp: now(shared.opts.auth_timeout),
+        exp: now(opts.auth_timeout),
     };
     let jwt = request::jwt(&from, about);
     let (payload, headers) = match &sealed {
