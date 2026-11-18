@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::accstatz::MsgBytes;
 use super::ask_all;
-use super::varz::{Kinds, counts, on_lane, usage};
+use super::varz::{Kinds, counts, lane_counts, usage};
 use crate::lane::Lane;
 use crate::server::Shared;
 use crate::times::rfc3339_nano;
@@ -70,7 +70,7 @@ fn accounts(lane: &Lane) -> FxHashSet<u32> {
 
 /// What `shared`'s server counts now.
 pub(crate) async fn statsz(shared: &Shared) -> ServerStats {
-    let lanes = ask_all(shared, |lane| (on_lane(lane), accounts(lane))).await;
+    let lanes = ask_all(shared, |lane| (lane_counts(lane), accounts(lane))).await;
     let (on, used): (Vec<_>, Vec<_>) = lanes.into_iter().unzip();
     let mut active: FxHashSet<u32> = used.into_iter().flatten().collect();
     // Go counts its system client in the system account.
@@ -96,7 +96,7 @@ pub(crate) async fn statsz(shared: &Shared) -> ServerStats {
         .collect();
     let active_servers = shared.sys.remote.len() + 1;
     ServerStats {
-        start: rfc3339_nano(shared.started),
+        start: rfc3339_nano(shared.ident.started),
         mem,
         cores: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         cpu,

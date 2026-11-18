@@ -184,7 +184,7 @@ impl Lane {
         let max = self.shared.max_pending;
         if len > max {
             // A slow consumer.
-            self.shared.events.slow_clients.note();
+            self.shared.tally.events.slow_clients.note();
             c.kick(crate::conn::Close::SlowPending);
         } else if len > max / 4 * 3 {
             *stalled = Some(c.clone());

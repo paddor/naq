@@ -23,7 +23,6 @@ use std::time::{Duration, SystemTime};
 
 use sha2::Digest as _;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::oneshot;
 use zzq_tokio::transport::{Listener, Stream};
 
 pub(crate) use accountz::{in_use, name_tag};
@@ -32,7 +31,7 @@ pub(crate) use conns::{closed, link_closed};
 pub(crate) use pages::health;
 pub(crate) use statsz::{ServerStats, statsz};
 
-use crate::lane::{Control, Lane};
+use crate::lane::ask_all;
 use crate::server::Shared;
 use crate::{Error, Options};
 use http::{Request, Response};
@@ -109,16 +108,6 @@ fn digest(opts: &Options) -> String {
         .unwrap_or_default()
 }
 
-/// The TLS of the HTTPS port, if it has one.
-#[derive(Default)]
-struct HttpsTls(std::sync::RwLock<Option<tokio_rustls::TlsAcceptor>>);
-
-impl std::fmt::Debug for HttpsTls {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpsTls").finish_non_exhaustive()
-    }
-}
-
 /// What monitoring keeps for a server.
 #[derive(Debug)]
 pub(crate) struct State {
@@ -131,7 +120,7 @@ pub(crate) struct State {
     /// Where monitoring is served over HTTPS, if it is.
     https: Option<SocketAddr>,
     /// The TLS of the HTTPS port: a reload swaps it.
-    tls: HttpsTls,
+    tls: crate::swap::Swap<Option<tokio_rustls::TlsAcceptor>>,
     /// The configuration, as last loaded.
     loaded: Mutex<Loaded>,
     /// The ports the cluster and naq leafs were bound at, once they are.
@@ -154,7 +143,7 @@ impl State {
             base: base_path(&opts.http_base_path),
             http: at.filter(|_| !secure),
             https: at.filter(|_| secure),
-            tls: HttpsTls::default(),
+            tls: crate::swap::Swap::default(),
             loaded: Mutex::new(Loaded {
                 digest: digest(opts),
                 at: now,
@@ -193,16 +182,12 @@ impl State {
 
     /// The TLS of the HTTPS port, if it has one.
     fn tls(&self) -> Option<tokio_rustls::TlsAcceptor> {
-        self.tls
-            .0
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.tls.get()
     }
 
     /// Takes `tls` for the HTTPS port from now on.
     pub(crate) fn set_tls(&self, tls: Option<tokio_rustls::TlsAcceptor>) {
-        *self.tls.0.write().unwrap_or_else(PoisonError::into_inner) = tls;
+        self.tls.set(tls);
     }
 
     /// Where monitoring is served, over HTTP or HTTPS, if it is.
@@ -327,8 +312,8 @@ pub(crate) fn acceptor(opts: &Options) -> Result<Option<tokio_rustls::TlsAccepto
     }
 }
 
-/// Serves monitoring on `listener`, over TLS if `tls` is set, until it
-/// closes or the server stops.
+/// Serves monitoring on `listener`, over the TLS the server has for it
+/// if any, until it closes or the server stops.
 pub(crate) async fn serve(mut listener: Listener, shared: Arc<Shared>) {
     loop {
         let stream = match listener.accept().await {
@@ -468,71 +453,6 @@ pub(crate) async fn shown(shared: &Shared, e: Shown, q: &Query) -> Result<Vec<u8
     Ok(json::compact(&data))
 }
 
-/// What `f` finds on every lane, in lane order. A lane that stopped finds
-/// nothing.
-pub(crate) async fn ask_all<T, F>(shared: &Shared, f: F) -> Vec<T>
-where
-    T: Send + 'static,
-    F: Fn(&Lane) -> T + Clone + Send + 'static,
-{
-    let waits: Vec<_> = (0..shared.lanes.len())
-        .map(|i| {
-            let (tx, rx) = oneshot::channel();
-            let f = f.clone();
-            shared.lanes[i].control(Control::Ask(Ask(Box::new(move |lane| {
-                let _ = tx.send(f(lane));
-            }))));
-            rx
-        })
-        .collect();
-    let mut all = Vec::with_capacity(waits.len());
-    for w in waits {
-        if let Ok(t) = w.await {
-            all.push(t);
-        }
-    }
-    all
-}
-
-/// What `f` finds on lane `lane` of `shared`'s server; `None` if the lane
-/// stopped.
-pub(crate) async fn ask<T: Send + 'static>(
-    shared: &Shared,
-    lane: usize,
-    f: impl FnOnce(&Lane) -> T + Send + 'static,
-) -> Option<T> {
-    let (tx, rx) = oneshot::channel();
-    on_lane(shared, lane, move |lane| {
-        let _ = tx.send(f(lane));
-    });
-    rx.await.ok()
-}
-
-/// Hands `f` to lane `lane` of `shared`'s server, to run there. A lane
-/// that stopped drops it.
-pub(crate) fn on_lane(shared: &Shared, lane: usize, f: impl FnOnce(&Lane) + Send + 'static) {
-    if let Some(tx) = shared.lanes.get(lane) {
-        tx.control(Control::Ask(Ask(Box::new(f))));
-    }
-}
-
-/// Work monitoring hands a lane: it runs there, and sends what it finds
-/// back.
-pub(crate) struct Ask(Box<dyn FnOnce(&Lane) + Send>);
-
-impl Ask {
-    /// Runs it on `lane`.
-    pub(crate) fn run(self, lane: &Lane) {
-        (self.0)(lane);
-    }
-}
-
-impl std::fmt::Debug for Ask {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Ask")
-    }
-}
-
 /// Reads `data` as a request to the monitoring port, and as a base path.
 ///
 /// # Panics
@@ -637,7 +557,6 @@ mod tests {
         assert!(looks_like_http(*b"GET /"));
         assert!(!looks_like_http([0x16, 3, 1, 0, 1]));
         assert_eq!(hex(&[0, 0xab]), "00ab");
-        assert_eq!(format!("{:?}", Ask(Box::new(|_| {}))), "Ask");
     }
 
     #[test]

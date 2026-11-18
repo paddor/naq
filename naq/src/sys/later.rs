@@ -119,7 +119,7 @@ where
     let Some(turn) = Turn::take(&lane.shared) else {
         return;
     };
-    let Some(me) = crate::lane::get(lane.shared.id, lane.id) else {
+    let Some(me) = crate::lane::get(lane.shared.ident.id, lane.id) else {
         return;
     };
     let asked = Asked::of(m);

@@ -125,12 +125,7 @@ pub(crate) fn validate(opts: &crate::Options) -> Result<(), String> {
         if r.nkey.as_deref().is_some_and(|s| !creds::is_user_seed(s)) {
             return Err("leafnode remote: nkey is not a user seed".into());
         }
-        let key = (
-            r.account.as_deref().unwrap_or("$G"),
-            urls,
-            &r.credentials,
-            &r.nkey,
-        );
+        let key = (r.account_name(), urls, &r.credentials, &r.nkey);
         if seen.contains(&key) {
             return Err("leafnode remotes: the same account, urls and credentials twice".into());
         }
@@ -200,11 +195,19 @@ fn naq_remote(r: &crate::Remote, urls: &[HubUrl]) -> Result<(), String> {
 pub(crate) fn to_hubs(
     opts: &crate::Options,
 ) -> Result<Vec<(crate::Remote, Connector)>, crate::Error> {
-    opts.remotes
-        .iter()
-        .filter(|r| !is_naq(r))
+    go_remotes(opts)
         .map(|r| Ok((r.clone(), Connector::new(r)?)))
         .collect()
+}
+
+/// The remotes of `opts` to `nats-server` hubs.
+pub(crate) fn go_remotes(opts: &crate::Options) -> impl Iterator<Item = &crate::Remote> {
+    opts.remotes.iter().filter(|r| !is_naq(r))
+}
+
+/// The remotes of `opts` to naq hubs.
+pub(crate) fn naq_remotes(opts: &crate::Options) -> impl Iterator<Item = &crate::Remote> {
+    opts.remotes.iter().filter(|r| is_naq(r))
 }
 
 /// Whether remote `r` dials a naq hub, over OMQ. Of a valid remote.
@@ -219,7 +222,7 @@ pub(crate) fn is_naq(r: &crate::Remote) -> bool {
 /// dials again once it ends, as `nats-server` does, until a reload removes
 /// it.
 pub(crate) async fn run(shared: Arc<Shared>, hub: Arc<HubRemote>) {
-    let Some(lane) = lane::get(shared.id, hub.lane) else {
+    let Some(lane) = lane::get(shared.ident.id, hub.lane) else {
         return;
     };
     let remote = &hub.remote;
@@ -231,10 +234,7 @@ pub(crate) async fn run(shared: Arc<Shared>, hub: Arc<HubRemote>) {
         .collect();
     let mut urls: VecDeque<HubUrl> = all.iter().cloned().collect();
     if !remote.no_randomize {
-        for i in (1..urls.len()).rev() {
-            let j = lane.below(i as u64 + 1) as usize;
-            urls.swap(i, j);
-        }
+        crate::server::shuffle(urls.make_contiguous(), |n| lane.below(n));
     }
     let interval = shared.opts().leaf_reconnect;
     let told = RefCell::new(None);

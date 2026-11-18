@@ -26,17 +26,16 @@ pub(crate) enum Act {
     Ldm,
 }
 
-/// Go's `KickClientReq`.
-const KICK: Fields = Fields {
-    name: "KickClientReq",
-    keys: [&[("cid", Kind::Uint)], &[]],
-};
+/// Go's type of a request that names a connection, of name `name`.
+const fn names_conn(name: &'static str) -> Fields {
+    Fields {
+        name,
+        keys: [&[("cid", Kind::Uint)], &[]],
+    }
+}
 
-/// Go's `LDMClientReq`.
-const LDM: Fields = Fields {
-    name: "LDMClientReq",
-    keys: [&[("cid", Kind::Uint)], &[]],
-};
+const KICK: Fields = names_conn("KickClientReq");
+const LDM: Fields = names_conn("LDMClientReq");
 
 impl Act {
     /// Go's type of its body.
@@ -106,16 +105,7 @@ async fn answer(shared: Arc<Shared>, asked: Asked, act: Act) -> Option<Answer> {
 /// Closes client or link to a hub `cid` of `shared`'s server as kicked,
 /// or says it has none.
 async fn kick(shared: &Shared, cid: u64) -> Result<(), &'static str> {
-    let found = crate::monitor::ask_all(shared, move |lane| {
-        if let Some(c) = lane.clients.borrow().get(&cid) {
-            c.kick(Close::Kicked);
-            return true;
-        }
-        let links = lane.links.borrow();
-        let link = links.iter().find(|l| l.id == cid);
-        link.inspect(|l| l.client.kick(Close::Kicked)).is_some()
-    })
-    .await;
+    let found = crate::lane::ask_all(shared, move |lane| lane.kick(cid, Close::Kicked)).await;
     if found.contains(&true) {
         Ok(())
     } else {
@@ -126,7 +116,7 @@ async fn kick(shared: &Shared, cid: u64) -> Result<(), &'static str> {
 /// Sends client `cid` of `shared`'s server the `INFO` of lame duck mode,
 /// or says why not, as `nats-server` does.
 async fn ldm(shared: &Shared, cid: u64) -> Result<(), &'static str> {
-    let found = crate::monitor::ask_all(shared, move |lane| {
+    let found = crate::lane::ask_all(shared, move |lane| {
         let clients = lane.clients.borrow();
         let c = clients.get(&cid)?;
         if !c.inform(true) {

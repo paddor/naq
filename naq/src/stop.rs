@@ -50,7 +50,7 @@ pub(crate) fn server(shared: &Shared) {
 /// delivered what other lanes had sent it, and answers `done` once they
 /// are gone, or after [`WAIT`].
 pub(crate) fn lane(lane: &Lane, done: oneshot::Sender<()>) {
-    let Some(lane) = crate::lane::get(lane.shared.id, lane.id) else {
+    let Some(lane) = crate::lane::get(lane.shared.ident.id, lane.id) else {
         let _ = done.send(());
         return;
     };

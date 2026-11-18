@@ -247,12 +247,9 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
         .map(|(r, t)| RouteInfo::of(r, *t, subs, now))
         .collect::<Vec<_>>();
     let opts = shared.opts();
-    let name = Some(opts.server_name.as_str())
-        .filter(|n| !n.is_empty())
-        .unwrap_or(&shared.server_id);
     Ok(pretty(&Routez {
-        server_id: &shared.server_id,
-        server_name: name,
+        server_id: &shared.ident.server_id,
+        server_name: shared.name(&opts),
         now: rfc3339_nano(now),
         num_routes: infos.len(),
         routes: infos,

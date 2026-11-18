@@ -268,14 +268,14 @@ pub(crate) fn call(shared: &Shared, plan: &Plan, about: &request::About<'_>) -> 
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs().cast_signed())
     };
-    let server_xkey = shared.keys.xkey.public_key();
+    let server_xkey = shared.ident.keys.xkey.public_key();
     let sealed = plan
         .xkey
         .as_deref()
         .and_then(|k| nkeys::XKey::from_public_key(k).ok());
     let opts = shared.opts();
     let from = request::From {
-        server: &shared.keys.server,
+        server: &shared.ident.keys.server,
         name: &opts.server_name,
         host: &opts.host,
         cluster: opts.cluster.as_ref().map_or("", |c| c.name.as_str()),
@@ -290,6 +290,7 @@ pub(crate) fn call(shared: &Shared, plan: &Plan, about: &request::About<'_>) -> 
         // Sealing to a valid key does not fail.
         Some(to) => (
             shared
+                .ident
                 .keys
                 .xkey
                 .seal(jwt.as_bytes(), to)

@@ -24,7 +24,7 @@ pub(crate) fn log(shared: &Shared, at: &Bound) {
         log.info(format_args!("  Cluster:  {}", c.name));
     }
     log.info(format_args!("  Name:     {}", o.server_name));
-    log.info(format_args!("  ID:       {}", shared.server_id));
+    log.info(format_args!("  ID:       {}", shared.ident.server_id));
     if plain_passwords(o) {
         log.warn(format_args!(
             "Plaintext passwords detected, use nkeys or bcrypt"

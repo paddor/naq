@@ -21,7 +21,7 @@ mod view;
 pub(crate) use data::{DataLink, gone, hub, leaf, push};
 pub(crate) use interest::Heard;
 use marks::Taking;
-pub(crate) use marks::{Marks, OnLane, follow};
+pub(crate) use marks::{LaneMarks, Marks, follow};
 use told::Told;
 
 use std::cell::RefCell;
@@ -133,12 +133,9 @@ pub(crate) struct Mesh {
 impl Mesh {
     /// The mesh of `shared`'s server, of start `epoch`.
     fn new(shared: &Shared, epoch: u64) -> Mesh {
-        let first = routes(&shared.opts());
         let opts = shared.opts();
-        let hubs = opts
-            .remotes
-            .iter()
-            .filter(|r| crate::leaf::is_naq(r))
+        let first = routes(&opts);
+        let hubs = crate::leaf::naq_remotes(&opts)
             .enumerate()
             // Slots are below 64: they fit.
             .map(|(k, r)| spoke::Hub::new(shared, r, (first + k) as u16, epoch))
@@ -147,11 +144,13 @@ impl Mesh {
             epoch,
             accounts: shared.accounts.clone(),
             peers: RefCell::default(),
-            told: Rc::new(
-                Told::new(epoch, shared.accounts.clone(), Rc::default())
-                    // Slots are below 64: they fit.
-                    .stamping(shared.marks.clone(), 0..first as u16),
-            ),
+            told: Rc::new(Told::new(
+                epoch,
+                shared.accounts.clone(),
+                Rc::default(),
+                // Slots are below 64: they fit.
+                (shared.marks.clone(), 0..first as u16),
+            )),
             leafs: RefCell::default(),
             leaf_wake: Rc::default(),
             hubs: RefCell::new(hubs),
@@ -289,10 +288,7 @@ fn routes(opts: &ServerOptions) -> usize {
 
 /// The naq hubs `opts` dial.
 pub(crate) fn hubs(opts: &ServerOptions) -> usize {
-    opts.remotes
-        .iter()
-        .filter(|r| crate::leaf::is_naq(r))
-        .count()
+    crate::leaf::naq_remotes(opts).count()
 }
 
 /// The account every naq leaf binds on `shared`'s server.
@@ -357,7 +353,7 @@ pub(crate) async fn run(
     lanes: Box<[LaneHandle]>,
     ready: std::sync::mpsc::SyncSender<Result<Bound, String>>,
 ) {
-    let Some(lane) = crate::lane::get(shared.id, 0) else {
+    let Some(lane) = crate::lane::get(shared.ident.id, 0) else {
         return;
     };
     let mut epoch = [0u8; 8];
@@ -401,7 +397,7 @@ pub(crate) async fn run(
     };
     let _ = ready.send(Ok(bound));
     if let Some((host, r, events)) = leafs {
-        let data = bind_data(shared.id, &lanes, &host, Data::Leafs).await;
+        let data = bind_data(shared.ident.id, &lanes, &host, Data::Leafs).await;
         let me = hub::Me::new(&shared, &data, epoch, bound.leafnodes);
         tokio::task::spawn_local(hub::serve(lane.clone(), mesh.clone(), (r, events), me));
     }
@@ -409,7 +405,7 @@ pub(crate) async fn run(
         tokio::task::spawn_local(spoke::dial(shared.clone(), mesh.clone(), at));
     }
     if let Some((c, r)) = cluster {
-        let data = bind_data(shared.id, &lanes, &c.host, Data::Routes).await;
+        let data = bind_data(shared.ident.id, &lanes, &c.host, Data::Routes).await;
         let me = control::Me::new(&shared, &c, &data, epoch, bound.leafnodes);
         control::serve(&shared, &mesh, me, &c, r).await;
     }

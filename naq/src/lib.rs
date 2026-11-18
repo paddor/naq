@@ -59,6 +59,7 @@ mod server;
 mod signals;
 mod stats;
 mod stop;
+mod swap;
 mod sys;
 mod times;
 mod tls;

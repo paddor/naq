@@ -98,7 +98,7 @@ pub(crate) fn closed(lane: &Lane, of: Of<'_>, close: Close, refused: Option<u32>
         }
         s.sys.outbox.post(Event::Note(Note {
             account: sys,
-            to: format!("$SYS.SERVER.{}.CLIENT.AUTH.ERR", s.server_id).into_bytes(),
+            to: format!("$SYS.SERVER.{}.CLIENT.AUTH.ERR", s.ident.server_id).into_bytes(),
             head: head(DISCONNECT, now),
             tail: gone(None),
         }));

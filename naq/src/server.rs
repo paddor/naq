@@ -1,21 +1,18 @@
 //! Starting and stopping a server: lanes, the listener, accepting clients.
 
-use std::net::{Ipv4Addr, SocketAddr};
+mod listen;
+
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
-use std::time::Duration;
 
-use zzq_tokio::transport::{Listener, TransportOptions};
-use zzq_tokio::{Config, Context, Endpoint, LaneHandle};
+use zzq_tokio::{Config, Context};
 
 use crate::auth::{self, Auth, Logins};
 use crate::error::io;
+use crate::swap::Swap;
 use crate::tls::Acceptor;
-use crate::{Error, Options, conn, lane, stats};
-
-/// How long the accept loop pauses after a failed accept, such as when the
-/// process is out of file descriptors.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
+use crate::{Error, Options, lane, stats};
 
 /// The `nats-server` version naq answers as, to clients, tools, hubs and
 /// auth callouts: the one it matches, on which they gate features. naq's
@@ -28,18 +25,15 @@ static NEXT_SERVER: AtomicU64 = AtomicU64::new(1);
 /// What every lane of a server shares. Read only.
 #[derive(Debug)]
 pub(crate) struct Shared {
-    pub(crate) id: u64,
-    /// The options as last loaded: those it started with, then those of
-    /// each reload.
-    options: std::sync::RwLock<Arc<Options>>,
+    /// What tells it apart.
+    pub(crate) ident: Ident,
+    /// What a reload swaps.
+    pub(crate) live: Live,
+    /// What it counts.
+    pub(crate) tally: Tally,
     /// The most bytes a client may have waiting ([`Options::max_pending`]),
     /// which no reload changes.
     pub(crate) max_pending: usize,
-    /// Where clients connect, as bound.
-    pub(crate) addr: SocketAddr,
-    /// The server ID in `INFO`: the public key of `keys.server`.
-    pub(crate) server_id: String,
-    pub(crate) keys: Keys,
     /// The way into each lane.
     pub(crate) lanes: Box<[lane::LaneTx]>,
     /// The accounts, by id, `$G` first.
@@ -50,8 +44,6 @@ pub(crate) struct Shared {
     pub(crate) resolver: Option<crate::resolver::Dir>,
     /// What the server keeps for its services on `$SYS`.
     pub(crate) sys: crate::sys::State,
-    /// What clients must authenticate with, if anything.
-    logins: std::sync::RwLock<Arc<Logins>>,
     /// The operator mode users log in under, if any: no reload changes
     /// it.
     trust: Option<Arc<crate::jwt::trust::Trust>>,
@@ -63,24 +55,10 @@ pub(crate) struct Shared {
     pub(crate) stopping: std::sync::atomic::AtomicBool,
     /// Where it stands in lame duck mode.
     pub(crate) lame: crate::lame::Lame,
-    /// Message counts of the clients of each lane.
-    pub(crate) counts: Box<[stats::Shared]>,
-    /// Message counts of the links and routes of each lane.
-    pub(crate) peer_counts: Box<[stats::Shared]>,
     /// What monitoring keeps.
     pub(crate) monitor: crate::monitor::State,
-    /// Slow consumers and stale clients so far.
-    pub(crate) events: stats::Events,
-    /// When the server started.
-    pub(crate) started: std::time::SystemTime,
-    /// Clients that went away.
-    pub(crate) gone: AtomicU64,
-    /// TLS for clients, if they must use it.
-    pub(crate) tls: crate::tls::Current,
     /// The WebSocket port, if there is one.
     pub(crate) ws: Option<crate::ws::Door>,
-    /// The remotes to `nats-server` hubs it dials.
-    pub(crate) hubs: crate::leaf::HubRemotes,
     /// Where the clients of the other servers of the cluster connect, as
     /// they told it.
     pub(crate) connect_urls: std::sync::Mutex<Vec<String>>,
@@ -88,36 +66,84 @@ pub(crate) struct Shared {
     pub(crate) reload: crate::reload::State,
     /// The interest made and taken across the mesh, for batches to follow.
     pub(crate) marks: Arc<crate::mesh::Marks>,
+}
+
+/// What tells a server apart, set as it starts.
+#[derive(Debug)]
+pub(crate) struct Ident {
+    /// Tells servers in one process apart.
+    pub(crate) id: u64,
+    /// Where clients connect, as bound.
+    pub(crate) addr: SocketAddr,
+    /// The server ID in `INFO`: the public key of `keys.server`.
+    pub(crate) server_id: String,
+    pub(crate) keys: Keys,
+    /// When the server started.
+    pub(crate) started: std::time::SystemTime,
+}
+
+/// What a reload swaps while the server runs.
+#[derive(Debug)]
+pub(crate) struct Live {
+    /// The options as last loaded: those it started with, then those of
+    /// each reload.
+    options: Swap<Arc<Options>>,
+    /// What clients must authenticate with, if anything.
+    logins: Swap<Arc<Logins>>,
+    /// TLS for clients, if they must use it.
+    pub(crate) tls: crate::tls::Current,
+    /// The remotes to `nats-server` hubs it dials.
+    pub(crate) hubs: crate::leaf::HubRemotes,
+}
+
+/// What a server counts.
+#[derive(Debug)]
+pub(crate) struct Tally {
+    /// Message counts of the clients of each lane.
+    pub(crate) counts: Box<[stats::Shared]>,
+    /// Message counts of the links and routes of each lane.
+    pub(crate) peer_counts: Box<[stats::Shared]>,
+    /// Slow consumers and stale clients so far.
+    pub(crate) events: stats::Events,
+    /// Clients that went away.
+    pub(crate) gone: AtomicU64,
     next_client: AtomicU64,
+}
+
+impl Tally {
+    fn new(lanes: usize) -> Tally {
+        let counts = || (0..lanes).map(|_| stats::Shared::default()).collect();
+        Tally {
+            counts: counts(),
+            peer_counts: counts(),
+            events: stats::Events::default(),
+            gone: AtomicU64::new(0),
+            next_client: AtomicU64::new(1),
+        }
+    }
 }
 
 impl Shared {
     /// The options as last loaded.
     pub(crate) fn opts(&self) -> Arc<Options> {
-        self.options
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.live.options.get()
     }
 
     /// Takes `opts` as the options from now on.
     pub(crate) fn set_opts(&self, opts: Options) {
-        *self.options.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(opts);
+        self.live.options.set(Arc::new(opts));
     }
 
-    /// What clients authenticate with, over WebSocket if `ws`, if anything.
+    /// What clients authenticate with, if anything.
     pub(crate) fn logins(&self) -> Arc<Logins> {
-        self.logins
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.live.logins.get()
     }
 
     /// Takes the logins `opts` ask for, of users in `accounts`, the
     /// server's by id, from now on.
     pub(crate) fn relogin(&self, opts: &Options, accounts: &[String]) {
         let logins = Logins::new(opts, accounts, self.trust.as_ref());
-        *self.logins.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(logins);
+        self.live.logins.set(Arc::new(logins));
     }
 
     /// The operator mode users log in under, if any.
@@ -125,10 +151,20 @@ impl Shared {
         self.trust.as_deref()
     }
 
+    /// Its name with options `o`, as `nats-server` names itself: its ID
+    /// when it has no name.
+    pub(crate) fn name<'a>(&'a self, o: &'a Options) -> &'a str {
+        if o.server_name.is_empty() {
+            &self.ident.server_id
+        } else {
+            &o.server_name
+        }
+    }
+
     /// A new client ID, unique in this server. IDs start at 1.
     pub(crate) fn next_client(&self) -> u64 {
         // Relaxed: IDs only need to be distinct.
-        self.next_client.fetch_add(1, Ordering::Relaxed)
+        self.tally.next_client.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Counts client `id` among the connections of `account`, unless the
@@ -183,7 +219,7 @@ impl Shared {
     pub(crate) fn bound(&self) -> crate::log::banner::Bound {
         let mesh = self.monitor.mesh.get().copied().unwrap_or_default();
         crate::log::banner::Bound {
-            client: self.addr,
+            client: self.ident.addr,
             monitor: self.monitor.addr(),
             websocket: self.ws.as_ref().map(|w| w.addr),
             leafnodes: mesh.leafnodes,
@@ -194,13 +230,13 @@ impl Shared {
     /// Notes that a client went away.
     pub(crate) fn client_gone(&self) {
         // Relaxed: a counter, read now and then.
-        self.gone.fetch_add(1, Ordering::Relaxed);
+        self.tally.gone.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Clients accepted so far.
     pub(crate) fn total_clients(&self) -> u64 {
         // Relaxed: a count read now and then.
-        self.next_client.load(Ordering::Relaxed) - 1
+        self.tally.next_client.load(Ordering::Relaxed) - 1
     }
 }
 
@@ -230,24 +266,28 @@ impl Server {
     /// [`Error::Write`] if the process ID or ports file cannot be written.
     pub fn start(opts: &Options) -> Result<Server, Error> {
         let setup = check(opts)?;
+        let tls = setup.tls;
         let log = crate::log::Log::new(&opts.log).map_err(Error::Log)?;
         let accounts = auth::accounts(opts);
         let system = auth::system(opts, &accounts);
         let logins = Logins::new(opts, &accounts, None);
         let ctx = context(opts)?;
-        let (ports, at) = bind_all(&ctx, opts)?;
+        let (ports, at) = listen::bind_all(&ctx, opts)?;
         let (txs, rxs): (Vec<_>, Vec<_>) = (0..ctx.lanes()).map(|_| lane::mailboxes()).unzip();
         let keys = Keys::new();
         let started = std::time::SystemTime::now();
         let node = node(&opts.server_name);
         let shared = Arc::new(Shared {
-            id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
-            options: std::sync::RwLock::new(Arc::new(opts.clone())),
-            max_pending: opts.max_pending,
-            addr: at.client,
             callouts: crate::callout::Callouts::new(opts, &accounts, logins.auth.as_ref(), node),
-            server_id: keys.server.public_key(),
-            keys,
+            ident: Ident {
+                id: NEXT_SERVER.fetch_add(1, Ordering::Relaxed),
+                addr: at.client,
+                server_id: keys.server.public_key(),
+                keys,
+                started,
+            },
+            tally: Tally::new(ctx.lanes()),
+            max_pending: opts.max_pending,
             lanes: txs.into_boxed_slice(),
             accounts: Arc::new(new_accounts(
                 &accounts,
@@ -256,28 +296,25 @@ impl Server {
                 opts,
             )),
             resolver: setup.resolver,
-            trust: logins.auth.as_ref().and_then(Auth::trust_arc).cloned(),
-            logins: std::sync::RwLock::new(Arc::new(logins)),
+            trust: logins.auth.as_ref().and_then(Auth::trust).cloned(),
             log,
             stopping: std::sync::atomic::AtomicBool::new(false),
             lame: crate::lame::Lame::default(),
-            counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
-            peer_counts: (0..ctx.lanes()).map(|_| stats::Shared::default()).collect(),
             monitor: crate::monitor::State::new(opts, started, at.monitor),
-            events: stats::Events::default(),
-            started,
-            gone: AtomicU64::new(0),
-            tls: crate::tls::Current::new(setup.tls),
-            ws: door(opts, at.ws, setup.ws_tls),
-            hubs: crate::leaf::HubRemotes::new(setup.hubs, ctx.lanes()),
+            ws: door(opts, at.ws, tls.ws),
+            live: Live {
+                options: Swap::new(Arc::new(opts.clone())),
+                logins: Swap::new(Arc::new(logins)),
+                tls: Swap::new(tls.clients.map(Arc::new)),
+                hubs: crate::leaf::HubRemotes::new(tls.hubs, ctx.lanes()),
+            },
             system,
             sys: crate::sys::State::new(system.map(|_| node)),
             connect_urls: std::sync::Mutex::default(),
             reload: crate::reload::State::default(),
             marks: Arc::default(),
-            next_client: AtomicU64::new(1),
         });
-        let mesh = run(&ctx, &shared, rxs, ports, setup.monitor_tls)?;
+        let mesh = listen::run(&ctx, &shared, rxs, ports, tls.https)?;
         let _ = shared.monitor.mesh.set(mesh);
         *shared.reload.ports() = announce(&shared)?;
         Ok(Server {
@@ -469,47 +506,57 @@ fn door(
     let opts = opts.websocket.clone()?;
     Some(crate::ws::Door {
         opts,
-        tls: crate::tls::Current::new(tls),
+        tls: Swap::new(tls.map(Arc::new)),
         addr: addr?,
     })
 }
 
-/// TLS as the options set it up, its files read.
+/// What the options set up, checked and their files read.
 struct Setup {
-    /// For the client port.
-    tls: Option<Acceptor>,
-    /// For the WebSocket port.
-    ws_tls: Option<Acceptor>,
-    /// The remotes to `nats-server` hubs, with their TLS.
-    hubs: Vec<(crate::Remote, crate::leaf::Connector)>,
+    tls: Tls,
     /// The imports of each account, by id.
     imports: Box<[crate::imports::Imports]>,
     /// The directory resolver, if there is one.
     resolver: Option<crate::resolver::Dir>,
-    /// For the HTTPS monitoring port.
-    monitor_tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
-/// Checks `opts` and reads the TLS files they name: for the client port,
-/// the WebSocket port and the leaf node remotes.
+/// The TLS of options, their files read: a start and each reload read it
+/// here, so that a reload misses no port.
+pub(crate) struct Tls {
+    /// Of the client port.
+    pub(crate) clients: Option<Acceptor>,
+    /// Of the WebSocket port.
+    pub(crate) ws: Option<Acceptor>,
+    /// Of the HTTPS monitoring port.
+    pub(crate) https: Option<tokio_rustls::TlsAcceptor>,
+    /// The remotes to `nats-server` hubs, with their TLS.
+    pub(crate) hubs: Vec<(crate::Remote, crate::leaf::Connector)>,
+}
+
+impl Tls {
+    /// The TLS of `o`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Tls`] for a file that cannot be read.
+    pub(crate) fn read(o: &Options) -> Result<Tls, Error> {
+        let ws = o.websocket.as_ref().and_then(|w| w.tls.as_ref());
+        Ok(Tls {
+            clients: o.tls.as_ref().map(Acceptor::new).transpose()?,
+            ws: ws.map(Acceptor::new).transpose()?,
+            https: crate::monitor::acceptor(o)?,
+            hubs: crate::leaf::to_hubs(o)?,
+        })
+    }
+}
+
+/// Checks `opts` and reads the files they name.
 fn check(opts: &Options) -> Result<Setup, Error> {
-    validate(opts)?;
-    let imports = crate::imports::link(opts).map_err(Error::Options)?;
-    let tls = opts.tls.as_ref().map(Acceptor::new).transpose()?;
-    let ws_tls = opts
-        .websocket
-        .as_ref()
-        .and_then(|w| w.tls.as_ref())
-        .map(Acceptor::new)
-        .transpose()?;
-    let hubs = crate::leaf::to_hubs(opts)?;
+    let imports = linked(opts)?;
     Ok(Setup {
-        tls,
-        ws_tls,
-        hubs,
+        tls: Tls::read(opts)?,
         imports,
         resolver: crate::resolver::Dir::open(opts).map_err(Error::Options)?,
-        monitor_tls: crate::monitor::acceptor(opts)?,
     })
 }
 
@@ -519,8 +566,14 @@ fn check(opts: &Options) -> Result<Setup, Error> {
 ///
 /// [`Error::Options`] or [`Error::Tls`], as [`Server::start`] gives them.
 pub(crate) fn validate(opts: &Options) -> Result<(), Error> {
+    linked(opts).map(drop)
+}
+
+/// The imports of each account of `opts`, by id, once `opts` are checked
+/// not to contradict themselves.
+fn linked(opts: &Options) -> Result<Box<[crate::imports::Imports]>, Error> {
     auth::validate(opts).map_err(Error::Options)?;
-    crate::imports::link(opts).map_err(Error::Options)?;
+    let imports = crate::imports::link(opts).map_err(Error::Options)?;
     crate::leaf::validate(opts).map_err(Error::Options)?;
     crate::mesh::validate(opts).map_err(Error::Options)?;
     crate::lame::validate(opts).map_err(Error::Options)?;
@@ -528,102 +581,7 @@ pub(crate) fn validate(opts: &Options) -> Result<(), Error> {
     if let Some(w) = &opts.websocket {
         crate::ws::validate(w).map_err(Error::Options)?;
     }
-    Ok(())
-}
-
-/// The listeners of a server, bound.
-struct Ports {
-    client: Listener,
-    monitor: Option<Listener>,
-    ws: Option<Listener>,
-}
-
-/// Starts the lanes, then the accept loops of `ports` on lane 0. Returns
-/// where lane 0 bound the ports of the servers reached over OMQ.
-fn run(
-    ctx: &Context,
-    shared: &Arc<Shared>,
-    rxs: Vec<lane::LaneRx>,
-    ports: Ports,
-    monitor_tls: Option<tokio_rustls::TlsAcceptor>,
-) -> Result<crate::mesh::Bound, Error> {
-    let lanes: Box<[LaneHandle]> = (0..ctx.lanes()).map(|i| ctx.lane(i).clone()).collect();
-    for (l, rx) in lanes.iter().zip(rxs) {
-        let (s, index) = (shared.clone(), l.index());
-        l.run(move || lane::install(s, index, rx))
-            .map_err(|e| Error::Lanes(io(e)))?;
-    }
-    let first = ctx.lane(0);
-    shared.monitor.set_tls(monitor_tls);
-    if let Some(m) = ports.monitor {
-        let s = shared.clone();
-        first
-            .spawn(move || crate::monitor::serve(m, s))
-            .map_err(|e| Error::Lanes(io(e)))?;
-    }
-    if let Some(w) = ports.ws {
-        let (l, s, open) = (
-            lanes.clone(),
-            shared.clone(),
-            crate::lame::Door::open(shared),
-        );
-        first
-            .spawn(move || accept(w, l, s, Door::Websocket, open))
-            .map_err(|e| Error::Lanes(io(e)))?;
-    }
-    // A naq hub is dialed with the cluster, over OMQ.
-    for hub in shared.hubs.all() {
-        let s = shared.clone();
-        lanes[hub.lane]
-            .spawn(move || crate::leaf::run(s, hub))
-            .map_err(|e| Error::Lanes(io(e)))?;
-    }
-    let mesh = if crate::mesh::wanted(&shared.opts()) {
-        let (ready, bound) = std::sync::mpsc::sync_channel(1);
-        let (l, s) = (lanes.clone(), shared.clone());
-        first
-            .spawn(move || crate::mesh::run(s, l, ready))
-            .map_err(|e| Error::Lanes(io(e)))?;
-        mesh_bound(&bound, shared)?
-    } else {
-        crate::mesh::Bound::default()
-    };
-    let (c, s, open) = (
-        ports.client,
-        shared.clone(),
-        crate::lame::Door::open(shared),
-    );
-    first
-        .spawn(move || accept(c, lanes, s, Door::Client, open))
-        .map_err(|e| Error::Lanes(io(e)))?;
-    Ok(mesh)
-}
-
-/// Where the cluster port and the port of naq leafs were bound, once lane
-/// 0 tells it.
-fn mesh_bound(
-    bound: &std::sync::mpsc::Receiver<Result<crate::mesh::Bound, String>>,
-    shared: &Shared,
-) -> Result<crate::mesh::Bound, Error> {
-    let opts = &shared.opts();
-    let ports = [
-        opts.cluster
-            .as_ref()
-            .map(|c| format!("{}:{}", c.host, c.port)),
-        opts.leafnodes
-            .as_ref()
-            .map(|l| format!("{}:{}", l.host, l.port)),
-    ];
-    let addr = ports.into_iter().flatten().collect::<Vec<_>>().join(", ");
-    let failed = |why: String| Error::Listen {
-        addr: addr.clone(),
-        source: std::io::Error::other(why),
-    };
-    match bound.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(Ok(at)) => Ok(at),
-        Ok(Err(why)) => Err(failed(why)),
-        Err(_) => Err(failed("lane 0 did not bind it".into())),
-    }
+    Ok(imports)
 }
 
 /// The lanes to run for `wanted`: 0 is one per core the process may run on.
@@ -632,171 +590,6 @@ fn lanes(wanted: usize) -> usize {
         return wanted;
     }
     std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-}
-
-/// Where a server's listeners are bound.
-struct Addrs {
-    client: SocketAddr,
-    monitor: Option<SocketAddr>,
-    ws: Option<SocketAddr>,
-}
-
-/// The listeners of `opts`: for clients, monitoring and WebSocket.
-fn bind_all(ctx: &Context, opts: &Options) -> Result<(Ports, Addrs), Error> {
-    let listen = |source| Error::Listen {
-        addr: format!("{}:{}", opts.host, opts.port),
-        source,
-    };
-    let (client, addr) = bind(ctx, &opts.host, opts.port).map_err(listen)?;
-    let monitor = bind_monitor(ctx, opts)?;
-    let ws = bind_websocket(ctx, opts)?;
-    let at = Addrs {
-        client: addr,
-        monitor: monitor.as_ref().map(|(_, a)| *a),
-        ws: ws.as_ref().map(|(_, a)| *a),
-    };
-    let ports = Ports {
-        client,
-        monitor: monitor.map(|(l, _)| l),
-        ws: ws.map(|(l, _)| l),
-    };
-    Ok((ports, at))
-}
-
-/// Binds the monitoring port, HTTP or HTTPS, if `opts` want one.
-fn bind_monitor(ctx: &Context, opts: &Options) -> Result<Option<(Listener, SocketAddr)>, Error> {
-    let Some(port) = opts.http_port.or(opts.https_port) else {
-        return Ok(None);
-    };
-    let host = opts.http_host.as_deref().unwrap_or(&opts.host);
-    let bound = bind(ctx, host, port).map_err(|source| Error::Listen {
-        addr: format!("{host}:{port}"),
-        source,
-    })?;
-    Ok(Some(bound))
-}
-
-/// Binds the WebSocket port, if `opts` want one.
-fn bind_websocket(ctx: &Context, opts: &Options) -> Result<Option<(Listener, SocketAddr)>, Error> {
-    let Some(w) = &opts.websocket else {
-        return Ok(None);
-    };
-    let bound = bind(ctx, &w.host, w.port).map_err(|source| Error::Listen {
-        addr: format!("{}:{}", w.host, w.port),
-        source,
-    })?;
-    Ok(Some(bound))
-}
-
-/// The address `host` names: itself, or for a name such as `localhost`,
-/// its first IPv4 address if it has one, as Go listens.
-fn resolve(host: &str) -> std::io::Result<String> {
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(host.to_owned());
-    }
-    let addrs: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&(host, 0))?.collect();
-    addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .map(|a| a.ip().to_string())
-        .ok_or_else(|| std::io::Error::other(format!("no address for {host}")))
-}
-
-/// Binds `host` and `port` on lane 0, where the accept loops run. The
-/// IPv4 wildcard binds as `[::]`, for IPv6 clients too, as Go binds it.
-fn bind(ctx: &Context, host: &str, port: u16) -> std::io::Result<(Listener, SocketAddr)> {
-    let ip = resolve(host)?;
-    if ip == "0.0.0.0"
-        && let Ok((l, at)) = bind_ip(ctx, "::".into(), port)
-    {
-        return Ok((l, SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), at.port())));
-    }
-    bind_ip(ctx, ip, port)
-}
-
-/// Binds address `ip` and `port` on lane 0.
-fn bind_ip(ctx: &Context, ip: String, port: u16) -> std::io::Result<(Listener, SocketAddr)> {
-    let endpoint = Endpoint::Tcp { host: ip, port };
-    let (tx, rx) = std::sync::mpsc::channel();
-    let c = ctx.clone();
-    ctx.lane(0)
-        .spawn(move || async move {
-            let bound = Listener::bind(&c, &endpoint, &TransportOptions::default()).await;
-            // The listener must not keep the lanes alive.
-            drop(c);
-            let _ = tx.send(bound);
-        })
-        .map_err(io)?;
-    let listener = rx
-        .recv()
-        .map_err(|_| std::io::Error::other("lane 0 stopped"))?
-        .map_err(io)?;
-    let Endpoint::Tcp { host, port } = listener.endpoint() else {
-        return Err(std::io::Error::other("not a TCP listener"));
-    };
-    let ip = host
-        .parse()
-        .map_err(|_| std::io::Error::other(format!("not an address: {host}")))?;
-    Ok((listener, SocketAddr::new(ip, port)))
-}
-
-/// The kind of client a port takes.
-#[derive(Debug, Clone, Copy)]
-enum Door {
-    Client,
-    Websocket,
-}
-
-/// Accepts clients at `door` and hands them to the lanes in turn, until
-/// the server stops or goes into lame duck mode. `open` counts the loop
-/// open until the listener closed.
-async fn accept(
-    listener: Listener,
-    lanes: Box<[LaneHandle]>,
-    shared: Arc<Shared>,
-    door: Door,
-    open: crate::lame::Door,
-) {
-    accept_until(listener, &lanes, &shared, door).await;
-    drop(open);
-}
-
-/// Accepts clients at `door` and hands them to `lanes` in turn, until the
-/// server stops or goes into lame duck mode, then closes `listener`.
-async fn accept_until(
-    mut listener: Listener,
-    lanes: &[LaneHandle],
-    shared: &Arc<Shared>,
-    door: Door,
-) {
-    let mut next = 0;
-    loop {
-        // Cancel-safe: an accept dropped takes no connection.
-        let got = tokio::select! {
-            got = listener.accept() => got,
-            () = crate::lame::started(shared) => return,
-        };
-        let stream = match got {
-            Ok(s) => s,
-            Err(zzq_tokio::Error::Closed) => return,
-            Err(_) => {
-                tokio::time::sleep(ACCEPT_BACKOFF).await;
-                continue;
-            }
-        };
-        if crate::stop::stopping(shared) || crate::lame::on(shared) {
-            return;
-        }
-        let lane = &lanes[next % lanes.len()];
-        next += 1;
-        let (s, index) = (shared.clone(), lane.index());
-        // Fails only once the lane stopped, which drops the stream.
-        let _ = match door {
-            Door::Client => lane.spawn(move || conn::run(s, index, stream)),
-            Door::Websocket => lane.spawn(move || crate::ws::run(s, index, stream)),
-        };
-    }
 }
 
 /// The hash of server name `name`: eight letters or digits from its
@@ -826,6 +619,15 @@ pub(crate) fn random() -> impl FnMut(u64) -> u64 {
         h.write_u64(n);
         n += 1;
         h.finish() % below
+    }
+}
+
+/// Puts `all` in an order picked at random by `below`.
+pub(crate) fn shuffle<T>(all: &mut [T], mut below: impl FnMut(u64) -> u64) {
+    for i in (1..all.len()).rev() {
+        // Below `i + 1`: it fits.
+        let j = below(i as u64 + 1) as usize;
+        all.swap(i, j);
     }
 }
 

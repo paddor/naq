@@ -2,10 +2,11 @@
 //! on a lane of its own, as a reload adds and removes them.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::Connector;
 use crate::Remote;
+use crate::swap::Swap;
 
 /// A remote to a `nats-server` hub, while the server serves it.
 #[derive(Debug)]
@@ -14,7 +15,7 @@ pub(crate) struct HubRemote {
     /// The lane its link runs on.
     pub(crate) lane: usize,
     /// TLS to its hub, read again at each reload.
-    tls: RwLock<Arc<Connector>>,
+    tls: Swap<Arc<Connector>>,
     /// A reload removed it: it dials no more, and its link goes.
     gone: AtomicBool,
     /// The ID of its link while one is up; 0 for none.
@@ -27,7 +28,7 @@ impl HubRemote {
         HubRemote {
             remote,
             lane,
-            tls: RwLock::new(Arc::new(tls)),
+            tls: Swap::new(Arc::new(tls)),
             gone: AtomicBool::new(false),
             link: AtomicU64::new(0),
         }
@@ -35,10 +36,7 @@ impl HubRemote {
 
     /// TLS to its hub, now.
     pub(crate) fn tls(&self) -> Arc<Connector> {
-        self.tls
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.tls.get()
     }
 
     /// Whether a reload removed it.
@@ -68,7 +66,7 @@ impl HubRemote {
     /// masked: its URLs, account, and credentials file or NKey.
     pub(crate) fn name(r: &Remote) -> String {
         let urls: Vec<String> = r.urls.iter().map(|u| format!("{:?}", masked(u))).collect();
-        let account = r.account.as_deref().unwrap_or("$G");
+        let account = r.account_name();
         let extra = match (&r.credentials, &r.nkey) {
             (Some(c), _) => format!(", credentials={:?}", c.display().to_string()),
             (None, Some(_)) => ", nkey=\"[REDACTED]\"".to_owned(),
@@ -154,7 +152,7 @@ impl HubRemotes {
     /// Takes `tls` for the remote it serves that `r` names.
     pub(crate) fn retls(&self, r: &Remote, tls: Connector) {
         if let Some(h) = self.lock().iter().find(|h| h.is(r)) {
-            *h.tls.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(tls);
+            h.tls.set(Arc::new(tls));
         }
     }
 

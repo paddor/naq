@@ -46,8 +46,74 @@ pub(super) enum Change {
     Remotes,
 }
 
+/// What has to follow a change, once all are applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Then {
+    /// The log is set up anew.
+    Logging,
+    /// `STATSZ` goes out.
+    Statsz,
+}
+
+impl Change {
+    /// What `nats-server` logs of it, after `Reloaded: `; `None` for the
+    /// pid and ports files and the remotes, which log their own as they
+    /// are applied.
+    pub(super) fn said(&self) -> Option<String> {
+        Some(match self {
+            Change::Trace(on) => format!("trace = {on}"),
+            Change::Debug(on) => format!("debug = {on}"),
+            Change::TraceHeaders(on) => format!("trace_headers = {on}"),
+            Change::Logtime(on) => format!("logtime = {on}"),
+            Change::NkeyUsers => "authorization nkey users".into(),
+            Change::Users => "authorization users".into(),
+            Change::Accounts => "accounts".into(),
+            Change::Username => "authorization username".into(),
+            Change::Password => "authorization password".into(),
+            Change::Token => "authorization token".into(),
+            Change::AuthTimeout(d) => format!("authorization timeout = {}", seconds(*d)),
+            Change::LogFile(path) => format!("log_file = {path}"),
+            Change::Syslog(on) => format!("syslog = {on}"),
+            Change::RemoteSyslog(url) => format!("remote_syslog = {url}"),
+            Change::MaxTracedMsgLen(n) => format!("max_traced_msg_len = {n}"),
+            Change::PingInterval(d) => format!("ping_interval = {}", go_duration(*d)),
+            Change::PingMax(n) => format!("ping_max = {n}"),
+            Change::MaxControlLine(n) => format!("max_control_line = {n}"),
+            Change::MaxPayload(n) => format!("max_payload = {n}"),
+            Change::WriteDeadline(d) => format!("write_deadline = {}", go_duration(*d)),
+            Change::TlsTimeout(d) => format!("tls timeout = {}", seconds(*d)),
+            Change::Tls(true) => "tls = enabled".into(),
+            Change::Tls(false) => "tls = disabled".into(),
+            Change::HandshakeFirst(on) => format!("Client TLS handshake first: {on}"),
+            Change::Fallback(d) => format!(
+                "Client TLS handshake first fallback delay: {}",
+                go_duration(*d)
+            ),
+            Change::Tags => "tags".into(),
+            Change::Metadata => "metadata".into(),
+            Change::PidFile(_) | Change::PortsFileDir(_) | Change::Remotes => return None,
+        })
+    }
+
+    /// What has to follow it, if anything.
+    pub(super) const fn then(&self) -> Option<Then> {
+        match self {
+            Change::Trace(_)
+            | Change::Debug(_)
+            | Change::TraceHeaders(_)
+            | Change::Logtime(_)
+            | Change::LogFile(_)
+            | Change::Syslog(_)
+            | Change::RemoteSyslog(_)
+            | Change::MaxTracedMsgLen(_) => Some(Then::Logging),
+            Change::Tags | Change::Metadata => Some(Then::Statsz),
+            _ => None,
+        }
+    }
+}
+
 /// A value as Go's `%v` writes it.
-trait Go {
+pub(super) trait Go {
     fn go(&self) -> String;
 }
 
@@ -58,6 +124,12 @@ impl Go for String {
 }
 
 impl Go for bool {
+    fn go(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Go for u16 {
     fn go(&self) -> String {
         self.to_string()
     }
@@ -117,8 +189,9 @@ pub(super) struct At {
     pub(super) tls: bool,
 }
 
-/// The changes from `old` to `new`, for a server at `at`: in the order of `nats-server`'s options, or the first
-/// change the server cannot take, in Go's words.
+/// The changes from `old` to `new`, for a server at `at`: in the order of
+/// `nats-server`'s options, or the first change the server cannot take,
+/// in Go's words.
 pub(super) fn changes(old: &Options, new: &Options, at: At) -> Result<Vec<Change>, String> {
     let mut d = Diff {
         old,
@@ -343,18 +416,8 @@ fn cluster(old: Option<&crate::Cluster>, new: Option<&crate::Cluster>) -> Result
         ..crate::Cluster::default()
     };
     let (o, n) = (old.unwrap_or(&none), new.unwrap_or(&none));
-    if o.host != n.host {
-        let (a, b) = (&o.host, &n.host);
-        return Err(format!(
-            "config reload not supported for cluster host: old={a}, new={b}"
-        ));
-    }
-    if o.port != n.port {
-        let (a, b) = (o.port, n.port);
-        return Err(format!(
-            "config reload not supported for cluster port: old={a}, new={b}"
-        ));
-    }
+    fixed("cluster host", &o.host, &n.host)?;
+    fixed("cluster port", &o.port, &n.port)?;
     fixed("ClusterName", &o.name, &n.name)
 }
 

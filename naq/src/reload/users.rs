@@ -62,7 +62,7 @@ pub(super) fn recheck(shared: &Shared) {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     for lane in 0..shared.lanes.len() {
         let tx = tx.clone();
-        crate::monitor::on_lane(shared, lane, move |lane| lane.reload(tx));
+        crate::lane::on_lane(shared, lane, move |lane| lane.reload(tx));
     }
     drop(tx);
     // Nothing is sent: every sender dropped, or the time is up.

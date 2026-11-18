@@ -211,7 +211,7 @@ async fn take(lane: &Lane, out: &mut Outs, chunk: Bytes, from: From) {
     // A subscriber past the stall mark slows the sender to its pace: its
     // link fills up meanwhile.
     if let Some(sub) = stalled {
-        conn::stall(&sub, mark, &lane.shared.events.stalls).await;
+        conn::stall(&sub, mark, &lane.shared.tally.events.stalls).await;
     }
 }
 

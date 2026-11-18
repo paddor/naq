@@ -51,6 +51,7 @@ pub(crate) fn decide(
     let (text, sealed) = match &ask.sealed_by {
         Some(from) if !payload.starts_with(b"eyJ") => {
             let open = shared
+                .ident
                 .keys
                 .xkey
                 .open(payload, from)
@@ -62,7 +63,7 @@ pub(crate) fn decide(
     let text = String::from_utf8(text).map_err(|_| "not a JWT".to_owned())?;
     let r = decode::<claims::AuthResponse>(&text).map_err(|e| e.to_string())?;
     let trust = shared.trust();
-    holds(&r, ask, &shared.server_id, sealed, trust)?;
+    holds(&r, ask, &shared.ident.server_id, sealed, trust)?;
     let user = decode::<claims::User>(&r.nats.jwt).map_err(|e| e.to_string())?;
     if user.out_of_time(now()) {
         return Err("user JWT is expired".into());

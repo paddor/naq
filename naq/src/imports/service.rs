@@ -292,7 +292,7 @@ async fn sweep(shared: std::sync::Weak<crate::server::Shared>) {
             continue;
         }
         // The samples of requests that timed out go out from lane 0.
-        let Some(lane) = crate::lane::get(s.id, 0) else {
+        let Some(lane) = crate::lane::get(s.ident.id, 0) else {
             return;
         };
         let mut out = Outs::new(&lane);

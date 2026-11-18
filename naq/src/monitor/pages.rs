@@ -55,7 +55,7 @@ pub(super) fn gatewayz(shared: &Shared, q: &Query) -> Result<Response, Refused> 
     q.subs()?;
     q.bool("accs")?;
     Ok(pretty(&Gatewayz {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         now: now(),
         outbound_gateways: Empty {},
         inbound_gateways: Empty {},
@@ -118,7 +118,7 @@ pub(super) fn jsz(shared: &Shared, q: &Query) -> Result<Response, Refused> {
         return Err("filtered response: not leader".into());
     }
     Ok(pretty(&Jsz {
-        server_id: shared.server_id.clone(),
+        server_id: shared.ident.server_id.clone(),
         now: now(),
         disabled: true,
         ..Jsz::default()

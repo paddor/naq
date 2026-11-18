@@ -160,11 +160,15 @@ pub(super) enum Kind<'a> {
 pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u8>) {
     // A WebSocket client sees its own port, and TLS as that port has it.
     let ws = shared.ws.as_ref().filter(|_| to.ws);
-    let current = shared.tls.get();
+    let current = shared.live.tls.get();
     let opts = shared.opts();
     let (host, port, tls) = match ws {
         Some(w) => (w.opts.host.as_str(), w.addr.port(), w.tls.get().is_some()),
-        None => (opts.host.as_str(), shared.addr.port(), current.is_some()),
+        None => (
+            opts.host.as_str(),
+            shared.ident.addr.port(),
+            current.is_some(),
+        ),
     };
     let bound = match kind {
         Kind::Bound(account) => Some(account),
@@ -182,7 +186,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
         (Kind::First, None) => false,
     };
     let info = Info {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         server_name: &opts.server_name,
         version: crate::server::NATS_VERSION,
         proto: 1,
@@ -203,7 +207,7 @@ pub(super) fn info(shared: &Shared, to: &To<'_>, kind: Kind<'_>, out: &mut Vec<u
         ldm: matches!(kind, Kind::Async { ldm: true }),
         bound: bound.is_some(),
         remote_account: bound,
-        xkey: shared.keys.xkey.public_key(),
+        xkey: shared.ident.keys.xkey.public_key(),
     };
     // Cannot fail: no maps, no fallible serializers.
     let json = serde_json::to_vec(&info).unwrap_or_default();
@@ -218,7 +222,7 @@ fn connect_urls(shared: &Shared) -> Vec<String> {
     }
     let mut all = Vec::new();
     if !crate::lame::on(shared) {
-        all.push(shared.addr.to_string());
+        all.push(shared.ident.addr.to_string());
     }
     // A poisoned lock still holds the list.
     let others = shared

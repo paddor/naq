@@ -6,6 +6,7 @@
 //! encodes it for its own subscribers and forwards it once, in a batch, to
 //! each other lane with interest.
 
+mod ask;
 mod data;
 mod peer;
 mod publish;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
+pub(crate) use ask::{Ask, ask, ask_all, on_lane};
 pub(crate) use data::{Batch, Imported, Outs, Source};
 pub(crate) use publish::{Routing, inject, inject_through};
 pub(crate) use route::{Queue, Queued};
@@ -73,7 +75,7 @@ pub(crate) enum Control {
     /// they are gone, or after a while.
     Shutdown(oneshot::Sender<()>),
     /// Work for monitoring, run on the lane.
-    Ask(crate::monitor::Ask),
+    Ask(crate::lane::Ask),
     /// The server in slot `server` has `weight` members in `subject` of
     /// `account`, in `queue` if given; none to remove them.
     Server {
@@ -210,7 +212,7 @@ pub(crate) struct Lane {
     reloading: RefCell<Option<Reloading>>,
     /// What this lane announced to lane 0, and knows of the interest of
     /// other servers taken: its batches follow interest across the mesh.
-    pub(crate) marks: crate::mesh::OnLane,
+    pub(crate) marks: crate::mesh::LaneMarks,
 }
 
 /// Clients of a lane a reload waits for: `done` drops once all checked
@@ -324,8 +326,8 @@ impl Lane {
     /// Wakes the writers of every client marked since the last flush, and
     /// publishes the lane's counts.
     pub(crate) fn flush(&self) {
-        self.tally.publish(&self.shared.counts[self.id]);
-        self.peers.publish(&self.shared.peer_counts[self.id]);
+        self.tally.publish(&self.shared.tally.counts[self.id]);
+        self.peers.publish(&self.shared.tally.peer_counts[self.id]);
         let mut dirty = self.dirty.take();
         for c in dirty.drain(..) {
             c.dirty.set(false);
@@ -377,18 +379,8 @@ impl Lane {
     /// Waits until every other lane applied what this one announced.
     pub(crate) async fn fence(&self) {
         let unmade = self.marks.unmade();
-        let mut answers = Vec::with_capacity(self.lanes());
-        for (i, tx) in self.shared.lanes.iter().enumerate() {
-            if i != self.id {
-                let (done, answer) = oneshot::channel();
-                tx.control.push(Control::Fence(done));
-                answers.push(answer);
-            }
-        }
-        for a in answers {
-            // An error means the lane stopped: nothing left to wait for.
-            let _ = a.await;
-        }
+        let others = (0..self.shared.lanes.len()).filter(|i| *i != self.id);
+        fence_lanes(&self.shared, others).await;
         if let Some(upto) = unmade {
             self.marks.fenced(upto);
         }
@@ -400,11 +392,32 @@ impl Lane {
         let Some(upto) = self.marks.unmade() else {
             return;
         };
-        let (done, answer) = oneshot::channel();
-        self.shared.lanes[0].control.push(Control::Fence(done));
-        // An error means lane 0 stopped: nothing left to wait for.
-        let _ = answer.await;
+        fence_lanes(&self.shared, std::iter::once(0)).await;
         self.marks.fenced(upto);
+    }
+
+    /// Closes its client or link to a hub `id` as `why`, if it has it.
+    pub(crate) fn kick(&self, id: u64, why: crate::conn::Close) -> bool {
+        if let Some(c) = self.clients.borrow().get(&id) {
+            c.kick(why);
+            return true;
+        }
+        let links = self.links.borrow();
+        let link = links.iter().find(|l| l.id == id);
+        link.inspect(|l| l.client.kick(why)).is_some()
+    }
+
+    /// Whether it has client or link to a hub `id`.
+    pub(crate) fn has_conn(&self, id: u64) -> bool {
+        self.clients.borrow().contains_key(&id) || self.links.borrow().iter().any(|l| l.id == id)
+    }
+
+    /// Sends its clients that `to` picks their `INFO` anew, of lame duck
+    /// mode if `ldm`.
+    pub(crate) fn inform_clients(&self, ldm: bool, to: impl Fn(&Client) -> bool) {
+        for c in self.clients.borrow().values().filter(|c| to(c)) {
+            c.inform(ldm);
+        }
     }
 
     /// Puts the naq hub or leaf `linked` in slot `slot`; a leaf gets its
@@ -504,7 +517,7 @@ impl Lane {
                 id,
                 endpoints,
             } => {
-                if let Some(me) = get(self.shared.id, self.id) {
+                if let Some(me) = get(self.shared.ident.id, self.id) {
                     crate::mesh::hub(&me, slot, &id, &endpoints);
                 }
             }
@@ -521,7 +534,7 @@ fn indexes() -> Indexes {
 /// Sets up lane `id` of the server on the calling lane thread, with the
 /// tasks that take its mailboxes.
 pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
-    let key = (shared.id, id);
+    let key = (shared.ident.id, id);
     let servers = routes(&shared);
     let hubs = crate::mesh::hubs(&shared.opts());
     let lane = Rc::new(Lane {
@@ -551,7 +564,7 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
         account_ids: RefCell::default(),
         ending: Rc::default(),
         reloading: RefCell::default(),
-        marks: crate::mesh::OnLane::default(),
+        marks: crate::mesh::LaneMarks::default(),
     });
     crate::imports::service::install(&lane);
     if let Some(c) = &lane.shared.callouts {
@@ -578,12 +591,19 @@ pub(crate) fn install(shared: Arc<Shared>, id: usize, rx: LaneRx) {
 /// Waits until every lane of `shared`'s server applied the controls handed
 /// to it before.
 pub(crate) async fn fence_all(shared: &Shared) {
-    let mut answers = Vec::with_capacity(shared.lanes.len());
-    for tx in &*shared.lanes {
-        let (done, answer) = oneshot::channel();
-        tx.control.push(Control::Fence(done));
-        answers.push(answer);
-    }
+    fence_lanes(shared, 0..shared.lanes.len()).await;
+}
+
+/// Waits until `lanes` of `shared`'s server applied the controls handed
+/// to them before.
+async fn fence_lanes(shared: &Shared, lanes: impl Iterator<Item = usize>) {
+    let answers: Vec<_> = lanes
+        .map(|i| {
+            let (done, answer) = oneshot::channel();
+            shared.lanes[i].control.push(Control::Fence(done));
+            answer
+        })
+        .collect();
     for a in answers {
         // An error means the lane stopped: nothing left to wait for.
         let _ = a.await;

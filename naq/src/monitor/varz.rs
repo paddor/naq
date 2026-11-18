@@ -228,15 +228,15 @@ impl Kinds {
     /// The slow consumers of `s`, by kind.
     pub(super) fn slow(s: &Shared) -> Kinds {
         Kinds {
-            clients: s.events.slow_clients.get(),
-            leafs: s.events.slow_leafs.get(),
+            clients: s.tally.events.slow_clients.get(),
+            leafs: s.tally.events.slow_leafs.get(),
             ..Kinds::default()
         }
     }
 
     /// The stale connections of `s`, by kind.
     pub(super) fn stale(s: &Shared) -> Kinds {
-        Kinds::of_clients(s.events.stale_clients.get())
+        Kinds::of_clients(s.tally.events.stale_clients.get())
     }
 
     /// Whether it counts none.
@@ -256,7 +256,7 @@ struct DiskIo {
 
 /// What a lane counts for `/varz`.
 #[derive(Debug, Default)]
-pub(super) struct OnLane {
+pub(super) struct LaneCounts {
     subscriptions: u64,
     leafs: usize,
     routes: usize,
@@ -264,8 +264,8 @@ pub(super) struct OnLane {
 
 /// The counts of `lane`: its subscriptions, as `/subsz` counts them, its
 /// links to Go hubs, and on lane 0, the naq links and routes that are up.
-pub(super) fn on_lane(lane: &Lane) -> OnLane {
-    let subscriptions = super::subsz::on_lane(lane);
+pub(super) fn lane_counts(lane: &Lane) -> LaneCounts {
+    let subscriptions = super::subsz::lane_subs(lane);
     let mut leafs = lane.links.borrow().len();
     let mut routes = 0;
     if let Some(mesh) = lane.mesh.borrow().as_ref() {
@@ -277,7 +277,7 @@ pub(super) fn on_lane(lane: &Lane) -> OnLane {
             .filter(|p| p.up.is_some())
             .count();
     }
-    OnLane {
+    LaneCounts {
         subscriptions,
         leafs,
         routes,
@@ -286,26 +286,24 @@ pub(super) fn on_lane(lane: &Lane) -> OnLane {
 
 /// `/varz`.
 pub(super) async fn answer(shared: &Shared) -> Response {
-    let lanes = ask_all(shared, on_lane).await;
+    let lanes = ask_all(shared, lane_counts).await;
     pretty(&varz(shared, &shared.opts(), &lanes))
 }
 
-fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[OnLane]) -> Varz<'a> {
+fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[LaneCounts]) -> Varz<'a> {
     let now = SystemTime::now();
     let (mem, cpu) = usage(&s.monitor.cpu);
     let loaded = s.monitor.loaded();
-    let tls = s.tls.get();
+    let tls = s.live.tls.get();
     let tls = tls.as_deref();
     Varz {
-        server_id: &s.server_id,
-        server_name: Some(o.server_name.as_str())
-            .filter(|n| !n.is_empty())
-            .unwrap_or(&s.server_id),
+        server_id: &s.ident.server_id,
+        server_name: s.name(o),
         version: crate::server::NATS_VERSION,
         proto: 1,
         go: "",
         host: &o.host,
-        port: s.addr.port(),
+        port: s.ident.addr.port(),
         auth_required: s.logins().auth.is_some(),
         tls_required: tls.is_some(),
         tls_verify: tls.is_some_and(|t| t.verify),
@@ -329,9 +327,9 @@ fn varz<'a>(s: &'a Shared, o: &'a Options, lanes: &[OnLane]) -> Varz<'a> {
         jetstream: Empty {},
         tls_timeout: o.tls.as_ref().map_or(2.0, |t| t.timeout.as_secs_f64()),
         write_deadline: nanos(o.write_deadline),
-        start: rfc3339_nano(s.started),
+        start: rfc3339_nano(s.ident.started),
         now: rfc3339_nano(now),
-        uptime: uptime(now.duration_since(s.started).unwrap_or_default()),
+        uptime: uptime(now.duration_since(s.ident.started).unwrap_or_default()),
         mem,
         cores: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         gomaxprocs: s.lanes.len(),
@@ -356,17 +354,17 @@ fn nanos(d: Duration) -> u64 {
 }
 
 /// The counts of `s`, with what `lanes` found.
-pub(super) fn counts(s: &Shared, lanes: &[OnLane]) -> Counts {
+pub(super) fn counts(s: &Shared, lanes: &[LaneCounts]) -> Counts {
     let (mut clients, mut all) = (Totals::default(), Totals::default());
-    for (c, p) in s.counts.iter().zip(&*s.peer_counts) {
+    for (c, p) in s.tally.counts.iter().zip(&*s.tally.peer_counts) {
         clients += c.load();
         all += c.load();
         all += p.load();
     }
     let routes = lanes.iter().map(|l| l.routes).sum();
-    let e = &s.events;
+    let e = &s.tally.events;
     Counts {
-        connections: s.total_clients() - s.gone.load(std::sync::atomic::Ordering::Relaxed),
+        connections: s.total_clients() - s.tally.gone.load(std::sync::atomic::Ordering::Relaxed),
         total_connections: s.total_clients(),
         routes,
         remotes: routes,
@@ -397,7 +395,7 @@ fn connect_urls(s: &Shared) -> Vec<String> {
     if others.is_empty() {
         return Vec::new();
     }
-    std::iter::once(s.addr.to_string())
+    std::iter::once(s.ident.addr.to_string())
         .chain(others.iter().cloned())
         .collect()
 }
@@ -438,7 +436,7 @@ fn leaf<'a>(s: &Shared, o: &'a Options) -> Leaf<'a> {
         .remotes
         .iter()
         .map(|r| Remote {
-            local_account: r.account.as_deref().unwrap_or("$G"),
+            local_account: r.account_name(),
             tls_timeout: r.tls.as_ref().map(|t| t.timeout.as_secs_f64()),
             urls: r.urls.iter().map(|u| host_port(u, 7422)).collect(),
             deny: (!r.deny_imports.is_empty() || !r.deny_exports.is_empty()).then_some(Deny {

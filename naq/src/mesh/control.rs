@@ -41,7 +41,7 @@ impl Me {
         leafnodes: Option<SocketAddr>,
     ) -> Me {
         let data = data.join(" ");
-        let urls = shared.addr.to_string();
+        let urls = shared.ident.addr.to_string();
         let leaf_urls = leafnodes.map(|a| a.to_string()).unwrap_or_default();
         let hello = |client_urls: &[u8]| {
             let mut hello = Vec::new();
@@ -49,7 +49,7 @@ impl Me {
                 role: Role::Route,
                 account: b"",
                 epoch,
-                server_id: shared.server_id.as_bytes(),
+                server_id: shared.ident.server_id.as_bytes(),
                 name: shared.opts().server_name.as_bytes(),
                 cluster: c.name.as_bytes(),
                 data: data.as_bytes(),
@@ -61,7 +61,7 @@ impl Me {
             Bytes::from(hello)
         };
         Me {
-            id: Bytes::copy_from_slice(shared.server_id.as_bytes()),
+            id: Bytes::copy_from_slice(shared.ident.server_id.as_bytes()),
             cluster: c.name.clone(),
             hello: hello(urls.as_bytes()),
             lame: hello(b""),
@@ -276,12 +276,8 @@ fn connect_urls(shared: &Shared, mesh: &Mesh) {
         *known = urls;
     }
     for lane in 0..shared.lanes.len() {
-        crate::monitor::on_lane(shared, lane, |lane| {
-            for c in lane.clients.borrow().values() {
-                if !c.meta.borrow().websocket {
-                    c.inform(false);
-                }
-            }
+        crate::lane::on_lane(shared, lane, |lane| {
+            lane.inform_clients(false, |c| !c.meta.borrow().websocket);
         });
     }
 }

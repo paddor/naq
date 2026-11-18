@@ -747,6 +747,13 @@ pub struct Remote {
     pub tls: Option<RemoteTls>,
 }
 
+impl Remote {
+    /// The account it binds, `$G` by default.
+    pub(crate) fn account_name(&self) -> &str {
+        self.account.as_deref().unwrap_or("$G")
+    }
+}
+
 /// TLS of a leaf node link (`tls` of a remote): the handshake after the
 /// hub's `INFO`, or before it.
 #[derive(Debug, Clone, PartialEq, Eq)]

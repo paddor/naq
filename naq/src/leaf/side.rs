@@ -177,7 +177,7 @@ impl LinkSide {
         lane.mark(c);
         let opts = &lane.shared.opts();
         if len > opts.max_pending {
-            lane.shared.events.slow_leafs.note();
+            lane.shared.tally.events.slow_leafs.note();
             c.close();
         } else if len > opts.max_pending / 4 * 3 {
             *stalled = Some(c.clone());

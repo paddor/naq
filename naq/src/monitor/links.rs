@@ -189,7 +189,7 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
         }
     }
     Ok(pretty(&Leafz {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         now: now(),
         leafnodes: leafs.len(),
         leafs,

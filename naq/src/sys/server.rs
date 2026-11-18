@@ -273,7 +273,7 @@ const fn state(n: i64) -> &'static str {
 pub(super) fn wanted(shared: &Shared, set: &Set) -> bool {
     let o = &shared.opts();
     let me = Me {
-        name: reply::name(shared, o),
+        name: shared.name(o),
         host: &o.host,
         cluster: o.cluster.as_ref().map_or("", |c| c.name.as_str()),
         tags: &o.server_tags,
@@ -353,9 +353,9 @@ pub(super) fn take(lane: &Lane, out: &mut Outs, z: Z, m: &Pub<'_>) -> bool {
             let shared = &*lane.shared;
             let o = shared.opts();
             let id = Idz {
-                name: reply::name(shared, &o),
+                name: shared.name(&o),
                 host: &o.host,
-                id: &shared.server_id,
+                id: &shared.ident.server_id,
             };
             if let Some(sys) = shared.system {
                 send_now(
@@ -427,7 +427,7 @@ fn broadcast_asked(s: &Shared, body: &[u8]) {
             Ok(set) if wanted(s, &set) => Event::Statsz { forced: true },
             Ok(_) => return,
             Err(why) => {
-                let to = format!("$SYS.SERVER.{}.STATSZ", s.server_id).into_bytes();
+                let to = format!("$SYS.SERVER.{}.STATSZ", s.ident.server_id).into_bytes();
                 Event::Note(Note::error(sys, to, &ApiError::new(400, why)))
             }
         }
