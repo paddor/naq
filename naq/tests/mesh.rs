@@ -10,6 +10,7 @@ use naq::{Cluster, Options, Server};
 
 #[path = "mesh/cluster.rs"]
 mod cluster;
+mod common;
 mod proxy;
 
 use cluster::{WAIT, free_port, get, node, proxied, quiet, told};
@@ -815,26 +816,10 @@ fn importing_cluster() -> Vec<Server> {
     let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
     let servers: Vec<Server> = (0..3)
         .map(|i| {
-            let routes = (0..3)
-                .filter(|&j| j != i)
-                .map(|j| format!("nats-route://127.0.0.1:{}", ports[j]))
-                .collect();
             Server::start(&Options {
-                host: "127.0.0.1".into(),
-                port: 0,
-                lanes: 2,
-                http_port: Some(0),
-                server_name: format!("n{i}"),
-                cluster: Some(Cluster {
-                    name: "c".into(),
-                    host: "127.0.0.1".into(),
-                    port: ports[i],
-                    routes,
-                }),
                 accounts: accounts.accounts.clone(),
                 users: accounts.users.clone(),
-                no_system_account: true,
-                ..Options::default()
+                ..cluster::options(i, ports[i], &common::others(&ports, i))
             })
             .unwrap()
         })
@@ -976,13 +961,7 @@ const ROUTE_KEYS: [&str; 20] = [
 
 /// The body of `GET path` on `s`'s monitoring port, as it came.
 fn raw(s: &Server, path: &str) -> String {
-    use std::io::Read;
-    let mut c = TcpStream::connect(s.monitor_addr().unwrap()).unwrap();
-    c.set_read_timeout(Some(WAIT)).unwrap();
-    write!(c, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
-    let mut body = String::new();
-    c.read_to_string(&mut body).unwrap();
-    body.split_once("\r\n\r\n").unwrap().1.to_owned()
+    common::fetch(s.monitor_addr().unwrap(), path).1
 }
 
 /// The keys of the first route of a `/routez` body, in order.

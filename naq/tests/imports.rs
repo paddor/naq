@@ -5,12 +5,12 @@
 #![expect(clippy::unwrap_used, clippy::panic, reason = "tests fail loudly")]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 
-use naq::{Options, Server};
+mod common;
+
+use common::Target;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -71,20 +71,7 @@ accounts {
 }
 "#;
 
-/// A server running `CONF`: naq, or `nats-server`.
-enum Target {
-    Naq(Server),
-    Go { _go: GoServer, port: u16 },
-}
-
 impl Target {
-    fn addr(&self) -> SocketAddr {
-        match self {
-            Target::Naq(s) => s.addr(),
-            Target::Go { port, .. } => SocketAddr::from(([127, 0, 0, 1], *port)),
-        }
-    }
-
     fn login(&self, user: &str, extra: &str) -> Client {
         Client::new(
             self.addr(),
@@ -95,55 +82,7 @@ impl Target {
 
 /// naq, then `nats-server` if `NAQ_GO` names one, each running `CONF`.
 fn targets() -> Vec<(&'static str, Target)> {
-    let mut opts: Options = CONF.parse().unwrap();
-    opts.host = "127.0.0.1".into();
-    opts.port = 0;
-    opts.lanes = 2;
-    let mut all = vec![("naq", Target::Naq(Server::start(&opts).unwrap()))];
-    if let Some(go) = go() {
-        all.push(("go", go));
-    }
-    all
-}
-
-fn go() -> Option<Target> {
-    let bin = PathBuf::from(std::env::var_os("NAQ_GO")?);
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let dir = std::env::temp_dir().join(format!("naq-imports-{}-{port}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("go.conf");
-    std::fs::write(&path, format!("listen: 127.0.0.1:{port}\n{CONF}")).unwrap();
-    let child = Command::new(bin)
-        .arg("-c")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let go = GoServer { child, dir };
-    let deadline = Instant::now() + WAIT;
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "nats-server did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Some(Target::Go { _go: go, port })
-}
-
-struct GoServer {
-    child: Child,
-    dir: PathBuf,
-}
-
-impl Drop for GoServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
+    common::targets("imports", CONF)
 }
 
 /// A message a client got.

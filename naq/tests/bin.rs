@@ -7,6 +7,10 @@ use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+mod common;
+
+use common::kill;
+
 const NAQ: &str = env!("CARGO_BIN_EXE_naq");
 
 /// The server process, killed on drop.
@@ -246,16 +250,6 @@ fn takes_the_other_log_flags_of_nats_server() {
         }
     };
     assert!(ready.starts_with("<5>"), "{ready}");
-}
-
-/// Sends signal `sig` to process `pid` with `kill`.
-fn kill(sig: &str, pid: u32) {
-    let ok = Command::new("kill")
-        .args(["-s", sig, &pid.to_string()])
-        .status()
-        .unwrap()
-        .success();
-    assert!(ok, "kill -s {sig} {pid}");
 }
 
 /// Reads lines from `r` until one contains `text`; returns them.

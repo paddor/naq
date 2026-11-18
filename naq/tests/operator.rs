@@ -5,15 +5,17 @@
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use data_encoding::BASE64URL_NOPAD;
 use naq::{Options, Server};
 use nkeys::KeyPair;
 use serde_json::{Value, json};
+
+mod common;
+
+use common::{Go, free_port, go_bin};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -131,7 +133,7 @@ fn user(issuer: &KeyPair, user: &KeyPair, nats: &Value, more: &Value) -> String 
 /// A server running `conf`: naq, or `nats-server`.
 enum Target {
     Naq(Server),
-    Go { _go: GoServer, port: u16, http: u16 },
+    Go { _go: Go, port: u16, http: u16 },
 }
 
 impl Target {
@@ -156,16 +158,8 @@ impl Target {
             Target::Naq(s) => s.monitor_addr().unwrap(),
             Target::Go { http, .. } => SocketAddr::from(([127, 0, 0, 1], *http)),
         };
-        let mut c = TcpStream::connect(at).unwrap();
-        c.set_read_timeout(Some(WAIT)).unwrap();
-        write!(
-            c,
-            "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut text = String::new();
-        c.read_to_string(&mut text).unwrap();
-        let (head, mut body) = text.split_once("\r\n\r\n").unwrap_or(("", ""));
+        let (head, text) = common::fetch(at, path);
+        let mut body = text.as_str();
         // Go chunks a long body.
         let mut whole = String::new();
         if head.contains("Transfer-Encoding: chunked") {
@@ -184,45 +178,18 @@ impl Target {
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 /// naq, then `nats-server` if `NAQ_GO` names one, each running `conf`.
 fn targets(conf: &str) -> Vec<(&'static str, Target)> {
-    let mut opts: Options = conf.parse().unwrap();
-    opts.host = "127.0.0.1".into();
-    opts.port = 0;
-    opts.lanes = 2;
-    opts.http_port = Some(0);
-    let mut all = vec![("naq", Target::Naq(Server::start(&opts).unwrap()))];
-    if let Some(bin) = std::env::var_os("NAQ_GO").map(PathBuf::from) {
+    let naq = Options {
+        http_port: Some(0),
+        ..common::local(conf.parse().unwrap(), 2)
+    };
+    let mut all = vec![("naq", Target::Naq(Server::start(&naq).unwrap()))];
+    if let Some(bin) = go_bin() {
         let (port, http) = (free_port(), free_port());
-        let dir = std::env::temp_dir().join(format!("naq-operator-{}-{port}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("go.conf");
-        std::fs::write(
-            &path,
-            format!("listen: 127.0.0.1:{port}\nhttp: 127.0.0.1:{http}\n{conf}"),
-        )
-        .unwrap();
-        let child = Command::new(bin)
-            .arg("-c")
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let go = GoServer { child, dir };
-        let deadline = Instant::now() + WAIT;
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "nats-server did not start");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let dir = common::dir("operator", &port.to_string());
+        let conf = format!("http: 127.0.0.1:{http}\n{conf}");
+        let go = Go::listening(&bin, &dir, port, &conf).owning(dir);
         all.push((
             "go",
             Target::Go {
@@ -233,19 +200,6 @@ fn targets(conf: &str) -> Vec<(&'static str, Target)> {
         ));
     }
     all
-}
-
-struct GoServer {
-    child: Child,
-    dir: PathBuf,
-}
-
-impl Drop for GoServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
 }
 
 /// A connection, read line by line.

@@ -49,10 +49,14 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+mod common;
+
+use common::{free_port, go_bin};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -105,7 +109,7 @@ const HEADERS: &[&str] = &[
 
 #[test]
 fn naq_answers_as_nats_server_does() {
-    let go = std::env::var_os("NAQ_GO").map(PathBuf::from);
+    let go = go_bin();
     let bless = std::env::var_os("NAQ_BLESS").is_some();
     assert!(go.is_some() || !bless, "NAQ_BLESS needs NAQ_GO");
     let mut failed = String::new();
@@ -768,14 +772,6 @@ fn until_closed(at: SocketAddr, cid: u64) {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 /// `nats-server` running a script's configuration.

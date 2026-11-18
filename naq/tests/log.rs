@@ -3,30 +3,17 @@
 
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 use naq::{LogTo, Logging, Options, Server};
 
-const WAIT: Duration = Duration::from_secs(10);
+mod common;
+
+use common::{Client, Go, free_port, kill, lines_once};
 
 /// A directory of its own for test `name`.
 fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("naq-log-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    common::dir("log", name)
 }
 
 /// A server running, naq or `nats-server`: held until dropped.
@@ -35,98 +22,28 @@ struct Target {
     go: Option<Go>,
 }
 
-struct Go(Child);
-
-impl Drop for Go {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Starts `conf` in `d` on naq, or on `nats-server` from `bin`, logging to
-/// `server.log` there.
-fn start(d: &Path, conf: &str, bin: Option<&Path>) -> Target {
+/// Starts `conf` in a directory of its own for test `name` on naq, or on
+/// `nats-server` from `bin`, on a free port, logging to a file there.
+/// Returns it with the port and the log.
+fn start(name: &str, conf: &str, bin: Option<&Path>) -> (Target, u16, PathBuf) {
+    let d = dir(name);
+    let (port, log) = (free_port(), d.join("server.log"));
     let path = d.join("server.conf");
-    std::fs::write(&path, conf).unwrap();
+    let head = format!(
+        "listen: 127.0.0.1:{port}\nlog_file: {:?}\nlogtime: false\n",
+        log.display().to_string()
+    );
+    std::fs::write(&path, format!("{head}{conf}")).unwrap();
     let Some(bin) = bin else {
         let mut o = Options::from_file(&path).unwrap();
         o.lanes = 2;
-        return Target {
-            naq: Some(Server::start(&o).unwrap()),
-            go: None,
-        };
+        let naq = Some(Server::start(&o).unwrap());
+        return (Target { naq, go: None }, port, log);
     };
-    let child = Command::new(bin)
-        .arg("-c")
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let go = Some(Go::run(bin, &path));
     // Not by a connection: that would be logged as a client.
-    lines_once(&d.join("server.log"), |l| {
-        l.iter().any(|l| l.ends_with("Server is ready"))
-    });
-    Target {
-        naq: None,
-        go: Some(Go(child)),
-    }
-}
-
-/// A raw client.
-struct Client {
-    w: TcpStream,
-    r: BufReader<TcpStream>,
-}
-
-impl Client {
-    /// Connects to `port` with `connect`, and waits for its `PONG`.
-    fn new(port: u16, connect: &str) -> Client {
-        let w = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        w.set_read_timeout(Some(WAIT)).unwrap();
-        let r = BufReader::new(w.try_clone().unwrap());
-        let mut c = Client { w, r };
-        c.line();
-        c.send(&format!("CONNECT {connect}\r\nPING\r\n"));
-        c
-    }
-
-    fn send(&mut self, s: &str) {
-        self.w.write_all(s.as_bytes()).unwrap();
-    }
-
-    fn line(&mut self) -> String {
-        let mut line = String::new();
-        let n = self.r.read_line(&mut line).unwrap();
-        assert!(n > 0, "closed");
-        line
-    }
-
-    /// Reads up to the next `PONG`.
-    fn pong(&mut self) {
-        while self.line() != "PONG\r\n" {}
-    }
-
-    /// Reads until the server closes the connection.
-    fn closed(mut self) {
-        let mut rest = Vec::new();
-        let _ = self.r.read_to_end(&mut rest);
-    }
-}
-
-/// The lines of the log at `path`, once `ready` holds for them.
-fn lines_once(path: &Path, ready: impl Fn(&[String]) -> bool) -> Vec<String> {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
-        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
-        if ready(&lines) {
-            return lines;
-        }
-        assert!(Instant::now() < deadline, "log not ready: {lines:#?}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    lines_once(&log, |l| l.iter().any(|l| l.ends_with("Server is ready")));
+    (Target { naq: None, go }, port, log)
 }
 
 fn closed(n: usize) -> impl Fn(&[String]) -> bool {
@@ -164,27 +81,12 @@ fn client_lines(lines: &[String]) -> Vec<String> {
 /// each running `conf` with its log in a file; checks both logged the
 /// same client lines. Returns naq's.
 fn both(name: &str, conf: &str, script: impl Fn(u16, &Path) -> Vec<String>) -> Vec<String> {
-    let go = std::env::var_os("NAQ_GO").map(PathBuf::from);
-    let mut seen: Vec<Vec<String>> = Vec::new();
-    for bin in [None, go.as_deref()] {
-        if seen.len() == 1 && bin.is_none() {
-            break;
-        }
-        let d = dir(&format!("{name}-{}", seen.len()));
-        let port = free_port();
-        let log = d.join("server.log");
-        let text = format!(
-            "listen: 127.0.0.1:{port}\nlog_file: {:?}\nlogtime: false\n{conf}",
-            log.display().to_string()
-        );
-        let server = start(&d, &text, bin);
-        seen.push(client_lines(&script(port, &log)));
+    common::both(|i, go| {
+        let (server, port, log) = start(&format!("{name}-{i}"), conf, go);
+        let lines = client_lines(&script(port, &log));
         drop(server);
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    seen.swap_remove(0)
+        lines
+    })
 }
 
 const USERS: &str = r#"
@@ -204,17 +106,15 @@ fn clients_are_logged_as_they_connect_err_and_close() {
             port,
             r#"{"verbose":false,"name":"app1","lang":"ruby","version":"1.0","user":"a","pass":"p"}"#,
         );
-        c.pong();
         c.send("PUB secret 2\r\nhi\r\nSUB secret 1\r\nPING\r\n");
         c.pong();
         drop(c);
         lines_once(log, closed(1));
-        Client::new(port, r#"{"verbose":false,"user":"a","pass":"x"}"#).closed();
+        Client::open(port, r#"{"verbose":false,"user":"a","pass":"x"}"#).rest();
         lines_once(log, closed(2));
         let mut c = Client::new(port, r#"{"verbose":false,"user":"a","pass":"p"}"#);
-        c.pong();
         c.send(&format!("PUB big 600\r\n{}\r\n", "x".repeat(600)));
-        c.closed();
+        c.rest();
         lines_once(log, closed(3))
     });
     let who = r#"- "v1.0:ruby:app1" - "$G/user:a" -"#;
@@ -242,7 +142,6 @@ fn clients_are_logged_as_they_connect_err_and_close() {
 fn a_traced_client_shows_what_it_sent_and_got() {
     let lines = both("trace", "trace: true\n", |port, log| {
         let mut c = Client::new(port, r#"{"verbose":false,"headers":true,"name":"t"}"#);
-        c.pong();
         c.send(
             "SUB foo 1\r\nSUB bar q 2\r\nPUB foo r 5\r\nhello\r\n\
              HPUB foo 12 14\r\nNATS/1.0\r\n\r\nhi\r\nUNSUB 1\r\nPING\r\n",
@@ -294,16 +193,13 @@ fn a_traced_client_shows_what_it_sent_and_got() {
 fn logging(d: &Path, log: &Logging) -> (Server, PathBuf) {
     let path = d.join("server.log");
     let o = Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 1,
         server_name: "logged".into(),
         log: Logging {
             to: Some(LogTo::File(path.clone())),
             time: false,
             ..log.clone()
         },
-        ..Options::default()
+        ..common::local(Options::default(), 1)
     };
     (Server::start(&o).unwrap(), path)
 }
@@ -341,9 +237,8 @@ fn a_client_that_breaks_the_protocol_is_logged_with_what_it_sent() {
     let d = dir("parse");
     let (s, path) = logging(&d, &Logging::default());
     let mut c = Client::new(s.addr().port(), r#"{"verbose":false}"#);
-    c.pong();
     c.send("FOO BAR\r\n");
-    c.closed();
+    c.rest();
     let lines = lines_once(&path, |l| l.iter().any(|l| l.contains("parser ERROR")));
     let line = lines.iter().find(|l| l.contains("parser ERROR")).unwrap();
     assert!(
@@ -370,9 +265,7 @@ fn a_reopened_log_goes_on_in_a_new_file_at_its_path() {
 fn debug_lines_are_left_out_unless_asked_for() {
     let d = dir("quiet");
     let (s, path) = logging(&d, &Logging::default());
-    let mut c = Client::new(s.addr().port(), r#"{"verbose":false}"#);
-    c.pong();
-    drop(c);
+    drop(Client::new(s.addr().port(), r#"{"verbose":false}"#));
     let (s2, path2) = logging(
         &dir("loud"),
         &Logging {
@@ -380,9 +273,7 @@ fn debug_lines_are_left_out_unless_asked_for() {
             ..Logging::default()
         },
     );
-    let mut c = Client::new(s2.addr().port(), r#"{"verbose":false}"#);
-    c.pong();
-    drop(c);
+    drop(Client::new(s2.addr().port(), r#"{"verbose":false}"#));
     lines_once(&path2, closed(1));
     let quiet = std::fs::read_to_string(&path).unwrap();
     assert!(
@@ -397,25 +288,14 @@ fn debug_lines_are_left_out_unless_asked_for() {
 fn routed(d: &Path, i: usize, port: u16, routes: &[u16]) -> (Server, PathBuf) {
     let path = d.join(format!("n{i}.log"));
     let o = Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 1,
         server_name: format!("n{i}"),
-        cluster: Some(naq::Cluster {
-            name: "c".into(),
-            host: "127.0.0.1".into(),
-            port,
-            routes: routes
-                .iter()
-                .map(|p| format!("nats-route://127.0.0.1:{p}"))
-                .collect(),
-        }),
+        cluster: Some(common::cluster(port, routes)),
         log: Logging {
             to: Some(LogTo::File(path.clone())),
             time: false,
             ..Logging::default()
         },
-        ..Options::default()
+        ..common::local(Options::default(), 1)
     };
     (Server::start(&o).unwrap(), path)
 }
@@ -452,7 +332,6 @@ fn traced_payloads_are_cut_at_the_most_asked_for() {
         "debug: true\ntrace: true\nmax_traced_msg_len: 3\n",
         |port, log| {
             let mut c = Client::new(port, r#"{"verbose":false,"pedantic":true}"#);
-            c.pong();
             c.send("SUB foo 1\r\nUNSUB 1 5\r\nPUB foo 5\r\nhello\r\nPUB foo..bar 2\r\nhi\r\nPONG\r\nPING\r\n");
             c.pong();
             drop(c);
@@ -491,7 +370,6 @@ fn traced_headers_leave_out_payloads() {
         "debug: true\ntrace_headers: true\n",
         |port, log| {
             let mut c = Client::new(port, r#"{"verbose":false,"headers":true}"#);
-            c.pong();
             c.send("PUB foo 2\r\nhi\r\nHPUB foo 18 20\r\nNATS/1.0\r\nA: b\r\n\r\nhi\r\nPING\r\n");
             c.pong();
             drop(c);
@@ -529,43 +407,21 @@ fn lame_lines(lines: &[String]) -> Vec<String> {
 
 #[test]
 fn lame_duck_mode_is_logged_as_nats_server_logs_it() {
-    let go = std::env::var_os("NAQ_GO").map(PathBuf::from);
-    let mut seen: Vec<Vec<String>> = Vec::new();
-    for bin in [None, go.as_deref()] {
-        if seen.len() == 1 && bin.is_none() {
-            break;
-        }
-        let d = dir(&format!("lame-{}", seen.len()));
-        let port = free_port();
-        let log = d.join("server.log");
-        let text = format!(
-            "listen: 127.0.0.1:{port}\nlog_file: {:?}\nlogtime: false\ndebug: true\n\
-             lame_duck_duration: 30s\nlame_duck_grace_period: 1s\n",
-            log.display().to_string()
-        );
-        let mut target = start(&d, &text, bin);
-        let mut c = Client::new(port, r#"{"verbose":false,"protocol":1,"name":"app"}"#);
-        c.pong();
+    let conf = "debug: true\nlame_duck_duration: 30s\nlame_duck_grace_period: 1s\n";
+    let lines = common::both(|i, go| {
+        let (mut target, port, log) = start(&format!("lame-{i}"), conf, go);
+        let c = Client::new(port, r#"{"verbose":false,"protocol":1,"name":"app"}"#);
         if let Some(s) = target.naq.take() {
             std::thread::spawn(move || s.lame_duck_shutdown());
         } else if let Some(g) = &target.go {
-            let ok = Command::new("kill")
-                .args(["-s", "USR2", &g.0.id().to_string()])
-                .status()
-                .unwrap()
-                .success();
-            assert!(ok);
+            kill("USR2", g.child.id());
         }
-        c.closed();
+        c.rest();
         let lines = lines_once(&log, |l| l.iter().any(|l| l.ends_with("Server Exiting..")));
-        seen.push(lame_lines(&lines));
-        drop(target);
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
+        lame_lines(&lines)
+    });
     assert_eq!(
-        seen[0],
+        lines,
         [
             "[INF] Entering lame duck mode, stop accepting new clients",
             "[INF] Closing existing clients",

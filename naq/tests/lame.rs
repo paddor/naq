@@ -4,86 +4,66 @@
 
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use naq::{Cluster, LogTo, Logging, Options, Server};
+use naq::{LogTo, Logging, Options, Server};
 
-const WAIT: Duration = Duration::from_secs(10);
+#[path = "mesh/cluster.rs"]
+mod cluster;
+mod common;
+mod proxy;
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use common::{Client, WAIT, free_port, member_conf, others, refuses};
 
 /// A directory of its own for test `name`.
 fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("naq-lame-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    common::dir("lame", name)
 }
 
-/// Options of a server on a free port, logging debug lines to `log`, in
-/// lame duck mode for `duration` after a grace period of `grace`.
-fn opts(log: &Path, duration: Duration, grace: Duration) -> Options {
+/// `o` on a free port, logging debug lines to `log`.
+fn logged(o: Options, log: &Path) -> Options {
     Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
-        lame_duck_duration: duration,
-        lame_duck_grace_period: grace,
         log: Logging {
             to: Some(LogTo::File(log.to_path_buf())),
             debug: true,
             time: false,
             ..Logging::default()
         },
-        ..Options::default()
+        ..common::local(o, 2)
     }
 }
 
-/// A raw client.
-struct Client {
-    w: TcpStream,
-    r: BufReader<TcpStream>,
-    /// The ID of its server, from its first `INFO`.
-    server_id: String,
+/// `o` in lame duck mode for `duration` after a grace period of `grace`.
+fn lasting(o: Options, duration: Duration, grace: Duration) -> Options {
+    Options {
+        lame_duck_duration: duration,
+        lame_duck_grace_period: grace,
+        ..o
+    }
+}
+
+/// Options of a server on a free port, logging debug lines to `log`, in
+/// lame duck mode for `duration` after a grace period of `grace`.
+fn opts(log: &Path, duration: Duration, grace: Duration) -> Options {
+    lasting(logged(Options::default(), log), duration, grace)
+}
+
+/// Starts `o` as a member of a cluster, logging in a directory of its own
+/// for test `name`, in lame duck mode for 3 s after a grace period of half
+/// a second.
+fn start_member(name: &str, o: Options) -> Server {
+    let o = logged(o, &dir(name).join("s.log"));
+    Server::start(&lasting(
+        o,
+        Duration::from_secs(3),
+        Duration::from_millis(500),
+    ))
+    .unwrap()
 }
 
 impl Client {
-    /// Connects to `at` with `connect`, and reads up to its `PONG`.
-    fn new(at: SocketAddr, connect: &str) -> Client {
-        let w = TcpStream::connect(at).unwrap();
-        w.set_read_timeout(Some(WAIT)).unwrap();
-        let mut r = BufReader::new(w.try_clone().unwrap());
-        let mut first = String::new();
-        r.read_line(&mut first).unwrap();
-        let info: serde_json::Value =
-            serde_json::from_str(first.strip_prefix("INFO ").unwrap().trim_end()).unwrap();
-        let server_id = info["server_id"].as_str().unwrap().to_owned();
-        let mut c = Client { w, r, server_id };
-        c.send(&format!("CONNECT {connect}\r\nPING\r\n"));
-        while c.line() != "PONG\r\n" {}
-        c
-    }
-
-    fn send(&mut self, s: &str) {
-        self.w.write_all(s.as_bytes()).unwrap();
-    }
-
-    /// The next line; empty once the connection closed.
-    fn line(&mut self) -> String {
-        let mut line = String::new();
-        let _ = self.r.read_line(&mut line);
-        line
-    }
-
     /// The next `INFO` it gets at any time, as JSON: not the one that
     /// follows its `CONNECT`.
     fn info(&mut self) -> serde_json::Value {
@@ -111,7 +91,9 @@ impl Client {
                 break;
             }
             self.w.set_read_timeout(Some(left)).unwrap();
-            let line = self.line();
+            // Nothing in time is no line.
+            let mut line = String::new();
+            let _ = self.r.read_line(&mut line);
             if line.is_empty() {
                 break;
             }
@@ -148,15 +130,6 @@ fn urls(info: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Waits until `at` refuses connections.
-fn refuses(at: SocketAddr) {
-    let deadline = Instant::now() + WAIT;
-    while TcpStream::connect(at).is_ok() {
-        assert!(Instant::now() < deadline, "{at} still takes clients");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// Puts `s` in lame duck mode on a thread of its own, which returns once
 /// it stopped.
 fn lame(s: Server) -> std::thread::JoinHandle<Instant> {
@@ -183,8 +156,8 @@ fn a_server_in_lame_duck_mode_tells_its_clients_and_closes_them_one_by_one() {
     let grace = Duration::from_millis(300);
     let s = Server::start(&opts(&log, Duration::from_secs(3), grace)).unwrap();
     let at = s.addr();
-    let mut told = Client::new(at, r#"{"protocol":1}"#);
-    let old = Client::new(at, "{}");
+    let mut told = Client::new(at.port(), r#"{"protocol":1}"#);
+    let old = Client::new(at.port(), "{}");
     let started = Instant::now();
     let done = lame(s);
     // Read at once: its close comes in its own time.
@@ -259,27 +232,8 @@ fn a_grace_period_not_below_the_duration_is_refused() {
 /// Server `n{i}` of a cluster on `ports`, in lame duck mode for 3 s after
 /// a grace period of half a second.
 fn member(i: usize, ports: &[u16]) -> Server {
-    let routes = (0..ports.len())
-        .filter(|&j| j != i)
-        .map(|j| format!("nats-route://127.0.0.1:{}", ports[j]))
-        .collect();
-    let d = dir(&format!("n{i}-{}", ports[i]));
-    Server::start(&Options {
-        server_name: format!("n{i}"),
-        cluster: Some(Cluster {
-            name: "c".into(),
-            host: "127.0.0.1".into(),
-            port: ports[i],
-            routes,
-        }),
-        no_system_account: true,
-        ..opts(
-            &d.join("s.log"),
-            Duration::from_secs(3),
-            Duration::from_millis(500),
-        )
-    })
-    .unwrap()
+    let o = cluster::options(i, ports[i], &others(ports, i));
+    start_member(&format!("n{i}-{}", ports[i]), o)
 }
 
 /// The `INFO`s `c` gets until one lists `want` as its `connect_urls`.
@@ -296,13 +250,13 @@ fn until_urls(c: &mut Client, want: &[String]) -> serde_json::Value {
 fn clients_hear_where_the_cluster_is_as_servers_come_and_go_lame() {
     let ports = [free_port(), free_port()];
     let n0 = member(0, &ports);
-    let mut a = Client::new(n0.addr(), r#"{"protocol":1}"#);
+    let mut a = Client::new(n0.addr().port(), r#"{"protocol":1}"#);
     let n1 = member(1, &ports);
     let (u0, u1) = (n0.addr().to_string(), n1.addr().to_string());
     // A route that comes up brings an INFO with its server's URL.
     until_urls(&mut a, &[u0.clone(), u1.clone()]);
-    let mut b = Client::new(n1.addr(), r#"{"protocol":1}"#);
-    let mut old = Client::new(n1.addr(), "{}");
+    let mut b = Client::new(n1.addr().port(), r#"{"protocol":1}"#);
+    let mut old = Client::new(n1.addr().port(), "{}");
     let done = lame(n0);
     let info = a.info();
     assert_eq!(info["ldm"], true, "{info}");
@@ -328,35 +282,12 @@ fn clients_hear_where_the_cluster_is_as_servers_come_and_go_lame() {
 /// Server `n{i}` of a cluster on `ports` with a system account, in lame
 /// duck mode for 3 s after a grace period of half a second.
 fn sys_member(i: usize, ports: &[u16]) -> Server {
-    let routes: Vec<String> = (0..ports.len())
-        .filter(|&j| j != i)
-        .map(|j| format!("\"nats-route://127.0.0.1:{}\"", ports[j]))
-        .collect();
     let conf = format!(
-        "server_name: n{i}\n\
-         accounts {{ SYS {{ users [{{user: sys, password: p}}] }} }}\n\
-         system_account: SYS\n\
-         cluster {{ name: c, listen: \"127.0.0.1:{}\", routes: [{}] }}\n",
-        ports[i],
-        routes.join(", ")
+        "{}accounts {{ SYS {{ users [{{user: sys, password: p}}] }} }}\n\
+         system_account: SYS\n",
+        member_conf(i, ports)
     );
-    let parsed: Options = conf.parse().unwrap();
-    let d = dir(&format!("sys-n{i}-{}", ports[i]));
-    let o = opts(
-        &d.join("s.log"),
-        Duration::from_secs(3),
-        Duration::from_millis(500),
-    );
-    Server::start(&Options {
-        host: o.host.clone(),
-        port: 0,
-        lanes: 2,
-        log: o.log.clone(),
-        lame_duck_duration: o.lame_duck_duration,
-        lame_duck_grace_period: o.lame_duck_grace_period,
-        ..parsed
-    })
-    .unwrap()
+    start_member(&format!("sys-n{i}-{}", ports[i]), conf.parse().unwrap())
 }
 
 const SYS: &str = r#"{"user":"sys","pass":"p"}"#;
@@ -378,7 +309,7 @@ fn ping(c: &mut Client, n: usize) -> Vec<String> {
 fn a_server_in_lame_duck_mode_says_so_on_sys_and_nothing_after() {
     let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
     let mut servers: Vec<Server> = (0..3).map(|i| sys_member(i, &ports)).collect();
-    let mut c = Client::new(servers[0].addr(), SYS);
+    let mut c = Client::new(servers[0].addr().port(), SYS);
     c.send("SUB $SYS.SERVER.*.LAMEDUCK 1\r\nSUB $SYS.SERVER.*.SHUTDOWN 2\r\nSUB _R.> 3\r\n");
     let deadline = Instant::now() + WAIT;
     while ping(&mut c, 3).len() < 3 {
@@ -386,8 +317,8 @@ fn a_server_in_lame_duck_mode_says_so_on_sys_and_nothing_after() {
     }
     let n2 = servers.pop().unwrap();
     // A client keeps it in lame duck mode for the grace period.
-    let held = Client::new(n2.addr(), SYS);
-    let id = held.server_id.clone();
+    let held = Client::new(n2.addr().port(), SYS);
+    let id = held.info["server_id"].as_str().unwrap().to_owned();
     let done = lame(n2);
     let said = loop {
         let m = c.msgs(1, WAIT).pop().unwrap();
@@ -416,21 +347,13 @@ fn an_ldm_request_tells_one_client_and_is_logged() {
                            system_account: SYS\n"
         .parse()
         .unwrap();
-    let o = opts(&log, Duration::from_secs(3), Duration::from_millis(500));
-    let s = Server::start(&Options {
-        host: o.host.clone(),
-        port: 0,
-        lanes: 2,
-        log: o.log.clone(),
-        ..parsed
-    })
-    .unwrap();
-    let mut sys = Client::new(s.addr(), SYS);
+    let s = Server::start(&logged(parsed, &log)).unwrap();
+    let mut sys = Client::new(s.addr().port(), SYS);
     let mut told = Client::new(
-        s.addr(),
+        s.addr().port(),
         r#"{"user":"sys","pass":"p","protocol":1,"name":"t"}"#,
     );
-    let id = sys.server_id.clone();
+    let id = sys.info["server_id"].as_str().unwrap().to_owned();
     sys.send(&format!(
         "SUB _R.> 1\r\nPUB $SYS.REQ.SERVER.{id}.LDM _R.1 9\r\n{{\"cid\":2}}\r\n"
     ));
