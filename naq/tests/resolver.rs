@@ -7,15 +7,18 @@
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use data_encoding::BASE64URL_NOPAD;
-use naq::{Options, Server};
+use naq::Server;
 use nkeys::KeyPair;
 use serde_json::{Value, json};
+
+mod common;
+
+use common::{Go, free_port, go_bin, member_conf};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -104,14 +107,14 @@ fn bearer(account: &KeyPair) -> String {
 
 enum Target {
     Naq(Server, Scratch),
-    Go(GoServer, u16),
+    Go { _go: Go, dir: Scratch, port: u16 },
 }
 
 impl Target {
     fn addr(&self) -> SocketAddr {
         match self {
             Target::Naq(s, _) => s.addr(),
-            Target::Go(_, port) => SocketAddr::from(([127, 0, 0, 1], *port)),
+            Target::Go { port, .. } => SocketAddr::from(([127, 0, 0, 1], *port)),
         }
     }
 
@@ -119,7 +122,7 @@ impl Target {
     fn dir(&self) -> PathBuf {
         match self {
             Target::Naq(_, s) => s.0.join("jwt"),
-            Target::Go(g, _) => g.dir.0.join("jwt"),
+            Target::Go { dir, .. } => dir.0.join("jwt"),
         }
     }
 }
@@ -145,52 +148,17 @@ impl Drop for Scratch {
     }
 }
 
-struct GoServer {
-    child: Child,
-    dir: Scratch,
-}
-
-impl Drop for GoServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 /// naq, then `nats-server` if `NAQ_GO` names one, each running the
 /// configuration `conf` makes for its directory.
 fn targets(conf: impl Fn(&Path) -> String) -> Vec<(&'static str, Target)> {
     let scratch = Scratch::new("naq");
-    let mut opts: Options = conf(&scratch.0.join("jwt")).parse().unwrap();
-    opts.host = "127.0.0.1".into();
-    opts.port = 0;
-    opts.lanes = 2;
-    let naq = Target::Naq(Server::start(&opts).unwrap(), scratch);
-    let mut all = vec![("naq", naq)];
-    if let Some(bin) = std::env::var_os("NAQ_GO").map(PathBuf::from) {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+    let naq = common::naq(&conf(&scratch.0.join("jwt")), 2);
+    let mut all = vec![("naq", Target::Naq(naq, scratch))];
+    if let Some(bin) = go_bin() {
+        let port = free_port();
         let dir = Scratch::new("go");
-        let path = dir.0.join("go.conf");
-        let text = conf(&dir.0.join("jwt"));
-        std::fs::write(&path, format!("listen: 127.0.0.1:{port}\n{text}")).unwrap();
-        let child = Command::new(bin)
-            .arg("-c")
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let go = GoServer { child, dir };
-        let deadline = Instant::now() + WAIT;
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "nats-server did not start");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        all.push(("go", Target::Go(go, port)));
+        let go = Go::listening(&bin, &dir.0, port, &conf(&dir.0.join("jwt")));
+        all.push(("go", Target::Go { _go: go, dir, port }));
     }
     all
 }
@@ -512,21 +480,6 @@ fn a_cache_skips_updates_of_accounts_not_in_use() {
     }
 }
 
-/// A free port on the loopback, from a range of this process's own.
-fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 31_000 - (std::process::id() % 400) as u16 * 30;
-    loop {
-        // Relaxed: only uniqueness matters.
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let port = base - n % 2_000;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-}
-
 /// A cluster of two naq servers, of the resolvers `resolvers`, each with
 /// the JWTs `files` has for it in its directory from the start.
 fn cluster(w: &World, resolvers: [&str; 2], files: [&[(&KeyPair, String)]; 2]) -> Vec<Target> {
@@ -539,17 +492,8 @@ fn cluster(w: &World, resolvers: [&str; 2], files: [&[(&KeyPair, String)]; 2]) -
             for (kp, jwt) in files[i] {
                 std::fs::write(dir.join(format!("{}.jwt", kp.public_key())), jwt).unwrap();
             }
-            let cluster = format!(
-                "cluster {{ name: c, listen: \"127.0.0.1:{}\", routes: [\"nats-route://127.0.0.1:{}\"] }}\nserver_name: n{i}\n",
-                ports[i],
-                ports[1 - i]
-            );
-            let text = format!("{cluster}{}", w.conf(resolvers[i])(&dir));
-            let mut opts: Options = text.parse().unwrap();
-            opts.host = "127.0.0.1".into();
-            opts.port = 0;
-            opts.lanes = 2;
-            Target::Naq(Server::start(&opts).unwrap(), scratch)
+            let text = format!("{}{}", member_conf(i, &ports), w.conf(resolvers[i])(&dir));
+            Target::Naq(common::naq(&text, 2), scratch)
         })
         .collect()
 }

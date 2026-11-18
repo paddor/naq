@@ -109,7 +109,7 @@ pub(super) fn heard(lane: &Lane, m: &Pub<'_>) -> bool {
     let Some(account) = s.accounts.id(&told.acc) else {
         return true;
     };
-    if told.server.id == s.server_id {
+    if told.server.id == s.ident.server_id {
         s.log.error(format_args!(
             "Processing our own account connection event message: ignored"
         ));
@@ -145,7 +145,7 @@ fn rebalance(s: &Arc<Shared>, account: u32) {
     }
     let shared = s.clone();
     tokio::task::spawn_local(async move {
-        crate::monitor::ask_all(&shared, move |lane| {
+        crate::lane::ask_all(&shared, move |lane| {
             let clients = lane.clients.borrow();
             for c in kicked.iter().filter_map(|id| clients.get(id)) {
                 c.kick(Close::AccountConns);

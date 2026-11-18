@@ -16,6 +16,7 @@ use naq::{Options, Remote, Server};
 
 #[path = "mesh/cluster.rs"]
 mod cluster;
+mod common;
 mod proxy;
 #[path = "sim/world.rs"]
 mod world;
@@ -278,11 +279,11 @@ impl Drop for GoHub {
 
 /// Runs seed `seed` against `nats-server` from `NAQ_GO`, if set.
 fn run(seed: u64) {
-    let Some(bin) = std::env::var_os("NAQ_GO") else {
+    let Some(bin) = common::go_bin() else {
         eprintln!("skipped: NAQ_GO is not set");
         return;
     };
-    Sim::new(seed, GoHub::new(bin.into(), seed)).run();
+    Sim::new(seed, GoHub::new(bin, seed)).run();
 }
 
 #[test]

@@ -44,30 +44,7 @@ pub(crate) struct Acceptor {
 
 /// The TLS of a port, if it has any: a reload swaps it, and each client
 /// takes the one there as it arrives.
-#[derive(Debug, Default)]
-pub(crate) struct Current(std::sync::RwLock<Option<Arc<Acceptor>>>);
-
-impl Current {
-    pub(crate) fn new(acceptor: Option<Acceptor>) -> Current {
-        Current(std::sync::RwLock::new(acceptor.map(Arc::new)))
-    }
-
-    /// The TLS now, if any.
-    pub(crate) fn get(&self) -> Option<Arc<Acceptor>> {
-        self.0
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Takes `acceptor` from now on.
-    pub(crate) fn set(&self, acceptor: Option<Acceptor>) {
-        *self
-            .0
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = acceptor.map(Arc::new);
-    }
-}
+pub(crate) type Current = crate::swap::Swap<Option<Arc<Acceptor>>>;
 
 impl std::fmt::Debug for Acceptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -85,6 +85,20 @@ pub(crate) struct Client {
 }
 
 impl Client {
+    /// Holds permissions `perms` in place of those it had; `None` lets it
+    /// publish and subscribe to anything.
+    pub(crate) fn hold(&self, perms: Option<Arc<crate::perms::Perms>>) {
+        let held = perms.map(|p| Rc::new(Held::new(p)));
+        self.guarded.set(held.is_some() || self.traced.get());
+        *self.held.borrow_mut() = held;
+    }
+
+    /// Traces its protocol, if `on`.
+    pub(crate) fn trace(&self, on: bool) {
+        self.traced.set(on);
+        self.guarded.set(on || self.held.borrow().is_some());
+    }
+
     pub(crate) fn new(id: u64) -> Client {
         Client {
             id,
@@ -481,12 +495,12 @@ struct Proven {
 
 /// Runs a client connection that reached lane `index`.
 pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
-    let Some(lane) = lane::get(shared.id, index) else {
+    let Some(lane) = lane::get(shared.ident.id, index) else {
         return;
     };
     let (ip, port) = peer(&stream);
     let (hello, info) = greet(&lane, ip, port, false);
-    if let Some(acc) = lane.shared.tls.get() {
+    if let Some(acc) = lane.shared.live.tls.get() {
         return crate::tls::serve(lane, &acc, hello, info, stream).await;
     }
     hello.client.out.borrow_mut().extend_from_slice(&info);
@@ -577,13 +591,12 @@ where
     lane.clients.borrow_mut().insert(client.id, client.clone());
     let opts = &lane.shared.opts();
     let shared = lane.shared.clone();
-    let slow = move || shared.events.slow_clients.note();
+    let slow = move || shared.tally.events.slow_clients.note();
     let deadline = lane.shared.opts().write_deadline;
     let writer = tokio::task::spawn_local(write::writer(client.clone(), w, deadline, slow));
     client.wake_writer();
     let now = tokio::time::Instant::now();
-    let ws_ping = via.ws.then(|| lane.shared.ws.as_ref()?.opts.ping_interval);
-    let ping = ping::Pinger::new(now, ws_ping.flatten().unwrap_or(opts.ping_interval));
+    let ping = ping::Pinger::new(now, opts.ping_interval);
     let auth_by = lane.shared.logins().of(via.ws).map(|a| now + a.timeout);
     let out = Outs::new(&lane);
     let ip = client.meta.borrow().ip.clone();
@@ -591,11 +604,6 @@ where
         max_control_line: opts.max_control_line,
         max_payload: opts.max_payload,
     };
-    let tracing = lane.shared.log.traces();
-    if tracing {
-        client.traced.set(true);
-        client.guarded.set(true);
-    }
     let mut conn = Conn {
         lane,
         client,
@@ -621,10 +629,12 @@ where
             refused: None,
         },
         watch: Watch {
-            on: tracing || auth_by.is_some(),
-            tracing,
+            on: false,
+            tracing: false,
         },
     };
+    // The pings, limits and traces the options ask for now.
+    conn.retake();
     conn.log_created();
     let close = conn.read_loop(&mut r).await;
     conn.end(close, writer).await;

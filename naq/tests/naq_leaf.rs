@@ -12,6 +12,10 @@ mod proxy;
 
 use proxy::{OPEN, Proxy};
 
+mod common;
+
+use common::{free_port, refuses};
+
 /// Longest wait for anything a test expects.
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -20,21 +24,6 @@ const WAIT: Duration = Duration::from_secs(5);
 fn login(s: &Server, name: &str, ops: &str) -> Client {
     let connect = format!("{{\"verbose\":false,\"user\":\"{name}\",\"pass\":\"p\"}}");
     client_with(s, &connect, ops)
-}
-
-/// A free port, each once per run, below the kernel's ephemeral ports.
-fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 26_000 - (std::process::id() % 200) as u16 * 25;
-    loop {
-        // Relaxed: only uniqueness matters.
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let port = base - n % 2_000;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
 }
 
 /// Options of server `name` with two lanes and monitoring.
@@ -85,12 +74,7 @@ fn naq_remote(port: u16) -> Remote {
 
 /// `GET path` on `s`'s monitoring port.
 fn get(s: &Server, path: &str) -> serde_json::Value {
-    let mut c = TcpStream::connect(s.monitor_addr().unwrap()).unwrap();
-    c.set_read_timeout(Some(WAIT)).unwrap();
-    write!(c, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
-    let mut body = String::new();
-    std::io::Read::read_to_string(&mut c, &mut body).unwrap();
-    serde_json::from_str(body.split_once("\r\n\r\n").unwrap().1).unwrap()
+    common::get(s.monitor_addr().unwrap(), path)
 }
 
 /// Waits until `f` holds of `s`'s `/leafz?subs=1`, and returns it.
@@ -1306,11 +1290,7 @@ fn a_hub_in_lame_duck_mode_links_no_new_leafs() {
     // A client keeps it in lame duck mode for the grace period.
     let held = client(&h, "");
     let done = std::thread::spawn(move || h.lame_duck_shutdown());
-    let deadline = Instant::now() + WAIT;
-    while TcpStream::connect(at).is_ok() {
-        assert!(Instant::now() < deadline, "still takes clients");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    refuses(at);
     let l = leaf("leaf", port);
     std::thread::sleep(Duration::from_millis(500));
     let z = get(&l, "/leafz");

@@ -111,6 +111,15 @@ pub(crate) struct Taking {
     wake: Notify,
 }
 
+/// The mark of slot `s` in `marks`, which grows to hold it.
+fn slot(marks: &mut Vec<(u64, u64)>, s: u16) -> &mut (u64, u64) {
+    let at = usize::from(s);
+    if marks.len() <= at {
+        marks.resize(at + 1, (0, 0));
+    }
+    &mut marks[at]
+}
+
 impl Taking {
     /// Notes that lane 0 applied the interest of the server in slot `s` up
     /// to `at`, its epoch and delta, if it has its snapshot.
@@ -119,14 +128,11 @@ impl Taking {
             return;
         };
         let mut noted = self.noted.borrow_mut();
-        let at = usize::from(s);
-        if noted.len() <= at {
-            noted.resize(at + 1, (0, 0));
-        }
-        if noted[at] == (epoch, seq) {
+        let at = slot(&mut noted, s);
+        if *at == (epoch, seq) {
             return;
         }
-        noted[at] = (epoch, seq);
+        *at = (epoch, seq);
         self.pending.borrow_mut().push((s, epoch, seq));
         self.wake.notify_one();
     }
@@ -152,7 +158,7 @@ pub(super) async fn mark(shared: Arc<Shared>, taking: Rc<Taking>) {
 /// A lane's part: what it announced and lane 0 made into deltas, and what
 /// it knows the other servers' interest taken.
 #[derive(Debug, Default)]
-pub(crate) struct OnLane {
+pub(crate) struct LaneMarks {
     /// Interest this lane gained and announced to lane 0.
     announced: Cell<u64>,
     /// Of that, what lane 0 has made into deltas, as this lane knows.
@@ -161,7 +167,7 @@ pub(crate) struct OnLane {
     seen: RefCell<Vec<(u64, u64)>>,
 }
 
-impl OnLane {
+impl LaneMarks {
     /// Notes interest gained here, which lane 0 tells the others.
     pub(crate) fn announced(&self) {
         self.announced.set(self.announced.get() + 1);
@@ -189,16 +195,12 @@ impl OnLane {
     }
 
     /// Reads again what `marks` say of `slots`, then tells as
-    /// [`OnLane::has`] does.
+    /// [`LaneMarks::has`] does.
     fn read(&self, marks: &Marks, slots: Range<u16>, epoch: u64, seq: u64) -> bool {
         {
             let mut seen = self.seen.borrow_mut();
             for s in slots.clone() {
-                let at = usize::from(s);
-                if seen.len() <= at {
-                    seen.resize(at + 1, (0, 0));
-                }
-                seen[at] = marks.taken(s);
+                *slot(&mut seen, s) = marks.taken(s);
             }
         }
         self.has(slots, epoch, seq)
@@ -228,7 +230,7 @@ mod tests {
     #[test]
     fn a_lane_sees_a_server_taken_once_its_epoch_and_delta_are_marked() {
         let marks = Marks::default();
-        let on = OnLane::default();
+        let on = LaneMarks::default();
         assert!(!on.read(&marks, 0..2, 7, 3));
         marks.took(1, 7, 3);
         assert!(!on.has(0..2, 7, 3), "not read yet");
@@ -251,7 +253,7 @@ mod tests {
         assert_eq!((marks.stamp(0), marks.stamp(1)), ((5, 9), (5, 9)));
         assert_eq!(marks.stamp(2), (5, 0));
         assert_eq!(marks.stamp(99), (5, 0));
-        let on = OnLane::default();
+        let on = LaneMarks::default();
         assert_eq!(on.unmade(), None);
         on.announced();
         on.announced();

@@ -42,13 +42,19 @@ pub(crate) struct Told {
     pub(super) wake: Rc<Notify>,
     /// Where the lanes find each delta made, to stamp their batches for
     /// the servers in these slots.
-    stamps: Option<(Arc<Marks>, Range<u16>)>,
+    stamps: (Arc<Marks>, Range<u16>),
 }
 
 impl Told {
     /// A teller of start `epoch`, of accounts `accounts`, that wakes
-    /// `wake` when it has deltas.
-    pub(super) fn new(epoch: u64, accounts: Arc<Accounts>, wake: Rc<Notify>) -> Told {
+    /// `wake` when it has deltas. The lanes stamp their batches for the
+    /// servers in the slots of `stamps` with its deltas, through its marks.
+    pub(super) fn new(
+        epoch: u64,
+        accounts: Arc<Accounts>,
+        wake: Rc<Notify>,
+        stamps: (Arc<Marks>, Range<u16>),
+    ) -> Told {
         Told {
             epoch,
             accounts,
@@ -57,16 +63,7 @@ impl Told {
             outbox: RefCell::default(),
             pinned: RefCell::default(),
             wake,
-            stamps: None,
-        }
-    }
-
-    /// The teller, whose deltas the lanes stamp their batches for the
-    /// servers in `slots` with, through `marks`.
-    pub(super) fn stamping(self, marks: Arc<Marks>, slots: Range<u16>) -> Told {
-        Told {
-            stamps: Some((marks, slots)),
-            ..self
+            stamps,
         }
     }
 
@@ -132,9 +129,8 @@ impl Told {
     fn delta(&self, interest: Interest<'_>) {
         let seq = self.seq.get() + 1;
         self.seq.set(seq);
-        if let Some((marks, slots)) = &self.stamps {
-            marks.made(slots.clone(), seq);
-        }
+        let (marks, slots) = &self.stamps;
+        marks.made(slots.clone(), seq);
         let mut out = Vec::new();
         Control::Delta {
             epoch: self.epoch,
@@ -218,7 +214,12 @@ mod tests {
 
     #[test]
     fn a_delta_goes_out_for_each_origin_that_changed() {
-        let told = Told::new(9, Arc::new(Accounts::of(&["$G"])), Rc::default());
+        let told = Told::new(
+            9,
+            Arc::new(Accounts::of(&["$G"])),
+            Rc::default(),
+            (Arc::default(), 0..0),
+        );
         let x: Rc<[u8]> = Rc::from(&b"x"[..]);
         told.set(0, b"a", None, vec![(None, 1)]);
         told.set(0, b"a", None, vec![(None, 1)]);
@@ -242,7 +243,12 @@ mod tests {
 
     #[test]
     fn a_pinned_subject_stays_told() {
-        let told = Told::new(9, Arc::new(Accounts::of(&["$G"])), Rc::default());
+        let told = Told::new(
+            9,
+            Arc::new(Accounts::of(&["$G"])),
+            Rc::default(),
+            (Arc::default(), 0..0),
+        );
         told.pin(0, b"$LDS.x");
         told.set(0, b"$LDS.x", None, Vec::new());
         told.set(0, b"$LDS.x", None, vec![(None, 1)]);

@@ -4,56 +4,35 @@
 //! Each test crate uses a part of it.
 #![allow(dead_code, reason = "each test crate uses a part")]
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use naq::{Cluster, Options, Server};
+use naq::{Options, Server};
 
+pub(crate) use super::common::free_port;
+use super::common::{self, local};
 use super::proxy::Proxy;
 
 /// Longest wait for anything a test expects.
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
-/// A free port, each once per run, below the kernel's ephemeral ports.
-pub(crate) fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 32_000 - (std::process::id() % 400) as u16 * 30;
-    loop {
-        // Relaxed: only uniqueness matters.
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let port = base - n % 2_000;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-}
-
-/// Server `n{i}` of cluster `c`, two lanes, on cluster port `port` with
-/// routes to `routes`.
-pub(crate) fn node(i: usize, port: u16, routes: &[u16]) -> Server {
-    Server::start(&Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
+/// Options of server `n{i}` of cluster `c`, two lanes, on cluster port
+/// `port` with routes to `routes`.
+pub(crate) fn options(i: usize, port: u16, routes: &[u16]) -> Options {
+    let o = Options {
         http_port: Some(0),
         server_name: format!("n{i}"),
-        cluster: Some(Cluster {
-            name: "c".into(),
-            host: "127.0.0.1".into(),
-            port,
-            routes: routes
-                .iter()
-                .map(|p| format!("nats-route://127.0.0.1:{p}"))
-                .collect(),
-        }),
+        cluster: Some(common::cluster(port, routes)),
         // What routes tell is then the interest of clients, without the
         // server's own in the system account.
         no_system_account: true,
         ..Options::default()
-    })
-    .unwrap()
+    };
+    local(o, 2)
+}
+
+/// Server `n{i}` of cluster `c`, as [`options`] has it.
+pub(crate) fn node(i: usize, port: u16, routes: &[u16]) -> Server {
+    Server::start(&options(i, port, routes)).unwrap()
 }
 
 /// Interest one server tells the others of: subject, queue group and its
@@ -126,12 +105,7 @@ pub(crate) fn quiet(
 
 /// `GET path` on `s`'s monitoring port.
 pub(crate) fn get(s: &Server, path: &str) -> serde_json::Value {
-    let mut c = TcpStream::connect(s.monitor_addr().unwrap()).unwrap();
-    c.set_read_timeout(Some(WAIT)).unwrap();
-    write!(c, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
-    let mut body = String::new();
-    c.read_to_string(&mut body).unwrap();
-    serde_json::from_str(body.split_once("\r\n\r\n").unwrap().1).unwrap()
+    common::get(s.monitor_addr().unwrap(), path)
 }
 
 /// Three servers whose routes go through proxies, by server and route.

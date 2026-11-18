@@ -129,9 +129,7 @@ impl Logins {
                 let tx = self.done.0.clone();
                 tokio::task::spawn_local(async move {
                     let grant = p.grant.clone();
-                    // Slow by design: off the lane.
-                    let holds = tokio::task::spawn_blocking(move || p.holds()).await;
-                    let _ = tx.send(if holds.unwrap_or(false) {
+                    let _ = tx.send(if p.verify().await {
                         Outcome::Pass(g, grant)
                     } else {
                         Outcome::Fail(g.who)

@@ -9,17 +9,13 @@ use std::time::Duration;
 
 use naq::{Options, Server};
 
+mod common;
+
 /// The status line and JSON body of `GET path`.
 fn get(at: SocketAddr, path: &str) -> (String, serde_json::Value) {
-    let mut c = TcpStream::connect(at).unwrap();
-    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    c.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
-        .unwrap();
-    let mut text = String::new();
-    c.read_to_string(&mut text).unwrap();
-    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    let (head, body) = common::fetch(at, path);
     let status = head.lines().next().unwrap().to_owned();
-    (status, serde_json::from_str(body).unwrap_or_default())
+    (status, serde_json::from_str(&body).unwrap_or_default())
 }
 
 /// A client that subscribed to its name and sent `n` messages to itself,

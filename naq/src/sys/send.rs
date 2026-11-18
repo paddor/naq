@@ -14,7 +14,6 @@ use tokio::time::Instant;
 use rustc_hash::FxHashMap;
 
 use super::conns::{Beats, CONNS};
-use super::reply::ServerInfo;
 use crate::lane::{Lane, Outs};
 use crate::mailbox::{self, Mailbox, Receiver};
 use crate::monitor::json;
@@ -180,7 +179,7 @@ async fn run(weak: Weak<Shared>, rx: Receiver<Event>) {
             let Some(shared) = weak.upgrade() else {
                 return;
             };
-            let Some(lane) = crate::lane::get(shared.id, 0) else {
+            let Some(lane) = crate::lane::get(shared.ident.id, 0) else {
                 return;
             };
             let mut s = Sender::new(&lane);
@@ -357,12 +356,12 @@ impl<'l> Sender<'l> {
         let (Some(sys), n) = (shared.system, shared.accounts.len()) else {
             return from;
         };
-        let reply = format!("$SYS._INBOX_.{}", shared.server_id);
+        let reply = format!("$SYS._INBOX_.{}", shared.ident.server_id);
         for id in from..n {
             let name = shared.accounts.name(id);
             let to = format!("$SYS.REQ.ACCOUNT.{name}.CONNS");
             let mut payload = b"{\"server\":".to_vec();
-            payload.extend(json::compact(&ServerInfo::of(&shared, &shared.opts())));
+            payload.extend(super::reply::server_block(&shared));
             payload.extend_from_slice(b",\"acc\":");
             payload.extend(json::compact(&name));
             payload.push(b'}');
@@ -395,7 +394,7 @@ impl<'l> Sender<'l> {
         let head = super::events::head(CONNS, std::time::SystemTime::now());
         let tail = [&b","[..], &c.fields, b"}"].concat();
         let numbered = |shared: &Shared| {
-            let info = json::compact(&ServerInfo::of(shared, &shared.opts()));
+            let info = super::reply::server_block(shared);
             [&head[..], &info, &tail].concat()
         };
         if let Some(reply) = reply {
@@ -418,7 +417,7 @@ impl<'l> Sender<'l> {
 
     /// Sends `n`, numbered now.
     fn note(&mut self, n: &Note) {
-        let info = json::compact(&ServerInfo::of(&self.lane.shared, &self.lane.shared.opts()));
+        let info = super::reply::server_block(&self.lane.shared);
         let payload = [&n.head[..], &info, &n.tail].concat();
         self.send(n.account, &n.to, &payload);
     }
@@ -430,7 +429,7 @@ impl<'l> Sender<'l> {
         let Some(sys) = shared.system else {
             return;
         };
-        let to = format!("$SYS.SERVER.{}.STATSZ", shared.server_id);
+        let to = format!("$SYS.SERVER.{}.STATSZ", shared.ident.server_id);
         if !heard(self.lane, sys, to.as_bytes()) {
             return;
         }
@@ -446,8 +445,8 @@ impl<'l> Sender<'l> {
         };
         // Relaxed: answers that see it late are sent still, as in Go.
         shared.sys.quiet.store(true, Ordering::Relaxed);
-        let to = format!("$SYS.SERVER.{}.{}", shared.server_id, word.token());
-        let payload = json::compact(&ServerInfo::of(&shared, &shared.opts()));
+        let to = format!("$SYS.SERVER.{}.{}", shared.ident.server_id, word.token());
+        let payload = super::reply::server_block(&shared);
         self.send(sys, to.as_bytes(), &payload);
     }
 

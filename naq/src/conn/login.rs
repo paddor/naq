@@ -2,8 +2,6 @@
 //! password compared off the lane, an auth callout, and the account and
 //! limits it gets.
 
-use std::rc::Rc;
-
 use tokio::time::Instant;
 
 use super::read::Step;
@@ -11,7 +9,6 @@ use super::{Close, Conn, Stage};
 use crate::ConnectionType;
 use crate::auth::{Auth, Check, Creds, Grant, Origin, Pending};
 use crate::callout::{self, Call, Hook, Plan};
-use crate::perms::Held;
 
 /// When a connection of subscription limit `limit`, with `subs` of them,
 /// is closed, and why: at once if it is at its limit, as `nats-server`
@@ -271,14 +268,7 @@ impl Conn {
                 let fetched = loop {
                     tokio::select! {
                         biased;
-                        () = self.client.stop.notified() => {
-                            if self.client.is_closed() {
-                                return Err(Close::Kicked);
-                            }
-                            // Not logged in yet: a reload or a change of
-                            // its account is nothing to it.
-                            self.lane.refreshed(self.client.id);
-                        },
+                        () = self.client.stop.notified() => self.woken_early()?,
                         id = &mut fetch => break id,
                     }
                 };
@@ -290,8 +280,7 @@ impl Conn {
             }
             Later::Verify(p, call) => {
                 let grant = p.grant.clone();
-                let holds = tokio::task::spawn_blocking(move || p.holds()).await;
-                if matches!(holds, Ok(true)) {
+                if p.verify().await {
                     self.bind(grant)?;
                     return self.connected();
                 }
@@ -331,14 +320,7 @@ impl Conn {
         let answer = loop {
             tokio::select! {
                 biased;
-                () = self.client.stop.notified() => {
-                    if self.client.is_closed() {
-                        return Err(Close::Kicked);
-                    }
-                    // Not logged in yet: a reload or a change of its
-                    // account is nothing to it.
-                    self.lane.refreshed(self.client.id);
-                },
+                () = self.client.stop.notified() => self.woken_early()?,
                 a = &mut ticket.answer => break a.ok(),
                 () = &mut timeout => break None,
             }
@@ -367,11 +349,7 @@ impl Conn {
         self.join(grant.account)?;
         self.auth_by = None;
         self.watch.on = self.watch.tracing;
-        let held = grant.perms.map(|p| Rc::new(Held::new(p)));
-        self.client
-            .guarded
-            .set(held.is_some() || self.client.traced.get());
-        *self.client.held.borrow_mut() = held;
+        self.client.hold(grant.perms);
         self.enter(grant.account);
         Ok(())
     }
@@ -421,8 +399,7 @@ impl Conn {
             account: u.account,
             perms: u.perms.clone(),
         })?;
-        self.bounds.payload = u.payload;
-        self.bounds.limits.max_payload = cap(u.payload, shared.opts().max_payload);
+        self.set_payload(u.payload);
         self.bounds.subs = u.subs;
         let user = u.expires.map(|t| (t, false));
         let account = u.account_expires.map(|t| (t, true));
@@ -485,8 +462,7 @@ impl Conn {
         if let Some(defaults) = &s.defaults {
             kept.defaults = Some(defaults.clone());
         }
-        self.bounds.payload = s.payload;
-        self.bounds.limits.max_payload = cap(s.payload, shared.opts().max_payload);
+        self.set_payload(s.payload);
         self.bounds.subs = s.subs;
         let subs = self.client.subs.borrow().len();
         self.bounds.deadline = deadline(s.subs, subs, s.expires);
@@ -501,29 +477,39 @@ impl Conn {
         Ok(())
     }
 
-    /// Takes the server's options anew, as after a reload: the limits of
-    /// what the client sends, the time between pings, and whether it is
-    /// traced.
-    fn retake(&mut self) {
+    /// Lets the client send payloads of up to `user` bytes, -1 for any,
+    /// and no more than the server takes.
+    fn set_payload(&mut self, user: i64) {
+        let server = self.lane.shared.opts().max_payload;
+        self.bounds.payload = user;
+        self.bounds.limits.max_payload = cap(user, server);
+    }
+
+    /// Woken before it logged in: goes if it was closed; a reload or a
+    /// change of its account is nothing to it yet.
+    fn woken_early(&self) -> Result<(), Close> {
+        if self.client.is_closed() {
+            return Err(Close::Kicked);
+        }
+        self.lane.refreshed(self.client.id);
+        Ok(())
+    }
+
+    /// Takes the server's options anew, as at its start and after a
+    /// reload: the limits of what the client sends, the time between
+    /// pings, and whether it is traced.
+    pub(super) fn retake(&mut self) {
         let shared = self.lane.shared.clone();
         let opts = shared.opts();
-        let limits = &mut self.bounds.limits;
-        limits.max_control_line = opts.max_control_line;
-        limits.max_payload = cap(self.bounds.payload, opts.max_payload);
+        self.bounds.limits.max_control_line = opts.max_control_line;
+        self.set_payload(self.bounds.payload);
         // WebSocket clients may ping at their own pace.
-        let own = self.via.ws
-            && shared
-                .ws
-                .as_ref()
-                .is_some_and(|w| w.opts.ping_interval.is_some());
-        if !own {
-            self.ping.interval = opts.ping_interval;
-        }
+        let ws = shared.ws.as_ref().filter(|_| self.via.ws);
+        self.ping.interval = ws
+            .and_then(|w| w.opts.ping_interval)
+            .unwrap_or(opts.ping_interval);
         let tracing = shared.log.traces();
-        self.client.traced.set(tracing);
-        self.client
-            .guarded
-            .set(tracing || self.client.held.borrow().is_some());
+        self.client.trace(tracing);
         self.watch.tracing = tracing;
         self.watch.on = tracing || self.auth_by.is_some();
     }

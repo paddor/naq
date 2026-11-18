@@ -9,12 +9,11 @@ use std::time::Duration;
 
 use naq::{LogTo, Logging, Options, Server};
 
+mod common;
+
 /// A directory of its own for test `name`.
 fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("naq-stop-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    common::dir("stop", name)
 }
 
 /// Options of a server on a free port, logging debug lines to `log`.

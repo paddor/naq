@@ -61,13 +61,16 @@ impl Hub {
         // Valid: the options were checked.
         let url = r.urls.first().and_then(|u| HubUrl::parse(u).ok());
         let (host, port) = url.map(|u| (u.host, u.port)).unwrap_or_default();
-        let name = r.account.as_deref().unwrap_or("$G");
+        let name = r.account_name();
         // Known to exist: the options were checked.
         let account = shared.accounts.id(name).unwrap_or(0);
-        let told = Rc::new(
-            Told::new(epoch, shared.accounts.clone(), Rc::default())
-                .stamping(shared.marks.clone(), slot..slot + 1),
-        );
+        let stamps = (shared.marks.clone(), slot..slot + 1);
+        let told = Rc::new(Told::new(
+            epoch,
+            shared.accounts.clone(),
+            Rc::default(),
+            stamps,
+        ));
         told.pin(account, shared.accounts.lds(account));
         // Its snapshot carries it.
         told.take();
@@ -94,7 +97,7 @@ impl Hub {
 /// it is gone. Once a hub said where the leafs of its cluster dial, those
 /// URLs come first, as `nats-server` orders them.
 pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
-    let Some(lane) = crate::lane::get(shared.id, 0) else {
+    let Some(lane) = crate::lane::get(shared.ident.id, 0) else {
         return;
     };
     let r = mesh.hubs.borrow()[at].remote.clone();
@@ -106,10 +109,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
         .collect();
     let mut urls: VecDeque<HubUrl> = configured.iter().cloned().collect();
     if !r.no_randomize {
-        for i in (1..urls.len()).rev() {
-            let j = lane.below(i as u64 + 1) as usize;
-            urls.swap(i, j);
-        }
+        crate::server::shuffle(urls.make_contiguous(), |n| lane.below(n));
     }
     let interval = shared.opts().leaf_reconnect;
     let mut n = 0u64;
@@ -119,7 +119,7 @@ pub(super) async fn dial(shared: Arc<Shared>, mesh: Rc<Mesh>, at: usize) {
         };
         urls.push_back(url.clone());
         n += 1;
-        let id = format!("{}/{at}/{n}", shared.server_id);
+        let id = format!("{}/{at}/{n}", shared.ident.server_id);
         let (found, delay) = connect(&shared, &mesh, at, &url, id).await;
         let wait = match found {
             Some(found) => {
@@ -277,8 +277,8 @@ impl Link<'_> {
             role: Role::Leaf,
             account: shared.accounts.name(account).as_bytes(),
             epoch: self.mesh.epoch,
-            server_id: shared.server_id.as_bytes(),
-            name: shared.opts().server_name.as_bytes(),
+            server_id: shared.ident.server_id.as_bytes(),
+            name: opts.server_name.as_bytes(),
             cluster: cluster.as_bytes(),
             data: b"",
             client_urls: b"",

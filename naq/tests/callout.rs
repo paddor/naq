@@ -6,16 +6,19 @@
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use data_encoding::BASE64URL_NOPAD;
-use naq::{Options, Server};
+use naq::Options;
 use nkeys::{KeyPair, XKey};
 use serde_json::{Value, json};
+
+mod common;
+
+use common::{Target, free_port, member_conf};
 
 const WAIT: Duration = Duration::from_secs(5);
 const DENIED: &str = "-ERR 'Authorization Violation'";
@@ -42,67 +45,9 @@ fn claims(jwt: &str) -> Value {
     serde_json::from_slice(&BASE64URL_NOPAD.decode(body.as_bytes()).unwrap()).unwrap()
 }
 
-/// A server running `conf`: naq, or `nats-server`.
-enum Target {
-    Naq(Server),
-    Go { _go: GoServer, port: u16 },
-}
-
-impl Target {
-    fn addr(&self) -> SocketAddr {
-        match self {
-            Target::Naq(s) => s.addr(),
-            Target::Go { port, .. } => SocketAddr::from(([127, 0, 0, 1], *port)),
-        }
-    }
-}
-
-struct GoServer {
-    child: Child,
-    dir: PathBuf,
-}
-
-impl Drop for GoServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 /// naq, then `nats-server` if `NAQ_GO` names one, each running `conf`.
 fn targets(conf: &str) -> Vec<(&'static str, Target)> {
-    let mut opts: Options = conf.parse().unwrap();
-    opts.host = "127.0.0.1".into();
-    opts.port = 0;
-    opts.lanes = 2;
-    let mut all = vec![("naq", Target::Naq(Server::start(&opts).unwrap()))];
-    if let Some(bin) = std::env::var_os("NAQ_GO").map(PathBuf::from) {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let dir = std::env::temp_dir().join(format!("naq-callout-{}-{port}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("go.conf");
-        std::fs::write(&path, format!("listen: 127.0.0.1:{port}\n{conf}")).unwrap();
-        let child = Command::new(bin)
-            .arg("-c")
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let go = GoServer { child, dir };
-        let deadline = Instant::now() + WAIT;
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "nats-server did not start");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        all.push(("go", Target::Go { _go: go, port }));
-    }
-    all
+    common::targets("callout", conf)
 }
 
 /// A stream a client talks over: TCP, or TLS over it.
@@ -762,37 +707,13 @@ fn operator_mode_accounts_call_out_to_their_own_service() {
     }
 }
 
-/// A free port on the loopback, from a range of this process's own, so
-/// that the ports the other tests bind do not take it.
-fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 31_000 - (std::process::id() % 400) as u16 * 30;
-    loop {
-        // Relaxed: only uniqueness matters.
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let port = base - n % 2_000;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-}
-
 #[test]
 fn a_service_at_another_server_of_the_cluster_answers() {
     let issuer = Arc::new(KeyPair::new_account());
     let ports = [free_port(), free_port()];
     let server = |i: usize| {
-        let cluster = format!(
-            "cluster {{ name: c, listen: \"127.0.0.1:{}\", routes: [\"nats-route://127.0.0.1:{}\"] }}\nserver_name: n{i}\n",
-            ports[i],
-            ports[1 - i]
-        );
-        let mut opts: Options = format!("{cluster}{}", conf(&issuer, "")).parse().unwrap();
-        opts.host = "127.0.0.1".into();
-        opts.port = 0;
-        opts.lanes = 2;
-        Target::Naq(Server::start(&opts).unwrap())
+        let text = format!("{}{}", member_conf(i, &ports), conf(&issuer, ""));
+        Target::Naq(common::naq(&text, 2))
     };
     let (a, b) = (server(0), server(1));
     Service::new(&issuer).run(&b, &json!({"user": "auth", "pass": "pwd"}), "AUTH", None);

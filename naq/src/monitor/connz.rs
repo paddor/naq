@@ -188,7 +188,7 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
         .map(|c| ConnInfo::of(c, &ask, now))
         .collect();
     Ok(pretty(&Connz {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         now: rfc3339_nano(now),
         num_connections: page.len(),
         total,

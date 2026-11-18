@@ -61,7 +61,8 @@ async fn sync(shared: Weak<Shared>) {
         let Some(s) = shared.upgrade() else {
             return;
         };
-        let (Some(dir), Some(sys), Some(lane)) = (&s.resolver, s.system, crate::lane::get(s.id, 0))
+        let (Some(dir), Some(sys), Some(lane)) =
+            (&s.resolver, s.system, crate::lane::get(s.ident.id, 0))
         else {
             return;
         };

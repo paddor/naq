@@ -270,6 +270,7 @@ mod tests {
             1,
             std::sync::Arc::new(crate::accounts::Accounts::of(&[])),
             Rc::default(),
+            (std::sync::Arc::default(), 0..0),
         );
         Other::new(Sink::Dealer(s), Rc::new(told))
     }

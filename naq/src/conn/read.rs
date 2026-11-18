@@ -68,7 +68,7 @@ impl Conn {
                 Err(close) => return close,
             };
             if let Some(sub) = self.stalled.take()
-                && stall(&sub, stall_mark, &self.lane.shared.events.stalls).await
+                && stall(&sub, stall_mark, &self.lane.shared.tally.events.stalls).await
             {
                 let stalls = &self.client.seen.stalls;
                 stalls.set(stalls.get() + 1);
@@ -313,7 +313,7 @@ impl Conn {
                 None
             }
             Tick::Stale => {
-                self.lane.shared.events.stale_clients.note();
+                self.lane.shared.tally.events.stale_clients.note();
                 Some(Close::Stale)
             }
         }

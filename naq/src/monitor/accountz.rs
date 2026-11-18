@@ -245,7 +245,7 @@ fn def_of(shared: &Shared, id: u32, acc: &str, jwt: Option<&Arc<JwtAccount>>) ->
 pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refused> {
     shared.monitor.asked(q, Counted::Accountz);
     let mut page = Accountz {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         now: now(),
         system_account: shared.system.map(|id| shared.accounts.name(id)),
         accounts: None,

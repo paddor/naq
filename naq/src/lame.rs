@@ -58,18 +58,18 @@ pub(crate) async fn started(shared: &Shared) {
 /// An accept loop of clients, counted open until dropped: lame duck mode
 /// waits for it to close.
 #[derive(Debug)]
-pub(crate) struct Door(Arc<Shared>);
+pub(crate) struct Accepting(Arc<Shared>);
 
-impl Door {
+impl Accepting {
     /// Counts an accept loop of `shared`'s server open.
-    pub(crate) fn open(shared: &Arc<Shared>) -> Door {
+    pub(crate) fn open(shared: &Arc<Shared>) -> Accepting {
         // Relaxed: the server has not started, nothing reads it yet.
         shared.lame.doors.fetch_add(1, Ordering::Relaxed);
-        Door(shared.clone())
+        Accepting(shared.clone())
     }
 }
 
-impl Drop for Door {
+impl Drop for Accepting {
     fn drop(&mut self) {
         let lame = &self.0.lame;
         // Release: lame duck mode, which reads it, then finds the listener
@@ -96,7 +96,7 @@ pub(crate) async fn run(shared: Arc<Shared>) {
     crate::sys::last_word(&shared, crate::sys::Word::LameDuck);
     let lame = &shared.lame;
     lame.changed.notify_changed();
-    // Acquire: pairs with the release in `Door::drop`.
+    // Acquire: pairs with the release in `Accepting::drop`.
     let closed = || (lame.doors.load(Ordering::Acquire) == 0).then_some(());
     lame.changed.until(closed).await;
     let mut all = connections(&shared).await;
@@ -104,7 +104,7 @@ pub(crate) async fn run(shared: Arc<Shared>) {
         return;
     }
     let mut below = crate::server::random();
-    shuffle(&mut all, &mut below);
+    crate::server::shuffle(&mut all, &mut below);
     tell_routes(&shared);
     tell_clients(&shared).await;
     let o = &shared.opts();
@@ -124,7 +124,7 @@ pub(crate) async fn run(shared: Arc<Shared>) {
 
 /// The clients and links to hubs of every lane: lane and ID.
 async fn connections(shared: &Shared) -> Vec<(usize, u64)> {
-    let found = crate::monitor::ask_all(shared, |lane| {
+    let found = crate::lane::ask_all(shared, |lane| {
         let clients = lane.clients.borrow();
         let links = lane.links.borrow();
         let ids = clients.keys().copied().chain(links.iter().map(|l| l.id));
@@ -134,19 +134,10 @@ async fn connections(shared: &Shared) -> Vec<(usize, u64)> {
     found.into_iter().flatten().collect()
 }
 
-/// Puts `all` in an order picked at random by `below`.
-fn shuffle<T>(all: &mut [T], below: &mut impl FnMut(u64) -> u64) {
-    for i in (1..all.len()).rev() {
-        // Below `i + 1`: it fits.
-        let j = below(i as u64 + 1) as usize;
-        all.swap(i, j);
-    }
-}
-
 /// Tells the other servers of the cluster that this one goes: their
 /// clients no longer hear of it.
 fn tell_routes(shared: &Shared) {
-    crate::monitor::on_lane(shared, 0, |lane| {
+    crate::lane::on_lane(shared, 0, |lane| {
         if let Some(mesh) = lane.mesh.borrow().as_ref() {
             mesh.lame();
         }
@@ -156,12 +147,7 @@ fn tell_routes(shared: &Shared) {
 /// Sends each client that takes one an `INFO` that says the server is in
 /// lame duck mode.
 async fn tell_clients(shared: &Shared) {
-    crate::monitor::ask_all(shared, |lane| {
-        for c in lane.clients.borrow().values() {
-            c.inform(true);
-        }
-    })
-    .await;
+    crate::lane::ask_all(shared, |lane| lane.inform_clients(true, |_| true)).await;
 }
 
 /// Closes client or link to a hub `id` of lane `lane` as the server shuts
@@ -169,25 +155,15 @@ async fn tell_clients(shared: &Shared) {
 /// most.
 async fn close(shared: &Shared, lane: usize, id: u64) {
     let kick = move |lane: &Lane| {
-        if let Some(c) = lane.clients.borrow().get(&id) {
-            c.kick(Close::Shutdown);
-        }
-        if let Some(l) = lane.links.borrow().iter().find(|l| l.id == id) {
-            l.client.kick(Close::Shutdown);
-        }
-        there(lane, id)
+        lane.kick(id, Close::Shutdown);
+        lane.has_conn(id)
     };
-    let mut left = crate::monitor::ask(shared, lane, kick).await;
+    let mut left = crate::lane::ask(shared, lane, kick).await;
     let until = Instant::now() + GONE;
     while left == Some(true) && Instant::now() < until {
         tokio::time::sleep(TICK).await;
-        left = crate::monitor::ask(shared, lane, move |lane: &Lane| there(lane, id)).await;
+        left = crate::lane::ask(shared, lane, move |lane: &Lane| lane.has_conn(id)).await;
     }
-}
-
-/// Whether client or link to a hub `id` is still on `lane`.
-fn there(lane: &Lane, id: u64) -> bool {
-    lane.clients.borrow().contains_key(&id) || lane.links.borrow().iter().any(|l| l.id == id)
 }
 
 /// How lame duck mode spreads the closes of its connections, as
@@ -302,12 +278,12 @@ mod tests {
     fn a_shuffle_keeps_every_item() {
         let mut all: Vec<u32> = (0..10).collect();
         let mut below = crate::server::random();
-        shuffle(&mut all, &mut below);
+        crate::server::shuffle(&mut all, &mut below);
         let mut sorted = all.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, (0..10).collect::<Vec<_>>());
         let mut one = [7];
-        shuffle(&mut one, &mut below);
+        crate::server::shuffle(&mut one, &mut below);
         assert_eq!(one, [7]);
     }
 

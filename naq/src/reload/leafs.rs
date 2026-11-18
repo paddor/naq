@@ -3,9 +3,8 @@
 //! Nothing else may change: not the port naq leafs dial, nor the remotes
 //! to naq hubs, whose slots the mesh fixed at the start.
 
-use std::time::Duration;
-
-use crate::leaf::{Connector, HubRemote, is_naq, same};
+use super::diff::{Go, seconds};
+use crate::leaf::{Connector, HubRemote, go_remotes, naq_remotes, same};
 use crate::server::Shared;
 use crate::{Leafnodes, Options, Remote};
 
@@ -21,26 +20,12 @@ pub(super) fn changed(old: &Options, new: &Options) -> Result<bool, String> {
     hub_port(old.leafnodes.as_ref(), new.leafnodes.as_ref())?;
     if old.leaf_reconnect != new.leaf_reconnect {
         let (o, n) = (old.leaf_reconnect, new.leaf_reconnect);
-        let go = crate::log::go_duration;
-        return Err(refusal("ReconnectInterval", &go(o), &go(n)));
+        return Err(refusal("ReconnectInterval", &o.go(), &n.go()));
     }
-    let naq = |x: &Options| {
-        x.remotes
-            .iter()
-            .filter(|r| is_naq(r))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    if naq(old) != naq(new) {
+    if !naq_remotes(old).eq(naq_remotes(new)) {
         return Err("config reload not supported for LeafNode: remotes of naq hubs".into());
     }
-    let go = |x: &'_ Options| {
-        x.remotes
-            .iter()
-            .filter(|r| !is_naq(r))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+    let go = |x: &Options| go_remotes(x).cloned().collect::<Vec<_>>();
     let (before, after) = (go(old), go(new));
     let mut moved = before.len() != after.len();
     for r in &after {
@@ -65,8 +50,6 @@ fn hub_port(old: Option<&Leafnodes>, new: Option<&Leafnodes>) -> Result<(), Stri
     };
     let (o, n) = (old.unwrap_or(&none), new.unwrap_or(&none));
     let users = |l: &Leafnodes| format!("[{} users]", l.users.len());
-    let seconds = |d: Duration| d.as_secs_f64().to_string();
-    let account = |l: &Leafnodes| l.account.clone().unwrap_or_default();
     if o.users != n.users {
         return Err(refusal("Users", &users(o), &users(n)));
     }
@@ -74,10 +57,10 @@ fn hub_port(old: Option<&Leafnodes>, new: Option<&Leafnodes>) -> Result<(), Stri
         return Err(refusal("Host", &o.host, &n.host));
     }
     if o.port != n.port {
-        return Err(refusal("Port", &o.port.to_string(), &n.port.to_string()));
+        return Err(refusal("Port", &o.port.go(), &n.port.go()));
     }
     if o.account != n.account {
-        return Err(refusal("Account", &account(o), &account(n)));
+        return Err(refusal("Account", &o.account.go(), &n.account.go()));
     }
     Err(refusal(
         "AuthTimeout",
@@ -96,26 +79,15 @@ fn same_but_tls(old: &Remote, new: &Remote) -> Result<(), String> {
     if bare(old) == bare(new) {
         return Ok(());
     }
-    let list = |l: &[String]| format!("[{}]", l.join(" "));
     let (field, o, n) = if old.no_randomize != new.no_randomize {
-        let s = |b: bool| b.to_string();
-        ("NoRandomize", s(old.no_randomize), s(new.no_randomize))
+        ("NoRandomize", old.no_randomize.go(), new.no_randomize.go())
     } else if old.deny_imports != new.deny_imports {
-        (
-            "DenyImports",
-            list(&old.deny_imports),
-            list(&new.deny_imports),
-        )
+        ("DenyImports", old.deny_imports.go(), new.deny_imports.go())
     } else if old.deny_exports != new.deny_exports {
-        (
-            "DenyExports",
-            list(&old.deny_exports),
-            list(&new.deny_exports),
-        )
+        ("DenyExports", old.deny_exports.go(), new.deny_exports.go())
     } else {
-        let s = |b: bool| b.to_string();
         let (o, n) = (old.request_isolation, new.request_isolation);
-        ("RequestIsolation", s(o), s(n))
+        ("RequestIsolation", o.go(), n.go())
     };
     Err(format!(
         "config reload not supported for LeafNode: remote {}: field {field:?}: old={o}, new={n}",
@@ -127,21 +99,21 @@ fn same_but_tls(old: &Remote, new: &Remote) -> Result<(), String> {
 /// their links, and dials those it adds; logs each removal as
 /// `nats-server` does.
 pub(super) fn apply(shared: &Shared, new: &Options) {
-    let keep: Vec<&Remote> = new.remotes.iter().filter(|r| !is_naq(r)).collect();
-    for (hub, link) in shared.hubs.remove_others(&keep) {
+    let keep: Vec<&Remote> = go_remotes(new).collect();
+    for (hub, link) in shared.live.hubs.remove_others(&keep) {
         let name = HubRemote::name(&hub.remote);
         shared
             .log
             .info(format_args!("Reloaded: LeafNode Remote {name} removed"));
         if let Some(id) = link {
-            crate::monitor::on_lane(shared, hub.lane, move |lane| {
+            crate::lane::on_lane(shared, hub.lane, move |lane| {
                 if let Some(l) = lane.links.borrow().iter().find(|l| l.id == id) {
                     l.client.kick(crate::conn::Close::Dropped);
                 }
             });
         }
     }
-    let have = shared.hubs.all();
+    let have = shared.live.hubs.all();
     for r in keep.into_iter().filter(|r| !have.iter().any(|h| h.is(r))) {
         let tls = match Connector::new(r) {
             Ok(tls) => tls,
@@ -153,8 +125,8 @@ pub(super) fn apply(shared: &Shared, new: &Options) {
                 continue;
             }
         };
-        let hub = shared.hubs.add(r.clone(), tls, shared.lanes.len());
-        crate::monitor::on_lane(shared, hub.lane, move |lane| {
+        let hub = shared.live.hubs.add(r.clone(), tls, shared.lanes.len());
+        crate::lane::on_lane(shared, hub.lane, move |lane| {
             let shared = lane.shared.clone();
             tokio::task::spawn_local(crate::leaf::run(shared, hub));
         });
@@ -165,13 +137,14 @@ pub(super) fn apply(shared: &Shared, new: &Options) {
 /// the options: their next dial uses it.
 pub(super) fn retls(shared: &Shared, hubs: Vec<(Remote, Connector)>) {
     for (r, tls) in hubs {
-        shared.hubs.retls(&r, tls);
+        shared.live.hubs.retls(&r, tls);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn with(remotes: &[&str]) -> Options {
         Options {

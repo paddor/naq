@@ -67,7 +67,7 @@ pub(crate) fn validate(o: &Websocket) -> Result<(), String> {
 
 /// Runs a WebSocket client that reached lane `index`.
 pub(crate) async fn run(shared: Arc<Shared>, index: usize, stream: Stream) {
-    let Some(lane) = lane::get(shared.id, index) else {
+    let Some(lane) = lane::get(shared.ident.id, index) else {
         return;
     };
     let Some(door) = shared.ws.as_ref() else {

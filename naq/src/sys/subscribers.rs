@@ -157,7 +157,7 @@ async fn answer(shared: Arc<Shared>, at: usize, asked: Asked) -> Option<Answer> 
     let s = &*shared;
     let account = account_of(s, &asked)?;
     let of = Of::parse(&asked.body);
-    let lane = crate::lane::get(s.id, at)?;
+    let lane = crate::lane::get(s.ident.id, at)?;
     let here = of.count(&lane.index(account).borrow(), lane.slots.leafs());
     let expected = s.sys.remote.serving(account);
     let more = match (expected, s.system) {
@@ -243,7 +243,7 @@ pub(super) fn nsubs(lane: &Lane, m: &Pub<'_>) -> bool {
             if c.total == 0 {
                 return None;
             }
-            let lane = crate::lane::get(shared.id, at)?;
+            let lane = crate::lane::get(shared.ident.id, at)?;
             let n = of.count(&lane.index(account).borrow(), lane.slots.leafs());
             Some(Answer::new(asked.reply, n.to_string().into_bytes()))
         });

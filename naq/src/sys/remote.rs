@@ -192,7 +192,7 @@ pub(super) fn statsz(lane: &Lane, m: &Pub<'_>) -> bool {
         ));
         return true;
     };
-    if stats.server.id != s.server_id {
+    if stats.server.id != s.ident.server_id {
         heard(s, &stats.server);
     }
     true

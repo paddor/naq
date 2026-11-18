@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 
 use naq::{Options, Remote, RemoteTls, Server};
 
+mod common;
+
+use common::{free_port, go_bin, refuses};
+
 /// Longest wait for anything a test expects.
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -29,10 +33,12 @@ fn leaf_with(remote: Remote) -> Server {
 
 /// [`leaf_with`], with server name `name`.
 fn leaf_named(name: &str, remote: Remote) -> Server {
-    Server::start(&Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
+    Server::start(&leaf_options(name, remote)).unwrap()
+}
+
+/// Options of a naq leaf `name` of `remote`, as [`leaf_with`] starts it.
+fn leaf_options(name: &str, remote: Remote) -> Options {
+    let o = Options {
         server_name: name.into(),
         leaf_reconnect: Duration::from_millis(50),
         remotes: vec![remote],
@@ -40,6 +46,21 @@ fn leaf_named(name: &str, remote: Remote) -> Server {
         // server's own: the imports of the system account's services.
         no_system_account: true,
         ..Options::default()
+    };
+    common::local(o, 2)
+}
+
+/// A naq leaf of `hub`, in lame duck mode for 3 s after a grace period of
+/// `grace`.
+fn lame_leaf(hub: &Hub, grace: Duration) -> Server {
+    let remote = Remote {
+        urls: vec![format!("127.0.0.1:{}", hub.port())],
+        ..Remote::default()
+    };
+    Server::start(&Options {
+        lame_duck_duration: Duration::from_secs(3),
+        lame_duck_grace_period: grace,
+        ..leaf_options("naq-leaf", remote)
     })
     .unwrap()
 }
@@ -689,7 +710,7 @@ fn go_client(port: u16, subs: &str) -> Peer {
 
 /// `nats-server` from `NAQ_GO`, with `conf`; `None` without `NAQ_GO`.
 fn go(conf: &str) -> Option<GoServer> {
-    let bin = PathBuf::from(std::env::var_os("NAQ_GO")?);
+    let bin = go_bin()?;
     let dir = std::env::temp_dir().join(format!("naq-leaf-{}-{}", std::process::id(), fastrand()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("hub.conf");
@@ -729,23 +750,6 @@ impl Drop for GoServer {
             eprintln!("hub log:\n{log}");
         }
         let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// A free port, each once per run, below the kernel's ephemeral ports
-/// (32768 on): a server that binds port 0 cannot take it first.
-fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    // Test binaries of other runs start elsewhere.
-    let base = 20_000 + (std::process::id() % 400) as u16 * 30;
-    loop {
-        // Relaxed: only uniqueness matters.
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let port = 20_000 + (base - 20_000 + n) % 12_000;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
     }
 }
 
@@ -2426,31 +2430,13 @@ fn the_system_account_hears_of_links_as_they_come_and_go() {
 #[test]
 fn a_leaf_in_lame_duck_mode_dials_no_more() {
     let hub = Hub::new();
-    let leaf = Server::start(&Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
-        leaf_reconnect: Duration::from_millis(50),
-        remotes: vec![Remote {
-            urls: vec![format!("127.0.0.1:{}", hub.port())],
-            ..Remote::default()
-        }],
-        no_system_account: true,
-        lame_duck_duration: Duration::from_secs(3),
-        lame_duck_grace_period: Duration::from_secs(1),
-        ..Options::default()
-    })
-    .unwrap();
+    let leaf = lame_leaf(&hub, Duration::from_secs(1));
     let p = linked(&hub);
     // A client keeps it in lame duck mode for the grace period.
     let mut c = client(&leaf, "");
     let done = std::thread::spawn(move || leaf.lame_duck_shutdown());
     // Once the client may not connect, it is in lame duck mode.
-    let deadline = Instant::now() + WAIT;
-    while TcpStream::connect(c.w.peer_addr().unwrap()).is_ok() {
-        assert!(Instant::now() < deadline, "still takes clients");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    refuses(c.w.peer_addr().unwrap());
     drop(p);
     assert!(!dials_soon(&hub), "dialed again in lame duck mode");
     assert!(c.closed());
@@ -2461,20 +2447,7 @@ fn a_leaf_in_lame_duck_mode_dials_no_more() {
 fn a_leaf_in_lame_duck_mode_closes_its_link_after_the_grace_period() {
     let hub = Hub::new();
     let grace = Duration::from_millis(300);
-    let leaf = Server::start(&Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
-        remotes: vec![Remote {
-            urls: vec![format!("127.0.0.1:{}", hub.port())],
-            ..Remote::default()
-        }],
-        no_system_account: true,
-        lame_duck_duration: Duration::from_secs(3),
-        lame_duck_grace_period: grace,
-        ..Options::default()
-    })
-    .unwrap();
+    let leaf = lame_leaf(&hub, grace);
     let mut p = linked(&hub);
     let started = Instant::now();
     let done = std::thread::spawn(move || leaf.lame_duck_shutdown());

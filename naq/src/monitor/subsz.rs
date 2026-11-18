@@ -81,7 +81,7 @@ const fn held(lane: &Lane, index: &Index) -> u64 {
 }
 
 /// The subscriptions of every account on `lane`, as `/subsz` counts them.
-pub(super) fn on_lane(lane: &Lane) -> u64 {
+pub(super) fn lane_subs(lane: &Lane) -> u64 {
     (0..lane.shared.accounts.len())
         .map(|a| held(lane, &lane.index(a).borrow()))
         .sum()
@@ -209,7 +209,7 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
     let start = usize::try_from(offset).unwrap_or(n).min(n);
     let end = start + usize::try_from(limit).unwrap_or(n).min(n - start);
     Ok(pretty(&Subsz {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         now: now(),
         stats: Stats::of(subs, inserts, removes),
         total: n,

@@ -388,7 +388,7 @@ impl<'l, S: AsyncRead + AsyncWrite + Unpin + 'static> Link<'l, S> {
         }
         let opts = &self.lane.shared.opts();
         let r = &remote.remote;
-        let account = r.account.as_deref().unwrap_or("$G");
+        let account = r.account_name();
         // A file gone or broken ends this dial; the next reads it again.
         let proof = creds::prove(r, &info.nonce).map_err(|_| End::ZERO)?;
         let token = url.pass.is_none().then_some(url.user.as_deref()).flatten();
@@ -466,7 +466,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
         terms: Terms,
     ) -> End {
         let shared = &self.lane.shared;
-        let name = remote.remote.account.as_deref().unwrap_or("$G");
+        let name = remote.remote.account_name();
         // Known to exist: the options were checked.
         let account = shared.accounts.id(name).unwrap_or(0);
         let client = self.client.clone();
@@ -545,7 +545,7 @@ impl<R: AsyncRead + Unpin> Link<'_, R> {
             };
             // A subscriber past the stall mark slows the hub to its pace.
             if let Some(sub) = self.stalled.take() {
-                conn::stall(&sub, mark, &lane.shared.events.stalls).await;
+                conn::stall(&sub, mark, &lane.shared.tally.events.stalls).await;
             }
             tokio::task::yield_now().await;
             conn::make_room(&mut buf, need, &lane.reads);

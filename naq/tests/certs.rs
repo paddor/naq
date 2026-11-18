@@ -6,19 +6,22 @@
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use naq::{Options, Server};
+use naq::Options;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair, SanType,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+
+mod common;
+
+use common::{Go, Target, free_port, go_bin};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -106,62 +109,14 @@ impl Drop for Pki {
     }
 }
 
-enum Target {
-    Naq(Server),
-    Go { _go: GoServer, port: u16 },
-}
-
-impl Target {
-    fn addr(&self) -> SocketAddr {
-        match self {
-            Target::Naq(s) => s.addr(),
-            Target::Go { port, .. } => SocketAddr::from(([127, 0, 0, 1], *port)),
-        }
-    }
-}
-
 /// naq, then `nats-server` if `NAQ_GO` names one, each running `conf`.
 fn targets(conf: &str, dir: &Path) -> Vec<(&'static str, Target)> {
-    let mut opts: Options = conf.parse().unwrap();
-    opts.host = "127.0.0.1".into();
-    opts.port = 0;
-    opts.lanes = 1;
-    let mut all = vec![("naq", Target::Naq(Server::start(&opts).unwrap()))];
-    if let Some(bin) = std::env::var_os("NAQ_GO").map(PathBuf::from) {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let path = dir.join("go.conf");
-        std::fs::write(&path, format!("listen: 127.0.0.1:{port}\n{conf}")).unwrap();
-        let child = Command::new(bin)
-            .arg("-c")
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let go = GoServer { child };
-        let deadline = Instant::now() + WAIT;
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "nats-server did not start");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        all.push(("go", Target::Go { _go: go, port }));
+    let mut all = vec![("naq", Target::Naq(common::naq(conf, 1)))];
+    if let Some(bin) = go_bin() {
+        let port = free_port();
+        all.push(("go", Target::Go(Go::listening(&bin, dir, port, conf), port)));
     }
     all
-}
-
-struct GoServer {
-    child: Child,
-}
-
-impl Drop for GoServer {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 /// What the server says first to a client of certificate `cert` that

@@ -13,6 +13,7 @@ use naq::{Cluster, Leafnodes, Options, Remote, Server};
 
 #[path = "mesh/cluster.rs"]
 mod cluster;
+mod common;
 mod proxy;
 #[path = "sim/world.rs"]
 mod world;

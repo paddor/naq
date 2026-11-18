@@ -162,12 +162,12 @@ pub(crate) fn install(lane: &Lane) {
     };
     send::start(lane);
     let mut index = lane.index(sys).borrow_mut();
-    server::install(&mut index, &shared.server_id);
+    server::install(&mut index, &shared.ident.server_id);
     remote::install(&mut index);
-    conns::install(&mut index, &shared.server_id);
+    conns::install(&mut index, &shared.ident.server_id);
     subscribers::install(&mut index, &shared.sys.tallies);
-    kick::install(&mut index, &shared.server_id);
-    reload::install(&mut index, &shared.server_id);
+    kick::install(&mut index, &shared.ident.server_id);
+    reload::install(&mut index, &shared.ident.server_id);
     account::install(&mut index);
     if trust(shared).is_none() {
         return;
@@ -246,7 +246,7 @@ fn respond(lane: &Lane, out: &mut Outs, reply: &[u8], answer: &Value) {
     let Some(sys) = shared.system else {
         return;
     };
-    let info = crate::monitor::json::compact(&reply::ServerInfo::of(shared, &shared.opts()));
+    let info = reply::server_block(shared);
     let mut payload = [&b"{\"server\":"[..], &info].concat();
     for key in ["data", "error"] {
         if let Some(v) = answer.get(key) {

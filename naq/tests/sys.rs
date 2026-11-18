@@ -5,43 +5,26 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use naq::{Options, Server};
 
-const WAIT: Duration = Duration::from_secs(10);
+mod common;
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use common::{free_port, member_conf};
+
+const WAIT: Duration = Duration::from_secs(10);
 
 /// Server `n<i>` of a cluster on `ports`, with a user `sys` of the system
 /// account and a user `a` of account `A`, which has `limits` too.
 fn member(i: usize, ports: &[u16], limits: &str) -> Result<Server, naq::Error> {
-    let routes: Vec<String> = (0..ports.len())
-        .filter(|&j| j != i)
-        .map(|j| format!("\"nats-route://127.0.0.1:{}\"", ports[j]))
-        .collect();
     let conf = format!(
-        "server_name: n{i}\n\
-         accounts {{ SYS {{ users [{{user: sys, password: p}}] }}, A {{ users [{{user: a, password: p}}] {limits} }} }}\n\
-         system_account: SYS\n\
-         cluster {{ name: c, listen: \"127.0.0.1:{}\", routes: [{}] }}\n",
-        ports[i],
-        routes.join(", ")
+        "{}accounts {{ SYS {{ users [{{user: sys, password: p}}] }}, A {{ users [{{user: a, password: p}}] {limits} }} }}\n\
+         system_account: SYS\n",
+        member_conf(i, ports)
     );
-    let opts: Options = conf.parse().unwrap();
-    Server::start(&Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 2,
-        ..opts
-    })
+    Server::start(&common::local(conf.parse().unwrap(), 2))
 }
 
 fn cluster(n: usize) -> Vec<Server> {

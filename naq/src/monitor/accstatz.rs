@@ -288,7 +288,7 @@ pub(crate) async fn statz(
         .collect();
     let n = stats.len();
     let body = super::json::compact(&AccountStatz {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         now: now(),
         account_statz: stats,
     });
@@ -354,7 +354,7 @@ pub(super) async fn answer(shared: &Shared, q: &Query) -> Result<Response, Refus
         .map(|((_, a), u)| AccountStat::of(shared, &a.name, u))
         .collect();
     Ok(pretty(&AccountStatz {
-        server_id: &shared.server_id,
+        server_id: &shared.ident.server_id,
         now: now(),
         account_statz: stats,
     }))

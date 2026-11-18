@@ -3,11 +3,8 @@
 //! another account goes, one whose secret no longer holds is refused, and
 //! one that stays takes its new permissions.
 
-use std::rc::Rc;
-
 use super::{Close, Conn};
 use crate::auth::{Check, Grant};
-use crate::perms::Held;
 
 impl Conn {
     /// Logs the client in again with what it logged in with, against the
@@ -44,8 +41,7 @@ impl Conn {
             Check::Bcrypt(p) if hash.as_deref() == Some(p.hash()) => p.grant,
             Check::Bcrypt(p) => {
                 let (grant, hash) = (p.grant.clone(), p.hash().to_owned());
-                let holds = tokio::task::spawn_blocking(move || p.holds()).await;
-                if !matches!(holds, Ok(true)) {
+                if !p.verify().await {
                     return Err(Close::Auth);
                 }
                 if let Some(l) = self.bounds.login.as_deref_mut() {
@@ -71,10 +67,7 @@ impl Conn {
             _ => false,
         };
         if !same {
-            let held = grant.perms.map(|p| Rc::new(Held::new(p)));
-            let traced = self.client.traced.get();
-            self.client.guarded.set(traced || held.is_some());
-            *self.client.held.borrow_mut() = held;
+            self.client.hold(grant.perms);
         }
         self.drop_forbidden(true);
     }

@@ -221,6 +221,13 @@ impl Pending {
     pub(crate) fn holds(&self) -> bool {
         bcrypt::verify(&self.password, &self.hash).unwrap_or(false)
     }
+
+    /// Whether the password matches the hash, compared off the lane: it
+    /// is slow by design.
+    pub(crate) async fn verify(self) -> bool {
+        let holds = tokio::task::spawn_blocking(move || self.holds()).await;
+        matches!(holds, Ok(true))
+    }
 }
 
 #[cfg(test)]
@@ -534,12 +541,7 @@ impl Auth {
     }
 
     /// The operator mode users log in under, if any.
-    pub(crate) fn trust(&self) -> Option<&crate::jwt::trust::Trust> {
-        self.trust.as_deref()
-    }
-
-    /// The operator mode users log in under, shared, if any.
-    pub(crate) const fn trust_arc(&self) -> Option<&Arc<crate::jwt::trust::Trust>> {
+    pub(crate) const fn trust(&self) -> Option<&Arc<crate::jwt::trust::Trust>> {
         self.trust.as_ref()
     }
 

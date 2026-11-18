@@ -116,8 +116,8 @@ impl Me {
             role: Role::Hub,
             account: shared.accounts.name(self.account).as_bytes(),
             epoch: self.epoch,
-            server_id: shared.server_id.as_bytes(),
-            name: shared.opts().server_name.as_bytes(),
+            server_id: shared.ident.server_id.as_bytes(),
+            name: opts.server_name.as_bytes(),
             cluster: cluster.as_bytes(),
             data: self.data.as_bytes(),
             client_urls: b"",
@@ -349,14 +349,12 @@ impl Hub {
                 perms: carries.perms.clone(),
             });
         }
-        let told = Rc::new(
-            Told::new(
-                self.mesh.epoch,
-                self.shared.accounts.clone(),
-                self.mesh.leaf_wake.clone(),
-            )
-            .stamping(self.shared.marks.clone(), slot..slot + 1),
-        );
+        let told = Rc::new(Told::new(
+            self.mesh.epoch,
+            self.shared.accounts.clone(),
+            self.mesh.leaf_wake.clone(),
+            (self.shared.marks.clone(), slot..slot + 1),
+        ));
         {
             let routes = self.mesh.peers.borrow();
             let leaf = ForLeaf {

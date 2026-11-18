@@ -5,45 +5,27 @@
 
 #![expect(clippy::unwrap_used, reason = "tests fail loudly")]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use naq::{Options, Server};
 
+mod common;
+
+use common::{Client, WAIT, free_port, get, go_bin, lines_once, same, signal};
+
 const NAQ: &str = env!("CARGO_BIN_EXE_naq");
-const WAIT: Duration = Duration::from_secs(10);
 
 /// A directory of its own for test `name`.
 fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("naq-reload-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    common::dir("reload", name)
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// The lines of the log at `path`, once `ready` holds for them.
-fn lines_once(path: &Path, ready: impl Fn(&[String]) -> bool) -> Vec<String> {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
-        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
-        if ready(&lines) {
-            return lines;
-        }
-        assert!(Instant::now() < deadline, "log not ready: {lines:#?}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+/// Options of a server on a free port, with one lane.
+fn local() -> Options {
+    common::local(Options::default(), 1)
 }
 
 /// Whether `line` ends a reload, as it went or not.
@@ -105,15 +87,8 @@ impl Proc {
     /// Sends `HUP`, and waits until the reload is logged as done.
     fn hup(&self) {
         let before = self.reloads();
-        let ok = Command::new("kill")
-            .args(["-s", "HUP", &self.child.id().to_string()])
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        lines_once(&self.log(), |l| {
-            l.iter().filter(|l| ends_reload(l)).count() > before
-        });
+        common::kill("HUP", self.child.id());
+        self.reloaded(before + 1);
     }
 
     /// Reloads logged so far.
@@ -121,15 +96,25 @@ impl Proc {
         let text = std::fs::read_to_string(self.log()).unwrap_or_default();
         text.lines().filter(|l| ends_reload(l)).count()
     }
+
+    /// The lines of its log, once `n` reloads ended.
+    fn reloaded(&self, n: usize) -> Vec<String> {
+        lines_once(&self.log(), |l| {
+            l.iter().filter(|l| ends_reload(l)).count() >= n
+        })
+    }
+
+    /// The lines of its log so far.
+    fn lines(&self) -> Vec<String> {
+        lines_once(&self.log(), |_| true)
+    }
 }
 
 impl Drop for Proc {
     /// Stops the server as `TERM` does, so that it exits as it would, and
     /// kills it if it does not.
     fn drop(&mut self) {
-        let _ = Command::new("kill")
-            .args(["-s", "TERM", &self.child.id().to_string()])
-            .status();
+        let _ = signal("TERM", self.child.id());
         let deadline = Instant::now() + WAIT;
         while Instant::now() < deadline {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
@@ -142,11 +127,40 @@ impl Drop for Proc {
     }
 }
 
-/// The binaries to check: naq, and `nats-server` if `NAQ_GO` names one.
-fn binaries() -> Vec<PathBuf> {
-    let mut all = vec![PathBuf::from(NAQ)];
-    all.extend(std::env::var_os("NAQ_GO").map(PathBuf::from));
-    all
+/// The binary to run: `nats-server` at `go`, or naq.
+fn bin(go: Option<&Path>) -> &Path {
+    go.unwrap_or(NAQ.as_ref())
+}
+
+/// Runs `script` against naq, then against `nats-server` if `NAQ_GO`
+/// names one, each running `conf` in a directory of its own for test
+/// `name`; `check` compares what both gave. Returns naq's.
+fn both_with<T>(
+    name: &str,
+    conf: &str,
+    mut script: impl FnMut(&Proc) -> T,
+    check: impl Fn(&T, &T),
+) -> T {
+    common::both_with(
+        |i, go| {
+            let d = dir(&format!("{name}-{i}"));
+            script(&Proc::start(bin(go), &d, conf, &[]))
+        },
+        check,
+    )
+}
+
+/// [`both_with`], where both must give the same.
+fn both<T: PartialEq + Debug>(name: &str, conf: &str, script: impl FnMut(&Proc) -> T) -> T {
+    both_with(name, conf, script, same)
+}
+
+/// `line` with the digest of its configuration masked, if it has one.
+fn unhashed(line: &str) -> String {
+    match line.split_once(" (sha256:") {
+        Some((head, _)) => format!("{head} (sha256:...)"),
+        None => line.to_owned(),
+    }
 }
 
 /// The reload lines of `lines`, without process IDs and digests.
@@ -158,10 +172,7 @@ fn reload_lines(lines: &[String]) -> Vec<String> {
             let own = rest.starts_with("[INF] Reloaded")
                 || rest.contains("Failed to reload")
                 || rest.contains("Trapped");
-            own.then(|| match rest.split_once(" (sha256:") {
-                Some((head, _)) => format!("{head} (sha256:...)"),
-                None => rest.to_owned(),
-            })
+            own.then(|| unhashed(rest))
         })
         .collect()
 }
@@ -169,20 +180,13 @@ fn reload_lines(lines: &[String]) -> Vec<String> {
 /// Runs `steps` against each binary, each a configuration to write and
 /// reload; checks both logged the same reload lines. Returns naq's.
 fn reloads(name: &str, first: &str, steps: &[&str]) -> Vec<String> {
-    let mut seen: Vec<Vec<String>> = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("{name}-{i}"));
-        let p = Proc::start(bin, &d, first, &[]);
+    both(name, first, |p| {
         for step in steps {
             p.write(step);
             p.hup();
         }
-        seen.push(reload_lines(&lines_once(&p.log(), |_| true)));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    seen.swap_remove(0)
+        reload_lines(&p.lines())
+    })
 }
 
 #[test]
@@ -240,54 +244,9 @@ fn reloads_are_logged_as_nats_server_logs_them() {
     );
 }
 
-/// A raw client.
-struct Client {
-    w: TcpStream,
-    r: BufReader<TcpStream>,
-    /// Its first `INFO`.
-    info: serde_json::Value,
-}
-
-impl Client {
-    /// Connects to `port` with `connect`, and reads up to its `PONG`.
-    fn new(port: u16, connect: &str) -> Client {
-        let w = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        w.set_read_timeout(Some(WAIT)).unwrap();
-        let mut r = BufReader::new(w.try_clone().unwrap());
-        let mut first = String::new();
-        r.read_line(&mut first).unwrap();
-        let info = serde_json::from_str(first.strip_prefix("INFO ").unwrap().trim_end()).unwrap();
-        let mut c = Client { w, r, info };
-        c.send(&format!("CONNECT {connect}\r\nPING\r\n"));
-        while c.line() != "PONG\r\n" {}
-        c
-    }
-
-    fn send(&mut self, s: &str) {
-        self.w.write_all(s.as_bytes()).unwrap();
-    }
-
-    /// The next line; empty once the connection closed.
-    fn line(&mut self) -> String {
-        let mut line = String::new();
-        self.r.read_line(&mut line).unwrap();
-        line
-    }
-
-    /// What it gets until the server closes the connection.
-    fn rest(mut self) -> String {
-        let mut rest = String::new();
-        let _ = self.r.read_to_string(&mut rest);
-        rest
-    }
-}
-
 #[test]
 fn live_clients_take_a_lower_max_payload_at_once_and_new_ones_see_it() {
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("payload-{i}"));
-        let p = Proc::start(bin, &d, "max_payload: 1024\n", &[]);
+    let (max, got) = both("payload", "max_payload: 1024\n", |p| {
         let mut c = Client::new(p.port, r#"{"verbose":false}"#);
         assert_eq!(c.info["max_payload"], 1024);
         p.write("max_payload: 512\n");
@@ -295,13 +254,10 @@ fn live_clients_take_a_lower_max_payload_at_once_and_new_ones_see_it() {
         let fresh = Client::new(p.port, r#"{"verbose":false}"#);
         let big = "x".repeat(600);
         c.send(&format!("PUB a 600\r\n{big}\r\n"));
-        seen.push((fresh.info["max_payload"].clone(), c.rest()));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    assert_eq!(seen[0].0, 512);
-    assert_eq!(seen[0].1, "-ERR 'Maximum Payload Violation'\r\n");
+        (fresh.info["max_payload"].clone(), c.rest())
+    });
+    assert_eq!(max, 512);
+    assert_eq!(got, "-ERR 'Maximum Payload Violation'\r\n");
 }
 
 #[test]
@@ -317,7 +273,7 @@ fn flags_given_at_the_start_hold_over_the_file_on_a_reload() {
     );
     p.write("max_payload: 512\n");
     p.hup();
-    let lines = reload_lines(&lines_once(&p.log(), |_| true));
+    let lines = reload_lines(&p.lines());
     assert_eq!(
         lines,
         [
@@ -334,13 +290,7 @@ fn flags_given_at_the_start_hold_over_the_file_on_a_reload() {
 
 #[test]
 fn a_server_without_a_configuration_file_cannot_reload() {
-    let o = Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 1,
-        ..Options::default()
-    };
-    let s = Server::start(&o).unwrap();
+    let s = Server::start(&local()).unwrap();
     let e = s.reload().unwrap_err();
     assert_eq!(
         e.to_string(),
@@ -353,22 +303,11 @@ fn a_server_without_a_configuration_file_cannot_reload() {
 fn reload_with_reads_the_options_its_own_way_and_a_refusal_changes_nothing() {
     let d = dir("read-with");
     let o = Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 1,
         http_port: Some(0),
-        ..Options::default()
+        ..local()
     };
     let s = Server::start(&o).unwrap();
-    let varz = || {
-        let at = s.monitor_addr().unwrap();
-        let mut c = TcpStream::connect(at).unwrap();
-        c.write_all(b"GET /varz HTTP/1.0\r\n\r\n").unwrap();
-        let mut body = String::new();
-        c.read_to_string(&mut body).unwrap();
-        let (_, json) = body.split_once("\r\n\r\n").unwrap();
-        serde_json::from_str::<serde_json::Value>(json).unwrap()
-    };
+    let varz = || get(s.monitor_addr().unwrap(), "/varz");
     let first = varz();
     let next = std::sync::Arc::new(std::sync::Mutex::new(o.clone()));
     let read = next.clone();
@@ -411,46 +350,30 @@ fn plain(line: &str) -> String {
 
 #[test]
 fn the_log_moves_to_a_new_file_and_live_clients_are_traced() {
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("log-{i}"));
-        let p = Proc::start(bin, &d, "", &[]);
+    let (old, new) = both("log", "", |p| {
         let mut c = Client::new(p.port, r#"{"verbose":false,"name":"app"}"#);
-        let moved = d.join("moved.log");
+        let moved = p.dir.join("moved.log");
         p.write(&format!(
             "log_file: {:?}\ntrace: true\n",
             moved.display().to_string()
         ));
-        let ok = Command::new("kill")
-            .args(["-s", "HUP", &p.child.id().to_string()])
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
+        common::kill("HUP", p.child.id());
         lines_once(&moved, |l| l.iter().any(|l| ends_reload(l)));
         c.send("PUB a 2\r\nhi\r\nPING\r\n");
-        while c.line() != "PONG\r\n" {}
+        c.pong();
         let old = lines_once(&p.log(), |l| l.iter().any(|l| l.contains("log_file")));
         let new = lines_once(&moved, |l| l.iter().any(|l| l.contains("->> [PONG]")));
         let from = old.iter().position(|l| l.contains("Trapped")).unwrap();
         // The directories and digests are those of each run.
-        let at = d.display().to_string();
-        let mask = |l: &String| {
-            let l = plain(l).replace(&at, "DIR");
-            l.split_once(" (sha256:")
-                .map_or(l.clone(), |(h, _)| h.to_owned())
-        };
+        let at = p.dir.display().to_string();
+        let mask = |l: &String| unhashed(&plain(l).replace(&at, "DIR"));
         let old: Vec<String> = old[from..].iter().map(mask).collect();
         let new: Vec<String> = new.iter().map(mask).collect();
-        seen.push((old, new));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    let (old, new) = &seen[0];
+        (old, new)
+    });
     assert_eq!(
         old,
-        &[
+        [
             r#"[INF] Trapped "hangup" signal"#,
             "[INF] Reloaded: trace = true",
             "[INF] Reloaded: authorization users",
@@ -460,8 +383,8 @@ fn the_log_moves_to_a_new_file_and_live_clients_are_traced() {
     );
     assert_eq!(
         new,
-        &[
-            "[INF] Reloaded server configuration",
+        [
+            "[INF] Reloaded server configuration (sha256:...)",
             r#"[TRC] 127.0.0.1:P - cid:N - "app" - <<- [PUB a 2]"#,
             r#"[TRC] 127.0.0.1:P - cid:N - "app" - <<- MSG_PAYLOAD: ["hi"]"#,
             r#"[TRC] 127.0.0.1:P - cid:N - "app" - <<- [PING]"#,
@@ -472,9 +395,7 @@ fn the_log_moves_to_a_new_file_and_live_clients_are_traced() {
 
 #[test]
 fn live_clients_ping_at_the_new_interval_from_their_next_ping() {
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("ping-{i}"));
-        let p = Proc::start(bin, &d, "ping_interval: \"1h\"\n", &[]);
+    both("ping", "ping_interval: \"1h\"\n", |p| {
         let mut c = Client::new(p.port, r#"{"verbose":false}"#);
         p.write("ping_interval: \"200ms\"\n");
         p.hup();
@@ -485,10 +406,11 @@ fn live_clients_ping_at_the_new_interval_from_their_next_ping() {
         assert_eq!(c.line(), "PING\r\n");
         assert!(
             at.elapsed() < Duration::from_secs(1),
-            "{bin:?}: {:?}",
+            "{}: {:?}",
+            p.dir.display(),
             at.elapsed()
         );
-    }
+    });
 }
 
 /// The configuration of a system account with user `sys`.
@@ -508,29 +430,21 @@ fn ask_reload(c: &mut Client, id: &str) -> serde_json::Value {
 
 #[test]
 fn a_reload_asked_on_sys_answers_how_it_went_and_logs_only_a_success() {
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("sys-{i}"));
-        let p = Proc::start(bin, &d, SYSTEM, &[]);
+    let (went, refused, lines) = both("sys", SYSTEM, |p| {
         let mut c = Client::new(p.port, r#"{"verbose":false,"user":"sys","pass":"p"}"#);
         let id = c.info["server_id"].as_str().unwrap().to_owned();
         c.send("SUB _R 1\r\nPING\r\n");
-        while c.line() != "PONG\r\n" {}
+        c.pong();
         p.write(&format!("{SYSTEM}max_payload: 512\n"));
         let went = ask_reload(&mut c, &id);
         p.write(&SYSTEM.replace("s1", "s2"));
         let refused = ask_reload(&mut c, &id);
-        let lines = lines_once(&p.log(), |l| l.iter().any(|l| ends_reload(l)));
-        seen.push((went, refused, reload_lines(&lines)));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    let (went, refused, lines) = &seen[0];
-    assert_eq!(went, &serde_json::json!({"server": null}));
+        (went, refused, reload_lines(&p.reloaded(1)))
+    });
+    assert_eq!(went, serde_json::json!({"server": null}));
     assert_eq!(
         refused,
-        &serde_json::json!({
+        serde_json::json!({
             "server": null,
             "error": {
                 "code": 500,
@@ -556,12 +470,9 @@ fn a_reload_writes_the_pid_to_a_new_path_and_moves_the_ports_file() {
     std::fs::create_dir_all(&one).unwrap();
     std::fs::create_dir_all(&two).unwrap();
     let o = Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 1,
         pid_file: Some(one.join("naq.pid")),
         ports_file_dir: Some(one.clone()),
-        ..Options::default()
+        ..local()
     };
     let s = Server::start(&o).unwrap();
     let ports = |dir: &Path| {
@@ -622,11 +533,7 @@ fn a_reload_from_its_file_logs_what_it_cannot_write_and_goes_on() {
     let gone = "No such file or directory (os error 2)";
     let shown: Vec<String> = lines[from..]
         .iter()
-        .map(|l| plain(l).replace(&ports.display().to_string(), "PORTS"))
-        .map(|l| {
-            l.split_once(" (sha256:")
-                .map_or(l.clone(), |(h, _)| h.to_owned())
-        })
+        .map(|l| unhashed(&plain(l).replace(&ports.display().to_string(), "PORTS")))
         .collect();
     assert_eq!(
         shown,
@@ -642,7 +549,7 @@ fn a_reload_from_its_file_logs_what_it_cannot_write_and_goes_on() {
             format!("[INF] Reloaded: ports_file_dir = {m}"),
             format!("[INF] Reloaded: log_file = {m}/server.log"),
             format!("[ERR] Failed to reload the log: {gone}"),
-            "[INF] Reloaded server configuration".to_owned(),
+            "[INF] Reloaded server configuration (sha256:...)".to_owned(),
         ]
     );
     s.shutdown();
@@ -662,14 +569,10 @@ fn auth_lines(lines: &[String]) -> Vec<String> {
     let from = lines.iter().position(|l| l.contains("Trapped")).unwrap();
     let mut all: Vec<String> = lines[from..]
         .iter()
-        .map(|l| plain(l))
+        .map(|l| unhashed(&plain(l)))
         .filter(|l| {
             !l.starts_with("[DBG]") && !l.starts_with("[TRC]")
                 || l.contains("Client connection closed")
-        })
-        .map(|l| {
-            l.split_once(" (sha256:")
-                .map_or(l.clone(), |(h, _)| format!("{h} (sha256:...)"))
         })
         .collect();
     let closed = |l: &String| l.contains("Client connection closed: Client Closed");
@@ -688,28 +591,20 @@ fn live_clients_lose_subscriptions_their_permissions_no_longer_allow() {
     let b = "{user: b, password: b}";
     let denied =
         "{user: a, password: a, permissions: {publish: {deny: foo}, subscribe: {deny: foo}}}";
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("perms-{i}"));
-        let p = Proc::start(bin, &d, &app("", a, b), &[]);
+    let (got, after, lines) = both("perms", &app("", a, b), |p| {
         let mut ca = Client::new(
             p.port,
             r#"{"verbose":false,"user":"a","pass":"a","name":"ca"}"#,
         );
         ca.send("SUB foo 1\r\nSUB bar q 2\r\nPING\r\n");
-        while ca.line() != "PONG\r\n" {}
+        ca.pong();
         p.write(&app("", denied, b));
         p.hup();
         let got = ca.line();
         ca.send("PUB foo 1\r\nx\r\nPUB bar 1\r\ny\r\nPING\r\n");
         let after = [ca.line(), ca.line(), ca.line()];
-        let lines = lines_once(&p.log(), |l| l.iter().any(|l| ends_reload(l)));
-        seen.push((got, after, auth_lines(&lines)));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    let (got, after, lines) = &seen[0];
+        (got, after, auth_lines(&p.reloaded(1)))
+    });
     assert_eq!(
         got,
         "-ERR 'Permissions Violation for Subscription to \"foo\" (sid \"1\")'\r\n"
@@ -739,15 +634,12 @@ fn live_clients_whose_users_went_moved_or_lost_their_password_go() {
         "{user: b, password: b}",
         "{user: c, password: c}",
     );
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("users-{i}"));
-        let first = app(
-            "  OTHER { users: [] }\n",
-            user_a,
-            &format!("{user_b}, {user_c}"),
-        );
-        let p = Proc::start(bin, &d, &first, &[]);
+    let first = app(
+        "  OTHER { users: [] }\n",
+        user_a,
+        &format!("{user_b}, {user_c}"),
+    );
+    let (a_got, b_got, c_got, lines) = both("users", &first, |p| {
         let login = |u: &str| {
             let connect = format!(r#"{{"verbose":false,"user":"{u}","pass":"{u}","name":"{u}"}}"#);
             Client::new(p.port, &connect)
@@ -765,15 +657,8 @@ fn live_clients_whose_users_went_moved_or_lost_their_password_go() {
         p.write(&app("", "{user: a, password: a2}", user_b));
         p.hup();
         let a_got = ca.rest();
-        let lines = lines_once(&p.log(), |l| {
-            l.iter().filter(|l| ends_reload(l)).count() >= 2
-        });
-        seen.push((a_got, b_got, c_got, auth_lines(&lines)));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    let (a_got, b_got, c_got, lines) = &seen[0];
+        (a_got, b_got, c_got, auth_lines(&p.reloaded(2)))
+    });
     assert_eq!(a_got, "-ERR 'Authorization Violation'\r\n");
     assert_eq!((b_got.as_str(), c_got.as_str()), ("", ""));
     assert_eq!(
@@ -797,11 +682,8 @@ fn live_clients_whose_users_went_moved_or_lost_their_password_go() {
 
 #[test]
 fn the_single_user_and_the_token_reload_and_hold_their_clients_to_them() {
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("single-{i}"));
-        let single = "authorization { user: u, password: p }\n";
-        let p = Proc::start(bin, &d, single, &[]);
+    let single = "authorization { user: u, password: p }\n";
+    let script = |p: &Proc| {
         let mut cu = Client::new(
             p.port,
             r#"{"verbose":false,"user":"u","pass":"p","name":"u"}"#,
@@ -820,17 +702,13 @@ fn the_single_user_and_the_token_reload_and_hold_their_clients_to_them() {
         p.write("authorization { token: t2 }\n");
         p.hup();
         let t_got = ct.rest();
-        let lines = lines_once(&p.log(), |l| {
-            l.iter().filter(|l| ends_reload(l)).count() >= 4
-        });
-        seen.push((stayed, u_got, t_got, reload_lines(&lines)));
-    }
+        (stayed, u_got, t_got, reload_lines(&p.reloaded(4)))
+    };
     // nats-server closes the clients of the single user at every reload,
     // as moved: they are not of its user list.
-    if let [naq, go] = &seen[..] {
-        assert_eq!((&naq.2, &naq.3), (&go.2, &go.3), "naq, then nats-server");
-    }
-    let (stayed, u_got, t_got, lines) = &seen[0];
+    let (stayed, u_got, t_got, lines) = both_with("single", single, script, |naq, go| {
+        same(&(&naq.2, &naq.3), &(&go.2, &go.3));
+    });
     assert_eq!(stayed, "PONG\r\n");
     assert_eq!(u_got, "-ERR 'Authorization Violation'\r\n");
     assert_eq!(t_got, "-ERR 'Authorization Violation'\r\n");
@@ -864,14 +742,11 @@ fn the_single_user_and_the_token_reload_and_hold_their_clients_to_them() {
 
 #[test]
 fn an_account_a_reload_adds_takes_its_users_apart_from_the_others() {
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("added-{i}"));
-        let first = "accounts { APP { users: [{user: a, password: a}] } }\n";
-        let p = Proc::start(bin, &d, first, &[]);
+    let first = "accounts { APP { users: [{user: a, password: a}] } }\n";
+    let (n_got, a_got) = both("added", first, |p| {
         let mut ca = Client::new(p.port, r#"{"verbose":false,"user":"a","pass":"a"}"#);
         ca.send("SUB x 1\r\nPING\r\n");
-        while ca.line() != "PONG\r\n" {}
+        ca.pong();
         p.write(
             "accounts { APP { users: [{user: a, password: a}] }, \
              NEW { users: [{user: n, password: n}] } }\n",
@@ -881,61 +756,41 @@ fn an_account_a_reload_adds_takes_its_users_apart_from_the_others() {
         cn.send("SUB x 1\r\nPUB x 2\r\nhi\r\nPING\r\n");
         let n_got = [cn.line(), cn.line(), cn.line()];
         ca.send("PING\r\n");
-        let a_got = ca.line();
-        seen.push((n_got, a_got));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    let (n_got, a_got) = &seen[0];
-    assert_eq!(n_got, &["MSG x 1 2\r\n", "hi\r\n", "PONG\r\n"]);
+        (n_got, ca.line())
+    });
+    assert_eq!(n_got, ["MSG x 1 2\r\n", "hi\r\n", "PONG\r\n"]);
     assert_eq!(a_got, "PONG\r\n", "APP got nothing of NEW");
 }
 
 #[test]
 fn clients_of_a_server_without_users_must_log_in_once_it_has_some() {
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("open-{i}"));
-        let p = Proc::start(bin, &d, "", &[]);
+    let (got, required) = both("open", "", |p| {
         let c = Client::new(p.port, r#"{"verbose":false}"#);
         p.write("authorization { users: [{user: a, password: a}] }\n");
         p.hup();
         let fresh = Client::new(p.port, r#"{"verbose":false,"user":"a","pass":"a"}"#);
-        seen.push((c.rest(), fresh.info["auth_required"].clone()));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    assert_eq!(seen[0].0, "-ERR 'Authorization Violation'\r\n");
-    assert_eq!(seen[0].1, true);
+        (c.rest(), fresh.info["auth_required"].clone())
+    });
+    assert_eq!(got, "-ERR 'Authorization Violation'\r\n");
+    assert_eq!(required, true);
 }
 
 #[test]
 fn the_no_auth_user_goes_only_with_its_user() {
     let users = "authorization { users: [{user: a, password: a}, {user: b, password: b}] }\n";
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("noauth-{i}"));
-        let p = Proc::start(bin, &d, &format!("{users}no_auth_user: a\n"), &[]);
+    let lines = both("noauth", &format!("{users}no_auth_user: a\n"), |p| {
         p.write(&format!("{users}no_auth_user: b\n"));
         p.hup();
         p.write(users);
         p.hup();
         p.write("authorization { users: [{user: b, password: b}] }\n");
         p.hup();
-        let lines = lines_once(&p.log(), |l| {
-            l.iter().filter(|l| ends_reload(l)).count() >= 3
-        });
-        seen.push(reload_lines(&lines));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
+        reload_lines(&p.reloaded(3))
+    });
     let refused =
         "[ERR] Failed to reload server configuration: config reload not supported for NoAuthUser";
     assert_eq!(
-        seen[0],
+        lines,
         [
             r#"[INF] Trapped "hangup" signal"#.to_owned(),
             format!("{refused}: old=a, new=b"),
@@ -954,10 +809,7 @@ fn nkey_users_and_the_login_timeout_reload_and_links_of_accounts_do_not() {
     let key = nkeys::KeyPair::new_user().public_key();
     let accounts =
         "accounts { A { exports: [{stream: x}] }, B { users: [{user: b, password: b}] } }\n";
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        let d = dir(&format!("nkeys-{i}"));
-        let p = Proc::start(bin, &d, accounts, &[]);
+    let script = |p: &Proc| {
         let users = format!("authorization {{ timeout: 3, users: [{{nkey: {key}}}] }}\n");
         p.write(&format!("{accounts}{users}"));
         p.hup();
@@ -967,16 +819,13 @@ fn nkey_users_and_the_login_timeout_reload_and_links_of_accounts_do_not() {
         );
         p.write(&format!("{imports}{users}"));
         p.hup();
-        let lines = lines_once(&p.log(), |l| {
-            l.iter().filter(|l| ends_reload(l)).count() >= 2
-        });
-        seen.push(reload_lines(&lines));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq[..6], go[..6], "naq, then nats-server");
-    }
+        reload_lines(&p.reloaded(2))
+    };
+    let lines = both_with("nkeys", accounts, script, |naq, go| {
+        same(&&naq[..6], &&go[..6]);
+    });
     assert_eq!(
-        seen[0],
+        lines,
         [
             r#"[INF] Trapped "hangup" signal"#,
             "[INF] Reloaded: authorization nkey users",
@@ -1020,15 +869,6 @@ fn cert(dir: &Path, name: &str, year: i32) {
     std::fs::write(dir.join(format!("{name}-key.pem")), key.serialize_pem()).unwrap();
 }
 
-/// The first `INFO` a client of `port` gets.
-fn first_info(port: u16) -> serde_json::Value {
-    let w = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    w.set_read_timeout(Some(WAIT)).unwrap();
-    let mut line = String::new();
-    BufReader::new(w).read_line(&mut line).unwrap();
-    serde_json::from_str(line.strip_prefix("INFO ").unwrap().trim_end()).unwrap()
-}
-
 /// What `bin` does as its TLS changes: whether its first and last
 /// clients must use TLS, and its reload lines.
 fn tls_steps(i: usize, bin: &Path) -> (serde_json::Value, serde_json::Value, Vec<String>) {
@@ -1041,7 +881,7 @@ fn tls_steps(i: usize, bin: &Path) -> (serde_json::Value, serde_json::Value, Vec
     );
     let tls = format!("tls {{ {files} }}\n");
     let p = Proc::start(bin, &d, &tls, &[]);
-    let before = first_info(p.port)["tls_required"].clone();
+    let before = Client::dial(p.port).info["tls_required"].clone();
     // The same files, then others in their place.
     p.hup();
     cert(&d, "a", 2031);
@@ -1052,31 +892,21 @@ fn tls_steps(i: usize, bin: &Path) -> (serde_json::Value, serde_json::Value, Vec
     p.hup();
     p.write("");
     p.hup();
-    let after = first_info(p.port)["tls_required"].clone();
+    let after = Client::dial(p.port).info["tls_required"].clone();
     let ca = d.join("a-cert.pem").display().to_string();
     p.write(&format!(
         "tls {{ {files}, verify_and_map: true, ca_file: {ca:?} }}\n"
     ));
     p.hup();
-    let lines = lines_once(&p.log(), |l| {
-        l.iter().filter(|l| ends_reload(l)).count() >= 5
-    });
-    (before, after, reload_lines(&lines))
+    (before, after, reload_lines(&p.reloaded(5)))
 }
 
 #[test]
 fn tls_reloads_for_new_clients_when_its_files_or_settings_change() {
-    let mut seen = Vec::new();
-    for (i, bin) in binaries().iter().enumerate() {
-        seen.push(tls_steps(i, bin));
-    }
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    let (before, after, lines) = &seen[0];
+    let (before, after, lines) = common::both(|i, go| tls_steps(i, bin(go)));
     assert_eq!(
         (before, after),
-        (&serde_json::json!(true), &serde_json::Value::Null)
+        (serde_json::json!(true), serde_json::Value::Null)
     );
     let trapped = r#"[INF] Trapped "hangup" signal"#;
     let (users, accounts) = (
@@ -1136,9 +966,6 @@ fn new_clients_get_the_certificates_a_reload_read_and_websocket_ones_too() {
         fallback: None,
     };
     let opts = Options {
-        host: "127.0.0.1".into(),
-        port: 0,
-        lanes: 1,
         http_port: Some(0),
         tls: Some(tls("a")),
         websocket: Some(naq::Websocket {
@@ -1146,16 +973,11 @@ fn new_clients_get_the_certificates_a_reload_read_and_websocket_ones_too() {
             tls: Some(tls("w")),
             ..naq::Websocket::default()
         }),
-        ..Options::default()
+        ..local()
     };
     let server = Server::start(&opts).unwrap();
     let varz = || {
-        let mut c = TcpStream::connect(server.monitor_addr().unwrap()).unwrap();
-        c.write_all(b"GET /varz HTTP/1.0\r\n\r\n").unwrap();
-        let mut body = String::new();
-        c.read_to_string(&mut body).unwrap();
-        let (_, json) = body.split_once("\r\n\r\n").unwrap();
-        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let v = get(server.monitor_addr().unwrap(), "/varz");
         (
             v["tls_cert_not_after"].as_str().unwrap()[..4].to_owned(),
             v["websocket"]["tls_cert_not_after"].as_str().unwrap()[..4].to_owned(),
@@ -1235,7 +1057,7 @@ fn remote_steps(i: usize, bin: &Path, linked: &str, denied: &str) -> (Vec<String
 
 #[test]
 fn remotes_to_nats_server_hubs_come_and_go_on_a_reload() {
-    let Some(go) = std::env::var_os("NAQ_GO").map(PathBuf::from) else {
+    let Some(go) = go_bin() else {
         eprintln!("skipped: NAQ_GO is not set");
         return;
     };
@@ -1250,16 +1072,8 @@ fn remotes_to_nats_server_hubs_come_and_go_on_a_reload() {
     let url = format!("nats-leaf://127.0.0.1:{hub_port}");
     let linked = format!("leafnodes {{ remotes: [{{url: {url:?}}}] }}\n");
     let denied = format!("leafnodes {{ remotes: [{{url: {url:?}, deny_imports: [x]}}] }}\n");
-    let seen: Vec<_> = binaries()
-        .iter()
-        .enumerate()
-        .map(|(i, bin)| remote_steps(i, bin, &linked, &denied))
-        .collect();
+    let (reloads, leafs) = common::both(|i, go| remote_steps(i, bin(go), &linked, &denied));
     drop(hub);
-    if let [naq, go] = &seen[..] {
-        assert_eq!(naq, go, "naq, then nats-server");
-    }
-    let (reloads, leafs) = &seen[0];
     let name = format!(r#"urls=["{url}"], account="$G""#);
     assert_eq!(
         reloads[1],

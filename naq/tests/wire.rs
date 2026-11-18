@@ -43,12 +43,16 @@ mod ws;
 
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use naq_proto::client::{self, ClientOp, Limits, Parsed};
+
+mod common;
+
+use common::{accepts, free_port, go_bin};
 
 /// Longest wait for the replies to one sync.
 const WAIT: Duration = Duration::from_secs(2);
@@ -70,7 +74,7 @@ const INFO_KEYS: &[&str] = &[
 
 #[test]
 fn naq_replies_as_nats_server_does() {
-    let go = std::env::var_os("NAQ_GO").map(PathBuf::from);
+    let go = go_bin();
     let bless = std::env::var_os("NAQ_BLESS").is_some();
     assert!(go.is_some() || !bless, "NAQ_BLESS needs NAQ_GO");
     let mut failed = String::new();
@@ -153,15 +157,6 @@ fn mismatch(path: &Path, who: &str, want: &str, got: &str) -> String {
         window(&w),
         window(&g),
     )
-}
-
-/// A port free a moment ago.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 /// Replays `script` against the server at `addr`, with WebSocket clients
@@ -585,11 +580,7 @@ impl GoServer {
             .spawn()
             .unwrap();
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while TcpStream::connect(addr).is_err() {
-            assert!(Instant::now() < deadline, "nats-server did not start");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        accepts(addr);
         GoServer { child, addr }
     }
 }
